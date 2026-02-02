@@ -69,15 +69,29 @@ check_python() {
     print_success "Python版本: $PYTHON_VERSION"
 }
 
+# 安装依赖
+install_dependencies() {
+    print_info "安装依赖..."
+    pip install -r requirements.txt
+    print_success "依赖安装完成"
+}
+
 # 检查依赖
 check_dependencies() {
     print_info "检查依赖..."
 
     # 检查关键包
-    python -c "import pandas" 2>/dev/null || {
-        print_warning "缺少依赖，正在安装..."
+    MISSING=""
+    python -c "import pandas" 2>/dev/null || MISSING="$MISSING pandas"
+    python -c "import streamlit" 2>/dev/null || MISSING="$MISSING streamlit"
+    python -c "import plotly" 2>/dev/null || MISSING="$MISSING plotly"
+    python -c "import xgboost" 2>/dev/null || MISSING="$MISSING xgboost"
+
+    if [ -n "$MISSING" ]; then
+        print_warning "缺少依赖:$MISSING"
+        print_info "正在安装所有依赖..."
         pip install -r requirements.txt
-    }
+    fi
 
     print_success "依赖检查完成"
 }
@@ -192,6 +206,7 @@ show_help() {
     echo ""
     echo "命令:"
     echo "  (无参数)    启动仪表盘"
+    echo "  install     安装所有依赖"
     echo "  update      更新数据后启动仪表盘"
     echo "  dashboard   仅启动仪表盘"
     echo "  data        仅更新数据"
@@ -199,6 +214,7 @@ show_help() {
     echo "  help        显示此帮助信息"
     echo ""
     echo "示例:"
+    echo "  ./start.sh install      # 首次使用，安装依赖"
     echo "  ./start.sh              # 启动仪表盘"
     echo "  ./start.sh update       # 更新数据并启动"
     echo "  ./start.sh test         # 运行所有测试"
@@ -209,6 +225,13 @@ main() {
     show_banner
 
     case "${1:-dashboard}" in
+        install)
+            check_python
+            install_dependencies
+            check_config
+            create_directories
+            print_success "安装完成！运行 ./start.sh 启动系统"
+            ;;
         update)
             check_python
             check_dependencies

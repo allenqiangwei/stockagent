@@ -54,6 +54,7 @@ if not exist "config\config.yaml" (
 
 REM 处理命令
 if "%1"=="" goto dashboard
+if "%1"=="install" goto install
 if "%1"=="update" goto update
 if "%1"=="dashboard" goto dashboard
 if "%1"=="data" goto data
@@ -64,6 +65,12 @@ if "%1"=="-h" goto help
 
 echo %RED%[ERROR]%NC% 未知命令: %1
 goto help
+
+:install
+echo %BLUE%[INFO]%NC% 安装依赖...
+pip install -r requirements.txt
+echo %GREEN%[SUCCESS]%NC% 安装完成！运行 start.bat 启动系统
+goto end
 
 :update
 echo %BLUE%[INFO]%NC% 更新市场数据...
@@ -99,6 +106,7 @@ echo 使用方法: start.bat [命令]
 echo.
 echo 命令:
 echo   (无参数)    启动仪表盘
+echo   install     安装所有依赖
 echo   update      更新数据后启动仪表盘
 echo   dashboard   仅启动仪表盘
 echo   data        仅更新数据
@@ -106,6 +114,7 @@ echo   test        运行测试
 echo   help        显示此帮助信息
 echo.
 echo 示例:
+echo   start.bat install      首次使用，安装依赖
 echo   start.bat              启动仪表盘
 echo   start.bat update       更新数据并启动
 echo   start.bat test         运行所有测试
