@@ -1,0 +1,33 @@
+# TuShare API Token (从 https://tushare.pro 获取)
+tushare:
+  token: "your_tushare_token_here"
+
+# 数据存储路径
+storage:
+  parquet_dir: "data/market_data"
+  sqlite_db: "data/business.db"
+  backup_dir: "data/backups"
+
+# 数据采集设置
+collector:
+  # 主数据源: tushare, akshare, baostock
+  primary_source: "tushare"
+  # 备用数据源列表
+  fallback_sources: ["akshare", "baostock"]
+  # 每次API请求间隔(秒)，避免频率限制
+  request_interval: 0.3
+  # 批量请求大小
+  batch_size: 100
+
+# 新闻爬虫设置
+news:
+  # 爬取的新闻数量
+  max_articles: 20
+  # 请求超时(秒)
+  timeout: 10
+
+# 日志设置
+logging:
+  level: "INFO"
+  file: "logs/stockagent.log"
+  rotation: "10 MB"
