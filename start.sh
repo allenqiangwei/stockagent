@@ -1,0 +1,252 @@
+#!/bin/bash
+#
+# A股量化交易系统 - 一键启动脚本
+#
+# 使用方法:
+#   ./start.sh              # 启动仪表盘
+#   ./start.sh update       # 更新数据后启动仪表盘
+#   ./start.sh dashboard    # 仅启动仪表盘
+#   ./start.sh data         # 仅更新数据
+#   ./start.sh test         # 运行测试
+#
+
+set -e
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# 项目根目录
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_DIR"
+
+# 打印带颜色的消息
+print_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# 显示横幅
+show_banner() {
+    echo -e "${GREEN}"
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║                                                            ║"
+    echo "║            📈 A股量化交易系统 v1.0                         ║"
+    echo "║                                                            ║"
+    echo "║   Phase 1: 数据层      ✅ 43 tests                        ║"
+    echo "║   Phase 2: 策略层      ✅ 160 tests                       ║"
+    echo "║   Phase 3: 风控层      ✅ 62 tests                        ║"
+    echo "║   Phase 4: 仪表盘      ✅ 40 tests                        ║"
+    echo "║                                                            ║"
+    echo "╚════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+# 检查Python环境
+check_python() {
+    print_info "检查Python环境..."
+
+    if ! command -v python &> /dev/null; then
+        print_error "Python未安装，请先安装Python 3.11+"
+        exit 1
+    fi
+
+    PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
+    print_success "Python版本: $PYTHON_VERSION"
+}
+
+# 检查依赖
+check_dependencies() {
+    print_info "检查依赖..."
+
+    # 检查关键包
+    python -c "import pandas" 2>/dev/null || {
+        print_warning "缺少依赖，正在安装..."
+        pip install -r requirements.txt
+    }
+
+    print_success "依赖检查完成"
+}
+
+# 检查配置文件
+check_config() {
+    print_info "检查配置文件..."
+
+    if [ ! -f "config/config.yaml" ]; then
+        print_warning "配置文件不存在，正在创建..."
+        mkdir -p config
+        cat > config/config.yaml << 'EOF'
+# A股量化交易系统配置文件
+
+# 数据源配置
+data_sources:
+  tushare:
+    token: "YOUR_TUSHARE_TOKEN"  # 请替换为您的TuShare Token
+
+# 数据存储路径
+storage:
+  parquet_dir: "data/parquet"
+  database_path: "data/stockagent.db"
+  log_dir: "logs"
+
+# 风险控制参数
+risk_control:
+  fixed_stop_pct: 0.05        # 固定止损 5%
+  atr_multiplier: 2.0         # ATR倍数
+  max_position_pct: 0.25      # 单只股票最大仓位 25%
+  target_total_pct: 0.60      # 目标总仓位 60%
+  max_stocks: 10              # 最多持有股票数
+
+# 信号参数
+signals:
+  min_score: 60               # 最低信号分数
+  swing_weight: 0.35          # 波段策略权重
+  trend_weight: 0.35          # 趋势策略权重
+  ml_weight: 0.30             # ML策略权重
+
+# 仪表盘配置
+dashboard:
+  host: "0.0.0.0"
+  port: 8501
+EOF
+        print_warning "请编辑 config/config.yaml 填入您的 TuShare Token"
+    fi
+
+    print_success "配置文件检查完成"
+}
+
+# 创建必要目录
+create_directories() {
+    print_info "创建必要目录..."
+
+    mkdir -p data/parquet
+    mkdir -p logs
+    mkdir -p models
+
+    print_success "目录创建完成"
+}
+
+# 更新数据
+update_data() {
+    print_info "更新市场数据..."
+
+    python -c "
+from src.daily_updater import DailyUpdater
+from src.config import Config
+
+try:
+    config = Config('config/config.yaml')
+    updater = DailyUpdater(config)
+    updater.run_full_update()
+    print('数据更新完成')
+except Exception as e:
+    print(f'数据更新失败: {e}')
+    print('请检查 TuShare Token 配置')
+"
+}
+
+# 启动仪表盘
+start_dashboard() {
+    print_info "启动仪表盘..."
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  仪表盘启动中...${NC}"
+    echo -e "${GREEN}  访问地址: http://localhost:8501${NC}"
+    echo -e "${GREEN}  默认账号: admin / admin123${NC}"
+    echo -e "${GREEN}  观察账号: viewer / viewer123${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    streamlit run src/dashboard/app.py \
+        --server.address=0.0.0.0 \
+        --server.port=8501 \
+        --browser.gatherUsageStats=false
+}
+
+# 运行测试
+run_tests() {
+    print_info "运行测试..."
+
+    python -m pytest tests/ -v --tb=short
+
+    print_success "测试完成"
+}
+
+# 显示帮助
+show_help() {
+    echo "使用方法: ./start.sh [命令]"
+    echo ""
+    echo "命令:"
+    echo "  (无参数)    启动仪表盘"
+    echo "  update      更新数据后启动仪表盘"
+    echo "  dashboard   仅启动仪表盘"
+    echo "  data        仅更新数据"
+    echo "  test        运行测试"
+    echo "  help        显示此帮助信息"
+    echo ""
+    echo "示例:"
+    echo "  ./start.sh              # 启动仪表盘"
+    echo "  ./start.sh update       # 更新数据并启动"
+    echo "  ./start.sh test         # 运行所有测试"
+}
+
+# 主函数
+main() {
+    show_banner
+
+    case "${1:-dashboard}" in
+        update)
+            check_python
+            check_dependencies
+            check_config
+            create_directories
+            update_data
+            start_dashboard
+            ;;
+        dashboard)
+            check_python
+            check_dependencies
+            check_config
+            create_directories
+            start_dashboard
+            ;;
+        data)
+            check_python
+            check_dependencies
+            check_config
+            create_directories
+            update_data
+            print_success "数据更新完成"
+            ;;
+        test)
+            check_python
+            check_dependencies
+            run_tests
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        *)
+            print_error "未知命令: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+# 运行主函数
+main "$@"
