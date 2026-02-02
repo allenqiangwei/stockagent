@@ -23,6 +23,9 @@ NC='\033[0m' # No Color
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+# 虚拟环境目录
+VENV_DIR="$PROJECT_DIR/venv"
+
 # 打印带颜色的消息
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -60,13 +63,46 @@ show_banner() {
 check_python() {
     print_info "检查Python环境..."
 
-    if ! command -v python &> /dev/null; then
+    if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
         print_error "Python未安装，请先安装Python 3.11+"
         exit 1
     fi
 
-    PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
+    # 优先使用python3
+    if command -v python3 &> /dev/null; then
+        PYTHON_CMD="python3"
+    else
+        PYTHON_CMD="python"
+    fi
+
+    PYTHON_VERSION=$($PYTHON_CMD --version 2>&1 | cut -d' ' -f2)
     print_success "Python版本: $PYTHON_VERSION"
+}
+
+# 设置虚拟环境
+setup_venv() {
+    print_info "检查虚拟环境..."
+
+    # 如果已经在虚拟环境中，跳过
+    if [ -n "$VIRTUAL_ENV" ]; then
+        print_success "已在虚拟环境中: $VIRTUAL_ENV"
+        return 0
+    fi
+
+    # 检查虚拟环境是否存在
+    if [ ! -d "$VENV_DIR" ]; then
+        print_warning "虚拟环境不存在，正在创建..."
+        $PYTHON_CMD -m venv "$VENV_DIR"
+        print_success "虚拟环境创建完成: $VENV_DIR"
+    fi
+
+    # 激活虚拟环境
+    print_info "激活虚拟环境..."
+    source "$VENV_DIR/bin/activate"
+    print_success "虚拟环境已激活"
+
+    # 升级pip
+    pip install --upgrade pip -q
 }
 
 # 安装依赖
@@ -227,6 +263,7 @@ main() {
     case "${1:-dashboard}" in
         install)
             check_python
+            setup_venv
             install_dependencies
             check_config
             create_directories
@@ -234,6 +271,7 @@ main() {
             ;;
         update)
             check_python
+            setup_venv
             check_dependencies
             check_config
             create_directories
@@ -242,6 +280,7 @@ main() {
             ;;
         dashboard)
             check_python
+            setup_venv
             check_dependencies
             check_config
             create_directories
@@ -249,6 +288,7 @@ main() {
             ;;
         data)
             check_python
+            setup_venv
             check_dependencies
             check_config
             create_directories
@@ -257,6 +297,7 @@ main() {
             ;;
         test)
             check_python
+            setup_venv
             check_dependencies
             run_tests
             ;;
