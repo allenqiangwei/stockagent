@@ -212,6 +212,7 @@ async def lifespan(app: FastAPI):
     # Start background services
     from src.services.news_service import start_news_service, stop_news_service
     from api.services.signal_scheduler import start_signal_scheduler, stop_signal_scheduler
+    from api.services.news_sentiment_scheduler import start_news_sentiment_scheduler, stop_news_sentiment_scheduler
 
     start_news_service()
     logger.info("News service started.")
@@ -222,8 +223,11 @@ async def lifespan(app: FastAPI):
         scheduler.get_next_run_time(),
     )
 
+    start_news_sentiment_scheduler()
+
     yield
 
+    stop_news_sentiment_scheduler()
     stop_signal_scheduler()
     stop_news_service()
     logger.info("Shutting down.")
