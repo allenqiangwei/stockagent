@@ -457,6 +457,60 @@ def _evaluate_consecutive(
     return True
 
 
+def _evaluate_pct_diff(
+    rule: Dict[str, Any], row: pd.Series, left_val: float, operator: str
+) -> bool:
+    """Evaluate percentage difference: (field - compare_field) / compare_field * 100."""
+    compare_field = rule.get("compare_field", "")
+    compare_params = rule.get("compare_params")
+    compare_col = resolve_column_name(compare_field, compare_params)
+    if compare_col not in row.index:
+        return False
+    base_val = row[compare_col]
+    if pd.isna(base_val):
+        return False
+    try:
+        base_val = float(base_val)
+        left_val = float(left_val)
+    except (ValueError, TypeError):
+        return False
+    if base_val == 0:
+        return False
+    pct = (left_val - base_val) / base_val * 100
+    threshold = float(rule.get("compare_value", 0))
+    return _compare(pct, operator, threshold)
+
+
+def _evaluate_pct_change(
+    rule: Dict[str, Any],
+    col_name: str,
+    df_slice: Optional[pd.DataFrame],
+    left_val: float,
+    operator: str,
+) -> bool:
+    """Evaluate N-day percentage change: (today - N_days_ago) / N_days_ago * 100."""
+    if df_slice is None:
+        return False
+    n = rule.get("lookback_n", 1)
+    if len(df_slice) < n + 1:
+        return False
+    if col_name not in df_slice.columns:
+        return False
+    past_val = df_slice[col_name].iloc[-(n + 1)]
+    if pd.isna(past_val):
+        return False
+    try:
+        past_val = float(past_val)
+        left_val = float(left_val)
+    except (ValueError, TypeError):
+        return False
+    if past_val == 0:
+        return False
+    pct = (left_val - past_val) / past_val * 100
+    threshold = float(rule.get("compare_value", 0))
+    return _compare(pct, operator, threshold)
+
+
 # ── 条件评估（买入/卖出触发） ─────────────────────────────
 
 def evaluate_conditions(
