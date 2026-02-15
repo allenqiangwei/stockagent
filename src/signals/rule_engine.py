@@ -302,7 +302,7 @@ def evaluate_rules(
     reasons = []
 
     for rule in rules:
-        triggered = _evaluate_single_rule(rule, latest)
+        triggered = _evaluate_single_rule(rule, latest, df_slice=indicator_df)
         if triggered:
             total_score += rule.get("score", 0)
             label = rule.get("label", "")
@@ -313,8 +313,16 @@ def evaluate_rules(
     return final_score, reasons
 
 
-def _evaluate_single_rule(rule: Dict[str, Any], row: pd.Series) -> bool:
-    """评估单条规则是否被触发"""
+def _evaluate_single_rule(
+    rule: Dict[str, Any], row: pd.Series, df_slice: Optional[pd.DataFrame] = None
+) -> bool:
+    """评估单条规则是否被触发
+
+    Args:
+        rule: 规则字典
+        row: 当前行（最新数据点）
+        df_slice: 截止到当前行的完整 DataFrame（lookback 类型条件需要）
+    """
     field = rule.get("field", "")
     operator = rule.get("operator", ">")
     compare_type = rule.get("compare_type", "value")
@@ -322,6 +330,10 @@ def _evaluate_single_rule(rule: Dict[str, Any], row: pd.Series) -> bool:
 
     # 将 field+params 映射到实际列名
     col_name = resolve_column_name(field, params)
+
+    # ── consecutive 类型：不需要 left_val，直接看序列 ──
+    if compare_type == "consecutive":
+        return _evaluate_consecutive(rule, col_name, df_slice)
 
     # 获取左值
     if col_name not in row.index:
@@ -342,6 +354,18 @@ def _evaluate_single_rule(rule: Dict[str, Any], row: pd.Series) -> bool:
         right_val = row[compare_col]
         if pd.isna(right_val):
             return False
+    elif compare_type in ("lookback_min", "lookback_max"):
+        right_val = _get_lookback_extreme(rule, col_name, df_slice, compare_type)
+        if right_val is None:
+            return False
+    elif compare_type == "lookback_value":
+        right_val = _get_lookback_value(rule, df_slice)
+        if right_val is None:
+            return False
+    elif compare_type == "pct_diff":
+        return _evaluate_pct_diff(rule, row, left_val, operator)
+    elif compare_type == "pct_change":
+        return _evaluate_pct_change(rule, col_name, df_slice, left_val, operator)
     else:
         right_val = rule.get("compare_value", 0)
 
@@ -351,16 +375,86 @@ def _evaluate_single_rule(rule: Dict[str, Any], row: pd.Series) -> bool:
     except (ValueError, TypeError):
         return False
 
-    if operator == ">":
-        return left_val > right_val
-    elif operator == "<":
-        return left_val < right_val
-    elif operator == ">=":
-        return left_val >= right_val
-    elif operator == "<=":
-        return left_val <= right_val
+    return _compare(left_val, operator, right_val)
 
+
+def _compare(left: float, operator: str, right: float) -> bool:
+    """Apply comparison operator."""
+    if operator == ">":
+        return left > right
+    elif operator == "<":
+        return left < right
+    elif operator == ">=":
+        return left >= right
+    elif operator == "<=":
+        return left <= right
     return False
+
+
+def _get_lookback_extreme(
+    rule: Dict[str, Any], col_name: str, df_slice: Optional[pd.DataFrame], mode: str
+) -> Optional[float]:
+    """Get MIN or MAX of a field over the last N days (excluding today)."""
+    if df_slice is None:
+        return None
+    n = rule.get("lookback_n", 5)
+    lookback_field = rule.get("lookback_field", rule.get("field", ""))
+    lookback_params = rule.get("lookback_params", rule.get("params"))
+    lookback_col = resolve_column_name(lookback_field, lookback_params)
+    if lookback_col not in df_slice.columns:
+        return None
+    if len(df_slice) < n + 1:
+        return None
+    window = df_slice[lookback_col].iloc[-(n + 1):-1]
+    if window.isna().all():
+        return None
+    if mode == "lookback_min":
+        return float(window.min())
+    else:
+        return float(window.max())
+
+
+def _get_lookback_value(
+    rule: Dict[str, Any], df_slice: Optional[pd.DataFrame]
+) -> Optional[float]:
+    """Get value of lookback_field from N days ago."""
+    if df_slice is None:
+        return None
+    n = rule.get("lookback_n", 1)
+    lookback_field = rule.get("lookback_field", rule.get("field", ""))
+    lookback_params = rule.get("lookback_params", rule.get("params"))
+    lookback_col = resolve_column_name(lookback_field, lookback_params)
+    if lookback_col not in df_slice.columns:
+        return None
+    if len(df_slice) < n + 1:
+        return None
+    val = df_slice[lookback_col].iloc[-(n + 1)]
+    if pd.isna(val):
+        return None
+    return float(val)
+
+
+def _evaluate_consecutive(
+    rule: Dict[str, Any], col_name: str, df_slice: Optional[pd.DataFrame]
+) -> bool:
+    """Check if field has been consecutively rising/falling for N days."""
+    if df_slice is None:
+        return False
+    n = rule.get("lookback_n", 3)
+    consecutive_type = rule.get("consecutive_type", "rising")
+    if col_name not in df_slice.columns:
+        return False
+    if len(df_slice) < n + 1:
+        return False
+    values = df_slice[col_name].iloc[-(n + 1):].values
+    if any(pd.isna(v) for v in values):
+        return False
+    for i in range(1, len(values)):
+        if consecutive_type == "rising" and values[i] <= values[i - 1]:
+            return False
+        elif consecutive_type == "falling" and values[i] >= values[i - 1]:
+            return False
+    return True
 
 
 # ── 条件评估（买入/卖出触发） ─────────────────────────────
@@ -392,7 +486,7 @@ def evaluate_conditions(
 
     if mode == "AND":
         for cond in conditions:
-            if _evaluate_single_rule(cond, latest):
+            if _evaluate_single_rule(cond, latest, df_slice=indicator_df):
                 label = cond.get("label", "")
                 if label:
                     triggered_labels.append(label)
@@ -403,7 +497,7 @@ def evaluate_conditions(
 
     else:  # OR
         for cond in conditions:
-            if _evaluate_single_rule(cond, latest):
+            if _evaluate_single_rule(cond, latest, df_slice=indicator_df):
                 label = cond.get("label", "")
                 if label:
                     triggered_labels.append(label)
