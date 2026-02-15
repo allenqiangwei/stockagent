@@ -270,6 +270,13 @@ def collect_indicator_params(
                 rule.get("compare_params")
             )
 
+        # 收集 lookback 字段
+        if rule.get("lookback_field"):
+            _add_to_result(
+                rule.get("lookback_field", ""),
+                rule.get("lookback_params", rule.get("params"))
+            )
+
     # OBV 无参数但始终需要计算（如果有规则引用）
     for rule in all_rules:
         field = rule.get("field", "")
@@ -673,7 +680,16 @@ def validate_rule(rule: Dict[str, Any]) -> Optional[str]:
     if operator not in [op[0] for op in OPERATORS]:
         return f"未知运算符: {operator}"
 
+    VALID_COMPARE_TYPES = {
+        "value", "field",
+        "lookback_min", "lookback_max", "lookback_value", "consecutive",
+        "pct_diff", "pct_change",
+    }
+
     compare_type = rule.get("compare_type", "value")
+    if compare_type not in VALID_COMPARE_TYPES:
+        return f"未知比较类型: {compare_type}"
+
     if compare_type == "field":
         cf = rule.get("compare_field", "")
         if not get_field_group(cf) and not get_extended_field_group(cf):
@@ -683,8 +699,27 @@ def validate_rule(rule: Dict[str, Any]) -> Optional[str]:
             float(rule.get("compare_value", 0))
         except (ValueError, TypeError):
             return "比较值必须是数字"
-    else:
-        return f"未知比较类型: {compare_type}"
+    elif compare_type in ("lookback_min", "lookback_max", "lookback_value", "consecutive"):
+        n = rule.get("lookback_n")
+        if not isinstance(n, int) or n < 1 or n > 60:
+            return f"lookback_n 必须是 1-60 的整数（当前: {n}）"
+        if compare_type == "consecutive":
+            ct = rule.get("consecutive_type", "")
+            if ct not in ("rising", "falling"):
+                return f"consecutive_type 必须是 rising 或 falling（当前: {ct}）"
+    elif compare_type in ("pct_diff", "pct_change"):
+        try:
+            float(rule.get("compare_value", 0))
+        except (ValueError, TypeError):
+            return "比较值必须是数字"
+        if compare_type == "pct_diff":
+            cf = rule.get("compare_field", "")
+            if not cf:
+                return "pct_diff 类型必须指定 compare_field"
+        if compare_type == "pct_change":
+            n = rule.get("lookback_n")
+            if not isinstance(n, int) or n < 1 or n > 60:
+                return f"lookback_n 必须是 1-60 的整数（当前: {n}）"
 
     score = rule.get("score", 0)
     try:
