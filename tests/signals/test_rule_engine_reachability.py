@@ -35,6 +35,15 @@ class TestRangeContradiction:
         reachable, reason = check_reachability(conditions)
         assert not reachable
 
+    def test_single_point_range_valid(self):
+        """RSI >= 70 AND RSI <= 70 is valid (exactly 70)."""
+        conditions = [
+            {"field": "RSI", "operator": ">=", "compare_type": "value", "compare_value": 70, "params": {"period": 14}},
+            {"field": "RSI", "operator": "<=", "compare_type": "value", "compare_value": 70, "params": {"period": 14}},
+        ]
+        reachable, reason = check_reachability(conditions)
+        assert reachable
+
     def test_different_fields_ok(self):
         """RSI > 70 AND KDJ_K < 25 are different fields — always reachable."""
         conditions = [

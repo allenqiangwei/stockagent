@@ -487,9 +487,10 @@ def check_reachability(
         elif operator in ("<", "<="):
             b["upper"] = min(b["upper"], val)
 
-    # Check 1: Range contradiction — lower >= upper means impossible
+    # Check 1: Range contradiction — lower > upper means impossible
+    # Note: lower == upper is valid for single-point ranges (>= X AND <= X)
     for col_name, b in bounds.items():
-        if b["lower"] >= b["upper"]:
+        if b["lower"] > b["upper"]:
             return False, f"条件矛盾: {col_name} 要求同时 >{b['lower']} 且 <{b['upper']}"
 
     # Check 2: Out-of-range for bounded indicators
