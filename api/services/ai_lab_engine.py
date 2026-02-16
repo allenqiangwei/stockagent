@@ -35,6 +35,9 @@ from src.backtest.portfolio_engine import PortfolioBacktestEngine, SignalExplosi
 
 logger = logging.getLogger(__name__)
 
+# Limit concurrent backtests to avoid SQLite contention (P14)
+_BACKTEST_SEMAPHORE = threading.Semaphore(3)
+
 
 # ── Progress buffer (thread-safe, multi-consumer) ──────────
 
@@ -908,9 +911,48 @@ class AILabEngine:
 
             elif ctype == "field":
                 cf = cond.get("compare_field", "")
+                price_fields = {"close", "open", "high", "low", "volume"}
+
+                # ── P22: Auto-swap reversed field comparisons ──
+                if field not in price_fields and cf in price_fields:
+                    old_field, old_cf = field, cf
+                    cond["field"], cond["compare_field"] = cf, field
+                    old_params = cond.get("params")
+                    old_cp = cond.get("compare_params")
+                    cond["compare_params"] = old_params if old_params else cond.pop("compare_params", None)
+                    if old_cp:
+                        cond["params"] = old_cp
+                    else:
+                        cond.pop("params", None)
+                    flip = {">": "<", "<": ">", ">=": "<=", "<=": ">="}
+                    cond["operator"] = flip.get(cond.get("operator", ">"), ">")
+                    errors.append(f"自动修正: {old_field} vs {old_cf} → {cf} vs {field}")
+                    field, cf = cf, field
+
                 if not get_field_group(cf) and not is_extended_indicator(cf):
                     errors.append(f"不支持的比较指标: {cf}")
                     continue
+
+                # ── P22: Auto-fill default params for compare_field ──
+                if not cond.get("compare_params"):
+                    _builtin_defaults = {
+                        "MA": {"period": 20}, "EMA": {"period": 20},
+                        "PSAR": {"step": 0.02, "max_step": 0.2},
+                        "BOLL_upper": {"length": 20, "std": 2.0},
+                        "BOLL_middle": {"length": 20, "std": 2.0},
+                        "BOLL_lower": {"length": 20, "std": 2.0},
+                    }
+                    if cf in _builtin_defaults:
+                        cond["compare_params"] = _builtin_defaults[cf]
+                        errors.append(f"自动填充 {cf} 默认参数: {_builtin_defaults[cf]}")
+                    else:
+                        ext_group = get_extended_field_group(cf)
+                        if ext_group:
+                            meta = EXTENDED_INDICATORS[ext_group]
+                            if meta["params"]:
+                                defaults = {k: v["default"] for k, v in meta["params"].items()}
+                                cond["compare_params"] = defaults
+                                errors.append(f"自动填充 {cf} 默认参数: {defaults}")
 
                 # ── Same-field comparison detection ──
                 cp = cond.get("compare_params") or {}
@@ -986,10 +1028,64 @@ class AILabEngine:
             return base
         return None
 
+    # ── Quick signal pre-scan (P4) ──────────────────────────
+    _PRESCAN_SAMPLE_SIZE = 100
+    _PRESCAN_DAYS = 60
+
+    def _quick_signal_check(
+        self, strat: ExperimentStrategy, stock_data: dict,
+    ) -> bool:
+        """Quick pre-scan: sample stocks and check if any buy signal fires.
+
+        Returns True if at least one signal found (strategy is viable).
+        Returns False if zero signals across all samples (likely zero-trade).
+        """
+        import random
+        import pandas as pd
+        from src.signals.rule_engine import evaluate_conditions
+
+        buy_conditions = strat.buy_conditions or []
+        if not buy_conditions:
+            return False
+
+        codes = list(stock_data.keys())
+        if len(codes) > self._PRESCAN_SAMPLE_SIZE:
+            codes = random.sample(codes, self._PRESCAN_SAMPLE_SIZE)
+
+        all_rules = buy_conditions + (strat.sell_conditions or [])
+        collected = collect_indicator_params(all_rules)
+        config = IndicatorConfig.from_collected_params(collected)
+        calculator = IndicatorCalculator(config)
+
+        for code in codes:
+            df = stock_data.get(code)
+            if df is None or df.empty:
+                continue
+
+            df_tail = df.tail(self._PRESCAN_DAYS).copy()
+            if len(df_tail) < 10:
+                continue
+
+            try:
+                indicators = calculator.calculate_all(df_tail)
+                df_full = pd.concat(
+                    [df_tail.reset_index(drop=True), indicators.reset_index(drop=True)],
+                    axis=1,
+                )
+                for i in range(max(0, len(df_full) - 30), len(df_full)):
+                    df_slice = df_full.iloc[: i + 1]
+                    triggered, _ = evaluate_conditions(buy_conditions, df_slice, mode="AND")
+                    if triggered:
+                        return True
+            except Exception:
+                continue
+
+        return False
+
     # ── Backtest ──────────────────────────────────────────
 
-    # Per-strategy backtest timeout in seconds (5 minutes, 15 for combo)
-    BACKTEST_TIMEOUT_SECONDS = 300
+    # Per-strategy backtest timeout in seconds (10 minutes, 15 for combo)
+    BACKTEST_TIMEOUT_SECONDS = 600
     COMBO_BACKTEST_TIMEOUT_SECONDS = 900
 
     def _run_single_backtest(
@@ -1007,6 +1103,26 @@ class AILabEngine:
         Supports combo strategies: if strat.regime_stats has type="combo",
         loads member strategies and uses voting logic.
         """
+        _BACKTEST_SEMAPHORE.acquire()
+        try:
+            self._run_single_backtest_impl(
+                strat, stock_data, start_date, end_date,
+                exp, regime_map, index_return_pct,
+            )
+        finally:
+            _BACKTEST_SEMAPHORE.release()
+
+    def _run_single_backtest_impl(
+        self,
+        strat: ExperimentStrategy,
+        stock_data: dict,
+        start_date: str,
+        end_date: str,
+        exp: Experiment = None,
+        regime_map: dict | None = None,
+        index_return_pct: float = 0.0,
+    ):
+        """Inner implementation of single backtest (called with semaphore held)."""
         strat.status = "backtesting"
         self.db.commit()
 
@@ -1021,6 +1137,16 @@ class AILabEngine:
         # Combo config may be in regime_stats directly (type=combo), embedded
         # (_combo_config key after a successful run), or recoverable from siblings.
         combo_config = self._extract_combo_config(strat)
+
+        # ── Quick signal pre-scan for non-combo strategies (P4) ──
+        if not combo_config and stock_data:
+            if not self._quick_signal_check(strat, stock_data):
+                strat.status = "invalid"
+                strat.error_message = "预扫描: 100只股票×60天无任何买入信号"
+                strat.score = 0.0
+                self.db.commit()
+                logger.info("Pre-scan: zero signals for %s, marking invalid", strat.name)
+                return
 
         if combo_config:
             from api.models.strategy import Strategy as StrategyModel

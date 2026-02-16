@@ -70,6 +70,23 @@ lookback_n 范围 1-20, 不要用太长的回溯周期
 说明: 计算 (today - N日前) / N日前 * 100, 与 compare_value 比较
 适用于涨跌幅、量能变化等
 
+### 完整示例 — 使用新条件类型
+
+示例策略D（N日新低反弹，使用 lookback_min + pct_change）:
+{{
+  "name": "N日新低反弹_保守版D",
+  "description": "20日新低后3日反弹超2%，KDJ超卖确认",
+  "buy_conditions": [
+    {{"field": "close", "compare_type": "lookback_min", "lookback_field": "close", "lookback_n": 20, "operator": "<=", "label": "创20日新低"}},
+    {{"field": "close", "compare_type": "pct_change", "lookback_n": 3, "operator": ">", "compare_value": 2.0, "label": "3日涨幅>2%"}},
+    {{"field": "KDJ_K", "compare_type": "value", "compare_value": 25, "operator": "<", "params": {{"fastk": 9, "slowk": 3, "slowd": 3}}, "label": "KDJ超卖"}}
+  ],
+  "sell_conditions": [
+    {{"field": "close", "compare_type": "lookback_max", "lookback_field": "close", "lookback_n": 10, "operator": ">=", "label": "创10日新高止盈"}}
+  ],
+  "exit_config": {{"stop_loss_pct": -8.0, "take_profit_pct": 15.0, "max_hold_days": 20}}
+}}
+
 ## 输出格式
 
 输出一个 JSON 对象，包含 "strategies" 数组，每个策略包含：
@@ -136,7 +153,10 @@ lookback_n 范围 1-20, 不要用太长的回溯周期
     - DPO: 小数值，围绕0波动，>0=高于趋势，<0=低于趋势
     - BOLL_upper/BOLL_middle/BOLL_lower: 是实际价格（元），应与 close 做比较（如 close < BOLL_lower），不要用绝对数值
     - VWAP: 是实际价格（元），应与 close 做比较（如 close > VWAP），不要用绝对数值
-13. **扩展指标优先用 field 比较**: BOLL 和 VWAP 是价格类指标，条件应用 compare_type="field"（如 close < BOLL_lower），而非用固定数值。
+13. **field 比较固定模板** — 使用 compare_type="field" 时，field 必须是价格字段(close/open/high/low)，compare_field 是指标字段，不要反过来写:
+    - close > PSAR: {{"field":"close", "compare_type":"field", "operator":">", "compare_field":"PSAR", "compare_params":{{"step":0.02,"max_step":0.2}}, "label":"站上SAR"}}
+    - close > MA_20: {{"field":"close", "compare_type":"field", "operator":">", "compare_field":"MA", "compare_params":{{"period":20}}, "label":"站上MA20"}}
+    - close < BOLL_lower: {{"field":"close", "compare_type":"field", "operator":"<", "compare_field":"BOLL_lower", "compare_params":{{"length":20,"std":2.0}}, "label":"跌破布林下轨"}}
 14. **新条件类型使用建议**:
     - VWAP偏离: 用 pct_diff (close vs VWAP), 阈值 ±1%~±3%
     - N日突破: 用 lookback_max (close >= 20日最高), 配合 volume pct_change
@@ -183,6 +203,19 @@ class DeepSeekClient:
             available_indicators=indicator_docs,
             variant_count=variant_count,
         )
+
+        # P21: keyword detection → force new condition types
+        new_type_keywords = [
+            "N日新低", "N日新高", "连续涨", "连续跌", "连涨", "连跌",
+            "偏离度", "偏离", "涨跌幅", "涨幅", "跌幅", "突破",
+            "新低反弹", "新高突破",
+        ]
+        if any(kw in user_prompt for kw in new_type_keywords):
+            user_prompt += (
+                "\n\n【强制要求】此主题涉及新条件类型，至少2个策略必须使用 "
+                "lookback_min/lookback_max/pct_change/consecutive 中的至少一种，"
+                "而非仅使用 value/field 基础类型。参考示例策略D的格式。"
+            )
 
         logger.info("Calling DeepSeek API for strategy generation...")
         response = self.client.chat.completions.create(
