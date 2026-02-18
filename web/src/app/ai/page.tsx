@@ -33,8 +33,12 @@ import {
   useAIChatPoll,
   useTriggerAnalysis,
   useAnalysisPoll,
+  useBotPortfolio,
+  useBotSummary,
+  useBotReviews,
 } from "@/hooks/use-queries";
-import type { AIReport, AIReportListItem } from "@/types";
+import { bot } from "@/lib/api";
+import type { AIReport, AIReportListItem, BotTradeItem, BotStockTimeline } from "@/types";
 
 // ── helpers ────────────────────────────────────────────
 
@@ -531,6 +535,211 @@ function ChatWidget() {
   );
 }
 
+// ── BotTradingPanel ─────────────────────────────────────
+
+function BotTradingPanel() {
+  const { data: summary } = useBotSummary();
+  const { data: portfolio } = useBotPortfolio();
+  const { data: reviews } = useBotReviews();
+  const [subTab, setSubTab] = useState<"holding" | "closed">("holding");
+  const [expandedCode, setExpandedCode] = useState<string | null>(null);
+  const [timelines, setTimelines] = useState<Record<string, BotStockTimeline>>({});
+
+  const loadTimeline = async (code: string) => {
+    if (timelines[code]) {
+      setExpandedCode(expandedCode === code ? null : code);
+      return;
+    }
+    try {
+      const data = await bot.timeline(code);
+      setTimelines(prev => ({ ...prev, [code]: data }));
+      setExpandedCode(code);
+    } catch { setExpandedCode(code); }
+  };
+
+  const pnlColor = (v: number) => v > 0 ? "text-red-400" : v < 0 ? "text-green-400" : "text-muted-foreground";
+  const pnlSign = (v: number) => v > 0 ? "+" : "";
+
+  return (
+    <div className="p-5 space-y-5 max-w-3xl mx-auto">
+      {/* Summary row */}
+      {summary && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="rounded-lg border border-border/50 bg-card/50 p-3">
+            <div className="text-[10px] text-muted-foreground mb-1">总投入</div>
+            <div className="text-sm font-mono font-semibold">¥{(summary.total_invested || 0).toLocaleString()}</div>
+          </div>
+          <div className="rounded-lg border border-border/50 bg-card/50 p-3">
+            <div className="text-[10px] text-muted-foreground mb-1">当前市值</div>
+            <div className="text-sm font-mono font-semibold">¥{(summary.current_market_value || 0).toLocaleString()}</div>
+          </div>
+          <div className="rounded-lg border border-border/50 bg-card/50 p-3">
+            <div className="text-[10px] text-muted-foreground mb-1">总盈亏</div>
+            <div className={`text-sm font-mono font-semibold ${pnlColor(summary.total_pnl)}`}>
+              {pnlSign(summary.total_pnl)}¥{Math.abs(summary.total_pnl).toLocaleString()} ({pnlSign(summary.total_pnl_pct)}{summary.total_pnl_pct.toFixed(1)}%)
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/50 bg-card/50 p-3">
+            <div className="text-[10px] text-muted-foreground mb-1">持仓/完结</div>
+            <div className="text-sm font-mono font-semibold">{summary.active_positions}只 / {summary.completed_trades}笔</div>
+          </div>
+        </div>
+      )}
+
+      {/* Sub-tabs */}
+      <div className="flex gap-1 border-b border-border/30 pb-0">
+        {(["holding", "closed"] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setSubTab(tab)}
+            className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-[1px] ${
+              subTab === tab
+                ? "border-primary text-primary"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {tab === "holding" ? `当前持仓 (${portfolio?.length || 0})` : `已完结 (${reviews?.length || 0})`}
+          </button>
+        ))}
+      </div>
+
+      {/* Holdings */}
+      {subTab === "holding" && (
+        <div className="space-y-3">
+          {(!portfolio || portfolio.length === 0) ? (
+            <div className="text-center text-muted-foreground text-sm py-10">暂无持仓</div>
+          ) : portfolio.map(h => (
+            <div key={h.stock_code} className="rounded-lg border border-border/50 bg-card/30 overflow-hidden">
+              <button
+                onClick={() => loadTimeline(h.stock_code)}
+                className="w-full text-left p-3 hover:bg-accent/30 transition-colors"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-medium text-sm">{h.stock_name}</span>
+                    <span className="text-xs text-muted-foreground ml-2">{h.stock_code}</span>
+                  </div>
+                  <div className="text-right">
+                    {h.close != null && (
+                      <div className="text-sm font-mono">¥{h.close.toFixed(2)}</div>
+                    )}
+                    {h.pnl != null && (
+                      <div className={`text-xs font-mono ${pnlColor(h.pnl)}`}>
+                        {pnlSign(h.pnl)}¥{Math.abs(h.pnl).toLocaleString()} ({pnlSign(h.pnl_pct || 0)}{(h.pnl_pct || 0).toFixed(1)}%)
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex gap-4 mt-1 text-[10px] text-muted-foreground">
+                  <span>{h.quantity}股 × ¥{h.avg_cost.toFixed(2)}</span>
+                  <span>投入 ¥{h.total_invested.toLocaleString()}</span>
+                  <span>首买 {h.first_buy_date}</span>
+                </div>
+              </button>
+
+              {/* Expanded timeline */}
+              {expandedCode === h.stock_code && timelines[h.stock_code] && (
+                <div className="border-t border-border/30 p-3 space-y-2">
+                  <div className="text-[10px] text-muted-foreground font-medium">交易记录 ({timelines[h.stock_code].trades.length}笔)</div>
+                  {timelines[h.stock_code].trades.map((t: BotTradeItem) => (
+                    <div key={t.id} className="flex items-start gap-2 text-xs">
+                      <span className={`mt-0.5 ${t.action === "buy" ? "text-red-400" : t.action === "hold" ? "text-muted-foreground" : "text-green-400"}`}>
+                        {t.action === "buy" ? "+" : t.action === "hold" ? "=" : "-"}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">{t.trade_date}</span>
+                          <span className="font-medium">
+                            {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action === "reduce" ? "减仓" : "持有"}
+                          </span>
+                          {t.quantity > 0 && <span className="font-mono">{t.quantity}股 @¥{t.price.toFixed(2)}</span>}
+                        </div>
+                        {t.thinking && (
+                          <div className="text-muted-foreground mt-0.5 line-clamp-2">{t.thinking}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Closed trades (reviews) */}
+      {subTab === "closed" && (
+        <div className="space-y-3">
+          {(!reviews || reviews.length === 0) ? (
+            <div className="text-center text-muted-foreground text-sm py-10">暂无已完结交易</div>
+          ) : reviews.map(r => (
+            <div key={r.id} className="rounded-lg border border-border/50 bg-card/30 overflow-hidden">
+              <button
+                onClick={() => loadTimeline(r.stock_code)}
+                className="w-full text-left p-3 hover:bg-accent/30 transition-colors"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-medium text-sm">{r.stock_name}</span>
+                    <span className="text-xs text-muted-foreground ml-2">{r.stock_code}</span>
+                    <span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded ${r.pnl > 0 ? "bg-red-500/10 text-red-400" : "bg-green-500/10 text-green-400"}`}>
+                      {r.pnl > 0 ? "盈利" : "亏损"}
+                    </span>
+                    {r.memory_synced && (
+                      <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">记忆已同步</span>
+                    )}
+                  </div>
+                  <div className={`text-sm font-mono ${pnlColor(r.pnl)}`}>
+                    {pnlSign(r.pnl)}¥{Math.abs(r.pnl).toLocaleString()} ({pnlSign(r.pnl_pct)}{r.pnl_pct.toFixed(1)}%)
+                  </div>
+                </div>
+                <div className="flex gap-4 mt-1 text-[10px] text-muted-foreground">
+                  <span>持有 {r.holding_days}天</span>
+                  <span>{r.first_buy_date} → {r.last_sell_date}</span>
+                </div>
+              </button>
+
+              {/* Expanded timeline + review */}
+              {expandedCode === r.stock_code && timelines[r.stock_code] && (
+                <div className="border-t border-border/30 p-3 space-y-3">
+                  <div className="text-[10px] text-muted-foreground font-medium">交易记录</div>
+                  {timelines[r.stock_code].trades.map((t: BotTradeItem) => (
+                    <div key={t.id} className="flex items-start gap-2 text-xs">
+                      <span className={`mt-0.5 ${t.action === "buy" ? "text-red-400" : t.action === "hold" ? "text-muted-foreground" : "text-green-400"}`}>
+                        {t.action === "buy" ? "+" : t.action === "hold" ? "=" : "-"}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">{t.trade_date}</span>
+                          <span className="font-medium">
+                            {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action === "reduce" ? "减仓" : "持有"}
+                          </span>
+                          {t.quantity > 0 && <span className="font-mono">{t.quantity}股 @¥{t.price.toFixed(2)}</span>}
+                        </div>
+                        {t.thinking && (
+                          <div className="text-muted-foreground mt-0.5 line-clamp-2">{t.thinking}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+
+                  {/* Review content */}
+                  {r.review_thinking && (
+                    <div className="mt-3 pt-3 border-t border-border/30">
+                      <div className="text-[10px] text-muted-foreground font-medium mb-1">复盘分析</div>
+                      <div className="text-xs text-muted-foreground whitespace-pre-line">{r.review_thinking}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ──────────────────────────────────────────
 
 // ── AnalysisProgress ─────────────────────────────────
@@ -609,6 +818,7 @@ export default function AIPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [analysisJobId, setAnalysisJobId] = useState<string | null>(null);
   const [analysisReportDate, setAnalysisReportDate] = useState<string>("");
+  const [mainTab, setMainTab] = useState<"analysis" | "trading">("analysis");
   const queryClient = useQueryClient();
 
   const reportsQuery = useAIReports();
@@ -756,35 +966,67 @@ export default function AIPage() {
         </ScrollArea>
       </div>
 
-      {/* Center panel — Report viewer / Analysis progress */}
+      {/* Center panel — Report viewer / Analysis progress / Bot Trading */}
       <div className="flex-1 flex flex-col min-w-0">
-        {isAnalyzing ? (
-          <AnalysisProgress
-            progress={pollQuery.data?.progress || "正在准备分析..."}
-            errorMessage={pollQuery.data?.status === "error" ? (pollQuery.data.errorMessage || "分析失败") : ""}
-            onRetry={handleRetry}
-          />
-        ) : reportQuery.isLoading ? (
-          <div className="flex-1 flex items-center justify-center">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : reportQuery.isError && selectedId ? (
-          <div className="flex-1 flex items-center justify-center text-muted-foreground">
-            <div className="text-center space-y-2">
-              <p className="text-sm">报告加载失败</p>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={isAnalyzing}
-                onClick={() => handleTrigger()}
-              >
-                <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-                生成新报告
-              </Button>
-            </div>
-          </div>
+        {/* Main tab switcher */}
+        <div className="flex border-b border-border/30 px-4">
+          <button
+            onClick={() => setMainTab("analysis")}
+            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-[1px] ${
+              mainTab === "analysis"
+                ? "border-primary text-primary"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            市场分析
+          </button>
+          <button
+            onClick={() => setMainTab("trading")}
+            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-[1px] ${
+              mainTab === "trading"
+                ? "border-primary text-primary"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            AI交易
+          </button>
+        </div>
+
+        {mainTab === "analysis" ? (
+          <>
+            {isAnalyzing ? (
+              <AnalysisProgress
+                progress={pollQuery.data?.progress || "正在准备分析..."}
+                errorMessage={pollQuery.data?.status === "error" ? (pollQuery.data.errorMessage || "分析失败") : ""}
+                onRetry={handleRetry}
+              />
+            ) : reportQuery.isLoading ? (
+              <div className="flex-1 flex items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : reportQuery.isError && selectedId ? (
+              <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                <div className="text-center space-y-2">
+                  <p className="text-sm">报告加载失败</p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isAnalyzing}
+                    onClick={() => handleTrigger()}
+                  >
+                    <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+                    生成新报告
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <ReportViewer report={report} />
+            )}
+          </>
         ) : (
-          <ReportViewer report={report} />
+          <ScrollArea className="flex-1">
+            <BotTradingPanel />
+          </ScrollArea>
         )}
       </div>
 
