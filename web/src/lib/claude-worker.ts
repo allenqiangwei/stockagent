@@ -391,7 +391,7 @@ STEP 7: 综合分析 — Comprehensive analysis (includes sector rotation & cros
      - Look for confirmation or contradiction with past decisions
   d) Portfolio diagnosis: For each portfolio stock, assess current technical + fundamental position
   e) Top buy recommendations: stocks with highest alpha scores + positive context
-  f) Sell/avoid recommendations: stocks with negative signals or risk factors
+  f) Sell/hold/reduce recommendations: ONLY for portfolio stocks. Do NOT include sell signals for stocks the user does not hold.
   g) Strategy actions: which strategies to activate/deactivate and why
   h) Risk warnings: any concerning patterns from sentiment, technicals, or memory
 
@@ -404,6 +404,8 @@ STEP 8: 输出JSON — Output structured report (investment advisor narrative st
     "market_regime_confidence": float 0.0-1.0,
     "recommendations": [
       {"stock_code": "XXXXXX", "stock_name": "名称", "action": "buy|sell|hold|watch", "reason": "...", "alpha_score": float}
+      // IMPORTANT: "sell" and "hold" actions are ONLY for portfolio stocks. Never recommend selling a stock the user does not hold.
+      // "buy" and "watch" can be any stock with strong signals.
     ],
     "strategy_actions": [
       {"action": "activate|deactivate|monitor", "strategy_id": int, "strategy_name": "...", "reason": "...", "details": "..."}
