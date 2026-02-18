@@ -17,7 +17,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from api.models.base import Base, engine
-from api.routers import market, stocks, strategies, signals, backtest, news, config, ai_lab
+from api.routers import market, stocks, strategies, signals, backtest, news, config, ai_lab, ai_analyst, news_signals
 
 # Configure logging
 logging.basicConfig(
@@ -127,6 +127,112 @@ def _seed_templates():
         db.commit()
 
 
+def _recover_orphan_backtests():
+    """Recover strategies stuck in backtesting/pending after a server restart.
+
+    Clone experiments (source_type='clone') get re-submitted to background threads.
+    Regular experiment strategies get reset to 'failed' so the retry API can handle them.
+    """
+    import threading
+    from datetime import datetime, timedelta
+    from sqlalchemy.orm import Session
+    from api.models.ai_lab import Experiment, ExperimentStrategy
+
+    with Session(engine) as db:
+        orphans = (
+            db.query(ExperimentStrategy)
+            .filter(ExperimentStrategy.status.in_(["backtesting", "pending"]))
+            .all()
+        )
+        if not orphans:
+            return
+
+        clone_strats = []
+        reset_count = 0
+        for strat in orphans:
+            exp = db.query(Experiment).get(strat.experiment_id)
+            if exp and exp.source_type == "clone":
+                clone_strats.append((strat.id, exp.id))
+            else:
+                # Regular experiment strategy — mark failed so retry API can re-run
+                strat.status = "failed"
+                strat.error_message = "Orphaned after server restart"
+                reset_count += 1
+
+        if reset_count:
+            db.commit()
+            logger.info("Orphan recovery: reset %d regular strategies to 'failed'", reset_count)
+
+        # Re-submit clone experiments in background threads
+        for clone_id, exp_id in clone_strats:
+            def _rerun(cid=clone_id, eid=exp_id):
+                from api.models.base import SessionLocal
+                from api.services.ai_lab_engine import AILabEngine, _BACKTEST_SEMAPHORE
+
+                _BACKTEST_SEMAPHORE.acquire()
+                session = SessionLocal()
+                try:
+                    eng = AILabEngine(session)
+                    strat = session.query(ExperimentStrategy).get(cid)
+                    experiment = session.query(Experiment).get(eid)
+                    if not strat or not experiment:
+                        return
+
+                    end_date = datetime.now().strftime("%Y-%m-%d")
+                    start_date = (datetime.now() - timedelta(days=3 * 365)).strftime("%Y-%m-%d")
+
+                    stock_codes = eng.collector.get_stocks_with_data(min_rows=60)
+                    stock_data = {}
+                    for code in stock_codes:
+                        df = eng.collector.get_daily_df(code, start_date, end_date, local_only=True)
+                        if df is not None and not df.empty and len(df) >= 60:
+                            stock_data[code] = df
+
+                    if not stock_data:
+                        strat.status = "failed"
+                        strat.error_message = "No stock data"
+                        experiment.status = "failed"
+                        session.commit()
+                        return
+
+                    from api.services.regime_service import ensure_regimes, get_regime_map, get_regime_summary
+                    ensure_regimes(session, start_date, end_date)
+                    regime_map = get_regime_map(session, start_date, end_date)
+                    summary = get_regime_summary(session, start_date, end_date)
+                    index_return_pct = summary.get("total_index_return_pct", 0.0)
+
+                    eng._run_single_backtest_impl(
+                        strat, stock_data, start_date, end_date,
+                        experiment, regime_map, index_return_pct,
+                    )
+                    experiment.status = "done"
+                    session.commit()
+                    logger.info("Orphan recovery: S%d done (score=%.3f, ret=+%.1f%%)",
+                                cid, strat.score or 0, strat.total_return_pct or 0)
+                except Exception as e:
+                    try:
+                        strat = session.query(ExperimentStrategy).get(cid)
+                        exp_obj = session.query(Experiment).get(eid)
+                        if strat:
+                            strat.status = "failed"
+                            strat.error_message = str(e)[:500]
+                        if exp_obj:
+                            exp_obj.status = "failed"
+                        session.commit()
+                    except Exception:
+                        session.rollback()
+                    logger.warning("Orphan recovery: S%d failed: %s", cid, e)
+                finally:
+                    _BACKTEST_SEMAPHORE.release()
+                    session.close()
+
+            t = threading.Thread(target=_rerun, daemon=True)
+            t.start()
+
+        if clone_strats:
+            logger.info("Orphan recovery: re-submitted %d clone backtests", len(clone_strats))
+
+
 def _sync_index_data():
     """Sync major index daily data (近5年) for regime computation."""
     from datetime import date, timedelta
@@ -181,7 +287,70 @@ def _run_migrations():
         _add_col_if_missing("backtest_runs_v2", "regime_stats", "TEXT")
         _add_col_if_missing("backtest_runs_v2", "index_return_pct", "FLOAT")
 
+        # Strategy: category tags + backtest summary
+        _add_col_if_missing("strategies", "category", "VARCHAR(20)")
+        _add_col_if_missing("strategies", "backtest_summary", "TEXT")
+        _add_col_if_missing("strategies", "source_experiment_id", "INTEGER")
+
         conn.commit()
+
+
+def _migrate_strategy_metadata():
+    """Back-fill category + backtest_summary on promoted strategies (idempotent)."""
+    import json as _json
+    import re
+    from sqlalchemy.orm import Session
+    from api.models.strategy import Strategy
+    from api.models.ai_lab import ExperimentStrategy
+
+    LABEL_MAP = {
+        "[AI]": "全能",
+        "[AI-牛市]": "牛市",
+        "[AI-熊市]": "熊市",
+        "[AI-震荡]": "震荡",
+    }
+
+    with Session(engine) as db:
+        strats = db.query(Strategy).all()
+        updated = 0
+        for s in strats:
+            changed = False
+
+            # 1) Parse category from name prefix if category is NULL
+            if s.category is None:
+                for prefix, cat in LABEL_MAP.items():
+                    if s.name.startswith(prefix):
+                        s.category = cat
+                        changed = True
+                        break
+
+            # 2) Back-fill backtest_summary + source_experiment_id from ExperimentStrategy
+            if s.backtest_summary is None:
+                exp_strat = (
+                    db.query(ExperimentStrategy)
+                    .filter(ExperimentStrategy.promoted_strategy_id == s.id)
+                    .first()
+                )
+                if exp_strat:
+                    s.backtest_summary = {
+                        "score": exp_strat.score,
+                        "total_return_pct": exp_strat.total_return_pct,
+                        "max_drawdown_pct": exp_strat.max_drawdown_pct,
+                        "win_rate": exp_strat.win_rate,
+                        "total_trades": exp_strat.total_trades,
+                        "avg_hold_days": exp_strat.avg_hold_days,
+                        "avg_pnl_pct": exp_strat.avg_pnl_pct,
+                        "regime_stats": exp_strat.regime_stats,
+                    }
+                    s.source_experiment_id = exp_strat.id
+                    changed = True
+
+            if changed:
+                updated += 1
+
+        if updated:
+            db.commit()
+            logger.info("Backfill: updated %d strategies with category/backtest_summary", updated)
 
 
 @asynccontextmanager
@@ -191,10 +360,16 @@ async def lifespan(app: FastAPI):
     import api.models.ai_lab  # noqa: F401 — ensure AI Lab tables are registered
     import api.models.market_regime  # noqa: F401 — ensure market_regimes table is registered
     import api.models.news_sentiment  # noqa: F401 — register sentiment tables
+    import api.models.ai_analyst  # noqa: F401 — register AI analyst tables
+    import api.models.news_agent  # noqa: F401 — register news agent tables
+    import api.models.bot_trading  # noqa: F401 — register bot trading tables
     Base.metadata.create_all(bind=engine)
 
     # Run lightweight ALTER TABLE migrations for new nullable columns
     _run_migrations()
+
+    # Back-fill category + backtest metrics for promoted strategies
+    _migrate_strategy_metadata()
 
     # Note: _seed_strategies() removed — built-in strategies kept resurrecting
     # after user deletion. Users can create strategies manually or via AI Lab.
@@ -203,32 +378,42 @@ async def lifespan(app: FastAPI):
     # Sync index data (上证/深成指/创业板) for regime computation
     _sync_index_data()
 
+    # Sync concept boards (daily, idempotent)
+    try:
+        from sqlalchemy.orm import Session as _Session
+        from api.services.concept_sync import sync_concept_boards
+        with _Session(engine) as _db:
+            sync_concept_boards(_db, max_boards=50)
+    except Exception as e:
+        logger.warning("Concept board sync failed (non-fatal): %s", e)
+
     # Register extended indicators into rule engine
     from api.services.indicator_registry import register_extended_indicators
     register_extended_indicators()
 
     logger.info("Database ready.")
 
+    # Recover orphaned backtests from previous server crash
+    _recover_orphan_backtests()
+
     # Start background services
     from src.services.news_service import start_news_service, stop_news_service
-    from api.services.signal_scheduler import start_signal_scheduler, stop_signal_scheduler
     from api.services.news_sentiment_scheduler import start_news_sentiment_scheduler, stop_news_sentiment_scheduler
 
     start_news_service()
     logger.info("News service started.")
 
-    scheduler = start_signal_scheduler()
-    logger.info(
-        "Signal scheduler started — next run: %s",
-        scheduler.get_next_run_time(),
-    )
-
     start_news_sentiment_scheduler()
+
+    from api.services.news_agent_scheduler import start_news_agent_scheduler, stop_news_agent_scheduler
+    start_news_agent_scheduler()
+    logger.info("News agent scheduler started (08:00 pre_market, 18:00 evening)")
 
     yield
 
+    stop_news_agent_scheduler()
+
     stop_news_sentiment_scheduler()
-    stop_signal_scheduler()
     stop_news_service()
     logger.info("Shutting down.")
 
@@ -258,6 +443,8 @@ app.include_router(backtest.router)
 app.include_router(news.router)
 app.include_router(config.router)
 app.include_router(ai_lab.router)
+app.include_router(ai_analyst.router)
+app.include_router(news_signals.router)
 
 
 @app.get("/api/health")
