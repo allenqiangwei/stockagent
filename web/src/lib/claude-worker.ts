@@ -423,6 +423,13 @@ STEP 8: 输出JSON — Output structured report (investment advisor narrative st
   分析资金在板块间的流动方向，结合新闻事件解释板块升温/降温的原因。
   "从板块热度数据来看，资金正在从…流向…这与近期…事件密切相关…"
 
+  ## 策略选择
+  详细解释为什么选择/激活/停用每个策略，推理链条必须包含：
+  1) 当前市场环境如何影响策略适用性（如震荡市不适合趋势策略）
+  2) 记忆库中该策略的历史实验表现数据（胜率、收益率、回撤）
+  3) 该策略与当前板块热点/情绪的匹配度
+  "基于当前震荡格局，我选择了XX策略（实验得分0.825，历史收益+90.5%），因为…同时停用了YY策略，原因是…"
+
   ## 持仓诊断
   逐一分析每只持仓股的当前状况，给出清晰的持有/减仓/加仓建议。
   "您持有的XX股，目前…从技术面看…结合信号…我的建议是…"
@@ -438,7 +445,7 @@ STEP 8: 输出JSON — Output structured report (investment advisor narrative st
   ## 总结
   1-2段话概括今日核心结论和具体操作建议。
 
-  Keep thinking_process under 2000 Chinese characters.
+  Keep thinking_process under 2500 Chinese characters.
 
 ═══ END WORKFLOW ═══
 
