@@ -352,13 +352,30 @@ STEP 2: 获取行情数据 — Fetch market data
   - GET /api/market/kline/{code}?period=daily&start=YYYY-MM-DD&end=YYYY-MM-DD
     Check a few representative blue-chip stocks (e.g. 600519, 000858) for confirmation.
 
-STEP 3: 获取新闻与情绪 — Fetch news and sentiment (4 APIs)
-  - GET /api/news/sentiment/latest — Overall market sentiment score, breakdown, and news_count (number of news analyzed)
-  - GET /api/news-signals/today — Today's news-driven stock signals (individual stock level, note the count field)
-  - GET /api/news-signals/sectors — Sector heat rankings (heat_score, trend, top_stocks, event_summary, note the count field)
-  - GET /api/news-signals/events — Major news events with affected sectors and impact level (note the count field)
-  Combine all four to build a comprehensive picture of market sentiment and sector dynamics.
-  IMPORTANT: Record the total number of news articles analyzed (from news_count and count fields) for the summary.
+STEP 3: 获取新闻与情绪 — Fetch news and sentiment
+  You must decide the appropriate scope of news analysis based on market conditions.
+
+  3a) First, get the baseline data:
+    - GET /api/news/sentiment/latest — latest sentiment analysis (check news_count and analysis_time)
+    - GET /api/news/latest — cached news list (check total_count and fetch_time to see how fresh)
+
+  3b) Then decide your analysis scope. Consider:
+    - If it's a normal trading day: the default latest sentiment + today's signals may suffice
+    - If it's after a long holiday (e.g. Spring Festival): you need broader coverage — call
+      GET /api/news/sentiment/history?days=N to see sentiment trend over the break
+    - If market is at a turning point or high volatility: consider more events for context
+    - If the latest sentiment analysis is stale (>12 hours old): note this limitation
+
+  3c) Fetch signal data based on your decision:
+    - GET /api/news-signals/today — today's news-driven stock signals (count field shows total)
+    - GET /api/news-signals/sectors — sector heat rankings (count field shows total)
+    - GET /api/news-signals/events?limit=N — major events (default 50, increase to 100-200 if after holiday or high volatility)
+
+  3d) Record and explain your decision:
+    - How many news articles were analyzed in total (from news_count/count fields across all APIs)
+    - What time range does this cover
+    - WHY you chose this scope (e.g. "长假后需要更广覆盖" or "常规交易日，最新情绪分析已足够")
+    This explanation will go into the thinking_process.
 
 STEP 4: 检索记忆库 — Read memory base (single comprehensive pass)
   Read the knowledge base at: /Users/allenqiang/.claude/projects/-Users-allenqiang-stockagent/memory/
@@ -429,6 +446,10 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
   CRITICAL: The "thinking_process" field MUST be written in investment advisor narrative style (投资顾问报告风).
   Structure it with these sections, writing as a senior investment advisor presenting to a client:
 
+  ## 数据概览
+  说明本次分析的新闻数据范围和选择理由。
+  "本次分析覆盖了XX条新闻（时间范围：X月X日至X月X日），选择该范围是因为…"
+
   ## 市场环境
   以叙述方式描述当前市场格局，解释判断逻辑链条。
   "今天的A股市场延续了…这背后的驱动力是…我关注到一个值得警惕的信号…"
@@ -477,10 +498,12 @@ Available API reference (complete list):
   GET  /api/signals/history?page=1&size=50&action=buy|sell&date=&strategy=
   POST /api/signals/generate?date=YYYY-MM-DD&strategy_ids=1,3,5
   GET  /api/stocks/portfolio
-  GET  /api/news/sentiment/latest
-  GET  /api/news/latest
-  GET  /api/news-signals/today
-  GET  /api/news-signals/sectors
+  GET  /api/news/sentiment/latest  (latest analysis with news_count)
+  GET  /api/news/sentiment/history?days=N  (sentiment trend over N days, default 30)
+  GET  /api/news/latest  (cached news list with total_count, fetch_time)
+  GET  /api/news-signals/today?date=  (news-driven signals, with count)
+  GET  /api/news-signals/sectors?date=  (sector heat, with count)
+  GET  /api/news-signals/events?limit=N  (major events, default 50, max 200)
   GET  /api/news-signals/events
 
 Answer in Chinese. Be thorough and data-driven.`;
