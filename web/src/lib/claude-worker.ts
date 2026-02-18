@@ -353,11 +353,12 @@ STEP 2: 获取行情数据 — Fetch market data
     Check a few representative blue-chip stocks (e.g. 600519, 000858) for confirmation.
 
 STEP 3: 获取新闻与情绪 — Fetch news and sentiment (4 APIs)
-  - GET /api/news/sentiment/latest — Overall market sentiment score and breakdown
-  - GET /api/news-signals/today — Today's news-driven stock signals (individual stock level)
-  - GET /api/news-signals/sectors — Sector heat rankings (heat_score, trend, top_stocks, event_summary)
-  - GET /api/news-signals/events — Major news events with affected sectors and impact level
+  - GET /api/news/sentiment/latest — Overall market sentiment score, breakdown, and news_count (number of news analyzed)
+  - GET /api/news-signals/today — Today's news-driven stock signals (individual stock level, note the count field)
+  - GET /api/news-signals/sectors — Sector heat rankings (heat_score, trend, top_stocks, event_summary, note the count field)
+  - GET /api/news-signals/events — Major news events with affected sectors and impact level (note the count field)
   Combine all four to build a comprehensive picture of market sentiment and sector dynamics.
+  IMPORTANT: Record the total number of news articles analyzed (from news_count and count fields) for the summary.
 
 STEP 4: 检索记忆库 — Read memory base (single comprehensive pass)
   Read the knowledge base at: /Users/allenqiang/.claude/projects/-Users-allenqiang-stockagent/memory/
@@ -422,7 +423,7 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
       {"action": "activate|deactivate|monitor", "strategy_id": int, "strategy_name": "...", "reason": "...", "details": "..."}
     ],
     "thinking_process": "<investment advisor narrative — see format below>",
-    "summary": "2-3 sentence executive summary in Chinese (string)"
+    "summary": "2-3 sentence executive summary in Chinese. MUST include how many news articles were analyzed (e.g. '本次分析基于XXX条新闻...')"
   }
 
   CRITICAL: The "thinking_process" field MUST be written in investment advisor narrative style (投资顾问报告风).
