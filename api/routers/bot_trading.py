@@ -190,6 +190,24 @@ def list_reviews(
     ]
 
 
+@router.put("/reviews/{review_id}/update")
+def update_review(review_id: int, body: dict, db: Session = Depends(get_db)):
+    """Update a review record (called by Claude review job)."""
+    review = db.query(BotTradeReview).filter(BotTradeReview.id == review_id).first()
+    if not review:
+        raise HTTPException(404, f"Review {review_id} not found")
+
+    if "review_thinking" in body:
+        review.review_thinking = body["review_thinking"]
+    if "memory_synced" in body:
+        review.memory_synced = body["memory_synced"]
+    if "memory_note_id" in body:
+        review.memory_note_id = body["memory_note_id"]
+
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/summary", response_model=BotSummary)
 def get_bot_summary(db: Session = Depends(get_db)):
     """Get aggregate bot trading statistics."""

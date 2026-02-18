@@ -55,9 +55,40 @@ const MODEL = "opus";
 const MAX_TURNS = "30";
 const JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const ANALYSIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes (Opus is slower but more thorough)
+const REVIEW_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for review jobs
 const JOB_EXPIRE_MS = 30 * 60 * 1000; // 30 minutes
 const PROJECT_ROOT = process.cwd();
 const FASTAPI_BASE = "http://localhost:8050";
+
+// ── JSON parsing helpers (shared) ────────────────────
+
+/** Extract JSON string from text (fence block or brace matching) */
+function extractJsonStr(text: string): string | null {
+  const fenceMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)```/);
+  if (fenceMatch) return fenceMatch[1].trim();
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) return text.slice(firstBrace, lastBrace + 1);
+  return null;
+}
+
+/** Repair common JSON issues (unescaped quotes in string values) */
+function repairJson(jsonStr: string): string {
+  return jsonStr.replace(
+    /("(?:thinking_process|summary|reason|review_thinking|lessons_learned|content)"\s*:\s*")([\s\S]*?)("(?:\s*[,}]))/g,
+    (_match, prefix: string, content: string, suffix: string) => {
+      const fixed = content.replace(/(?<!\\)"/g, '\\"');
+      return prefix + fixed + suffix;
+    }
+  );
+}
+
+/** Try parsing JSON with optional repair */
+function tryParse(jsonStr: string): Record<string, unknown> | null {
+  try { return JSON.parse(jsonStr); } catch { /* ignore */ }
+  try { return JSON.parse(repairJson(jsonStr)); } catch { /* ignore */ }
+  return null;
+}
 
 const SYSTEM_PROMPT = `\
 You are an expert A-share (China stock market) analyst assistant in the StockAgent system.
@@ -668,38 +699,6 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
     // Parse the result JSON — Claude may wrap it in markdown fences or preamble text
     job.progress = "正在保存报告...";
 
-    // Helper: extract JSON string from text (fence block or brace matching)
-    function extractJsonStr(text: string): string | null {
-      const fenceMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)```/);
-      if (fenceMatch) return fenceMatch[1].trim();
-      const firstBrace = text.indexOf("{");
-      const lastBrace = text.lastIndexOf("}");
-      if (firstBrace !== -1 && lastBrace > firstBrace) return text.slice(firstBrace, lastBrace + 1);
-      return null;
-    }
-
-    // Helper: repair common JSON issues (unescaped quotes in string values)
-    function repairJson(jsonStr: string): string {
-      // Fix unescaped double quotes inside JSON string values.
-      // Strategy: extract long string fields (thinking_process, summary, reason) by regex,
-      // escape internal quotes, then reconstruct.
-      return jsonStr.replace(
-        /("(?:thinking_process|summary|reason)"\s*:\s*")([\s\S]*?)("(?:\s*[,}]))/g,
-        (_match, prefix: string, content: string, suffix: string) => {
-          // Escape any unescaped double quotes inside the content
-          const fixed = content.replace(/(?<!\\)"/g, '\\"');
-          return prefix + fixed + suffix;
-        }
-      );
-    }
-
-    // Helper: try parsing with optional repair
-    function tryParse(jsonStr: string): Record<string, unknown> | null {
-      try { return JSON.parse(jsonStr); } catch { /* ignore */ }
-      try { return JSON.parse(repairJson(jsonStr)); } catch { /* ignore */ }
-      return null;
-    }
-
     let reportData: Record<string, unknown>;
     const jsonStr = extractJsonStr(lastResultText) || lastResultText.trim();
     const parsed = tryParse(jsonStr);
@@ -749,4 +748,159 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
       job.progress = "";
     }
   });
+}
+
+// ── Review Job ──────────────────────────────────
+
+const REVIEW_SYSTEM_PROMPT = `\
+You are an expert A-share investment analyst conducting a post-mortem review of a completed trade.
+You MUST analyze the entire buy-sell cycle and extract lessons learned.
+
+IMPORTANT: When calling curl, always use: NO_PROXY=localhost,127.0.0.1 curl ...
+API base: http://localhost:8050
+
+Your analysis should cover:
+1. 买入时机评估: Was the entry timing good? What signals were correct/missed?
+2. 持有期间分析: How did the stock perform during holding? Were there warning signs?
+3. 卖出时机评估: Was the exit timing optimal? Should it have been earlier/later?
+4. 新闻/事件影响: What news events impacted the trade?
+5. 策略有效性: Did the strategy that generated the signal perform as expected?
+6. 关键教训: What should be remembered for future similar situations?
+
+Read the memory base at: /Users/allenqiang/.claude/projects/-Users-allenqiang-stockagent/memory/
+Check semantic/strategy-knowledge.md for strategy performance data to cross-reference.
+
+Output ONLY a JSON object:
+{
+  "review_thinking": "详细的复盘分析（中文，投资顾问风格，500-1000字）",
+  "lessons_learned": "1-3句话总结关键教训",
+  "memory_note": {
+    "id": "trade-review-{stock_code}-{date}",
+    "tags": ["trade-review", "{stock_code}", "profit|loss", "{strategy-name}"],
+    "content": "一段精炼的记忆笔记（100-200字），包含：股票代码、持有天数、盈亏、关键教训"
+  }
+}
+
+IMPORTANT: Inside JSON string values, NEVER use double quotes ("). Use 「」 for emphasis or quoting.
+Answer in Chinese. Be thorough and honest about mistakes.`;
+
+export function startReviewJob(
+  reviewId: number,
+  stockCode: string,
+  stockName: string,
+  tradesJson: string,
+  pnl: number,
+  pnlPct: number,
+): string {
+  const jobId = `review-${stockCode}-${Date.now()}`;
+
+  const userPrompt = `\
+复盘任务: ${stockName} (${stockCode})
+盈亏: ¥${pnl.toFixed(2)} (${pnlPct.toFixed(1)}%)
+
+交易记录:
+${tradesJson}
+
+请分析这笔完整的买卖周期，输出 JSON 复盘报告。`;
+
+  const args = [
+    "--print",
+    "-p", userPrompt,
+    "--output-format", "text",
+    "--model", MODEL,
+    "--max-turns", "10",
+    "--system-prompt", REVIEW_SYSTEM_PROMPT,
+  ];
+
+  const child = spawn(CLAUDE_BIN, args, {
+    cwd: "/Users/allenqiang/stockagent",
+    env: { ...process.env, NO_PROXY: "localhost,127.0.0.1" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let output = "";
+  child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+  child.stderr?.on("data", () => { /* ignore */ });
+
+  // Timeout protection
+  const timer = setTimeout(() => {
+    child.kill("SIGTERM");
+    console.error(`[review ${jobId}] Timed out after 10 minutes`);
+  }, REVIEW_TIMEOUT_MS);
+
+  child.on("close", async () => {
+    clearTimeout(timer);
+    try {
+      // Parse the review JSON from Claude output
+      const jsonStr = extractJsonStr(output);
+      if (!jsonStr) {
+        console.error(`[review ${jobId}] No JSON found in output`);
+        return;
+      }
+      const parsed = tryParse(jsonStr);
+      if (!parsed) {
+        console.error(`[review ${jobId}] Failed to parse JSON`);
+        return;
+      }
+
+      const reviewThinking = (parsed.review_thinking as string) || "";
+      const memoryNote = parsed.memory_note as { id?: string; tags?: string[]; content?: string } | undefined;
+
+      // Update the review record via API
+      await fetch(`${FASTAPI_BASE}/api/bot/reviews/${reviewId}/update`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          review_thinking: reviewThinking,
+          memory_note_id: memoryNote?.id || null,
+          memory_synced: false,  // Will be set to true after memory file is written
+        }),
+      });
+
+      // Write memory note if provided
+      if (memoryNote?.id && memoryNote?.content) {
+        const fs = await import("fs");
+        const path = await import("path");
+
+        const memoryDir = "/Users/allenqiang/.claude/projects/-Users-allenqiang-stockagent/memory";
+        const tradesDir = path.join(memoryDir, "episodic", "trades");
+
+        // Ensure directory exists
+        fs.mkdirSync(tradesDir, { recursive: true });
+
+        const noteFile = path.join(tradesDir, `${memoryNote.id}.md`);
+        const noteContent = `---
+id: "${memoryNote.id}"
+type: episodic
+tags: ${JSON.stringify(memoryNote.tags || [])}
+created: "${new Date().toISOString().split('T')[0]}"
+relevance: high
+---
+
+${memoryNote.content}
+`;
+        fs.writeFileSync(noteFile, noteContent);
+        console.log(`[review ${jobId}] Memory note written: ${noteFile}`);
+
+        // Mark as memory synced
+        await fetch(`${FASTAPI_BASE}/api/bot/reviews/${reviewId}/update`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ memory_synced: true, memory_note_id: memoryNote.id }),
+        });
+      }
+
+      console.log(`[review ${jobId}] Review completed for ${stockCode}`);
+    } catch (err) {
+      console.error(`[review ${jobId}] Error:`, err);
+    }
+  });
+
+  child.on("error", (err) => {
+    clearTimeout(timer);
+    console.error(`[review ${jobId}] Spawn error:`, err);
+  });
+
+  console.log(`[review ${jobId}] Started review for ${stockCode}`);
+  return jobId;
 }
