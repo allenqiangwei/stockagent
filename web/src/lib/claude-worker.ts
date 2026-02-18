@@ -66,6 +66,7 @@ You can access local APIs at http://localhost:8050 to answer questions about sto
 IMPORTANT: When calling curl, always use: NO_PROXY=localhost,127.0.0.1 curl ...
 
 Available API endpoints:
+- GET /api/market/trading-day?date=YYYY-MM-DD — trading calendar (is_trading_day, prev/next)
 - GET /api/signals/today — today's signals
 - GET /api/signals/history?start_date=&end_date= — historical signals
 - GET /api/strategies — active strategies
@@ -333,23 +334,32 @@ You MUST follow the 8-step analysis workflow below IN ORDER. Do NOT skip or reor
 IMPORTANT: When calling curl, always use: NO_PROXY=localhost,127.0.0.1 curl ...
 API base: http://localhost:8050
 
-═══ 8-STEP ANALYSIS WORKFLOW ═══
+═══ 9-STEP ANALYSIS WORKFLOW ═══
 
-STEP 1: 获取行情数据 — Fetch market data
+STEP 1: 确认交易日历 — Check trading calendar
+  - GET /api/market/trading-day?date=YYYY-MM-DD
+    Returns: { date, is_trading_day, prev_trading_day, next_trading_day }
+    This tells you whether the report date is a trading day.
+    - If is_trading_day=true: use this date for all subsequent API calls.
+    - If is_trading_day=false: use prev_trading_day for market data and signals (last available data).
+      Mention in your report that today is NOT a trading day, and note when the next trading day is.
+    IMPORTANT: Use the correct trading date for all subsequent Steps (kline, signals, etc).
+
+STEP 2: 获取行情数据 — Fetch market data
   - GET /api/market/index-kline/{code}?period=daily&start=YYYY-MM-DD&end=YYYY-MM-DD
     Major indices: 000001 (上证指数), 399001 (深证成指), 399006 (创业板指)
     Fetch last 30 trading days to assess recent trend.
   - GET /api/market/kline/{code}?period=daily&start=YYYY-MM-DD&end=YYYY-MM-DD
     Check a few representative blue-chip stocks (e.g. 600519, 000858) for confirmation.
 
-STEP 2: 获取新闻与情绪 — Fetch news and sentiment (4 APIs)
+STEP 3: 获取新闻与情绪 — Fetch news and sentiment (4 APIs)
   - GET /api/news/sentiment/latest — Overall market sentiment score and breakdown
   - GET /api/news-signals/today — Today's news-driven stock signals (individual stock level)
   - GET /api/news-signals/sectors — Sector heat rankings (heat_score, trend, top_stocks, event_summary)
   - GET /api/news-signals/events — Major news events with affected sectors and impact level
   Combine all four to build a comprehensive picture of market sentiment and sector dynamics.
 
-STEP 3: 检索记忆库 — Read memory base (single comprehensive pass)
+STEP 4: 检索记忆库 — Read memory base (single comprehensive pass)
   Read the knowledge base at: /Users/allenqiang/.claude/projects/-Users-allenqiang-stockagent/memory/
   - First read meta/index.json to understand what's available
   - Read semantic/strategy-knowledge.md for proven strategy insights (what works/doesn't work)
@@ -357,35 +367,36 @@ STEP 3: 检索记忆库 — Read memory base (single comprehensive pass)
   - Read episodic/decisions/ for historical decisions (for later cross-validation)
   This is the ONLY memory read in the entire workflow. Gather everything you need now.
 
-STEP 4: 选择合适的策略 — Select appropriate strategies
+STEP 5: 选择合适的策略 — Select appropriate strategies
   - GET /api/strategies — list all active strategies (returns id, name, category, buy_rules, sell_rules, etc.)
-  Based on current market regime (from Step 1), news sentiment (Step 2), and memory insights (Step 3),
+  Based on current market regime (from Step 2), news sentiment (Step 3), and memory insights (Step 4),
   select which strategies are most suitable for today's market conditions.
-  Record the selected strategy IDs (e.g. 1,3,5) — you will pass these to Step 5.
+  Record the selected strategy IDs (e.g. 1,3,5) — you will pass these to Step 6.
   Explain your strategy selection reasoning.
 
-STEP 5: 生成今日信号 — Generate today's signals (using selected strategies ONLY)
+STEP 6: 生成今日信号 — Generate today's signals (using selected strategies ONLY)
   - POST /api/signals/generate?date=YYYY-MM-DD&strategy_ids=1,3,5
-    IMPORTANT: Pass the strategy IDs selected in Step 4 via the strategy_ids query parameter.
+    IMPORTANT: Pass the strategy IDs selected in Step 5 via the strategy_ids query parameter.
+    Use the trading date determined in Step 1.
     This ensures only the chosen strategies are used, NOT all enabled strategies.
     The signal engine will score each signal with an alpha score.
   - GET /api/signals/today?date=YYYY-MM-DD
     Review the generated signals. Pay attention to alpha_score rankings.
 
-STEP 6: 检查持仓 — Check portfolio holdings
+STEP 7: 检查持仓 — Check portfolio holdings
   - GET /api/stocks/portfolio
     Check actual portfolio holdings. These are the user's real positions and highest priority.
     The response includes: stock_code, stock_name, quantity, avg_cost, close, change_pct, pnl, pnl_pct, market_value.
   - For each portfolio stock, fetch recent kline to assess technical conditions:
     GET /api/market/kline/{code}?period=daily&start=YYYY-MM-DD&end=YYYY-MM-DD
-  - Check if any portfolio stocks have triggered signals from Step 5.
+  - Check if any portfolio stocks have triggered signals from Step 6.
 
-STEP 7: 综合分析 — Comprehensive analysis (includes sector rotation & cross-validation)
+STEP 8: 综合分析 — Comprehensive analysis (includes sector rotation & cross-validation)
   Synthesize all gathered data into a coherent assessment:
   a) Market regime: bull / bear / sideways / transition (with confidence 0-100%)
-  b) Sector rotation analysis: Using Step 2's sector heat and events data, identify rotating sectors
+  b) Sector rotation analysis: Using Step 3's sector heat and events data, identify rotating sectors
      and capital flow patterns. Which sectors are gaining momentum? Which are cooling?
-  c) Cross-validation: Using Step 3's memory data, verify signal reliability:
+  c) Cross-validation: Using Step 4's memory data, verify signal reliability:
      - Check if triggered strategies had poor historical performance (from experiment data)
      - Check if any stock patterns match known failure modes
      - Look for confirmation or contradiction with past decisions
@@ -395,7 +406,7 @@ STEP 7: 综合分析 — Comprehensive analysis (includes sector rotation & cros
   g) Strategy actions: which strategies to activate/deactivate and why
   h) Risk warnings: any concerning patterns from sentiment, technicals, or memory
 
-STEP 8: 输出JSON — Output structured report (investment advisor narrative style)
+STEP 9: 输出JSON — Output structured report (investment advisor narrative style)
   Output ONLY a JSON object (no markdown fences, no extra text) with these fields:
   {
     "report_type": "daily",
@@ -452,6 +463,7 @@ STEP 8: 输出JSON — Output structured report (investment advisor narrative st
 ═══ END WORKFLOW ═══
 
 Available API reference (complete list):
+  GET  /api/market/trading-day?date=YYYY-MM-DD  (trading calendar: is_trading_day, prev/next trading day)
   GET  /api/market/kline/{code}?period=daily|weekly|monthly&start=YYYY-MM-DD&end=YYYY-MM-DD
   GET  /api/market/indicators/{code}?indicators=MA:5,10,20|MACD:12,26,9|RSI:14&start=&end=
   GET  /api/market/quote/{code}
@@ -493,10 +505,11 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
   jobStore.set(jobId, job);
 
   const prompt =
-    `Today is ${reportDate}. Execute the 8-step analysis workflow defined in your system prompt. ` +
+    `Today is ${reportDate}. Execute the 9-step analysis workflow defined in your system prompt. ` +
     `Follow each step IN ORDER: ` +
-    `1→获取行情数据 2→获取新闻与情绪(4个API) 3→检索记忆库 4→选择策略 ` +
-    `5→生成今日信号 6→检查持仓 7→综合分析(含板块轮动+交叉验证) 8→输出JSON(投资顾问风格)。` +
+    `1→确认交易日历 2→获取行情数据 3→获取新闻与情绪(4个API) 4→检索记忆库 5→选择策略 ` +
+    `6→生成今日信号 7→检查持仓 8→综合分析(含板块轮动+交叉验证) 9→输出JSON(投资顾问风格)。` +
+    `IMPORTANT: Start with Step 1 to determine if today is a trading day and use the correct date for all data queries. ` +
     `Do NOT skip any step. At the end, output ONLY the JSON object with thinking_process in investment advisor narrative style.`;
 
   const args = [
