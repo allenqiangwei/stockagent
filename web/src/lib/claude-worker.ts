@@ -52,7 +52,7 @@ function getSessionStore(): Map<string, SessionState> {
 
 const CLAUDE_BIN = "/opt/homebrew/bin/claude";
 const MODEL = "opus";
-const MAX_TURNS = "15";
+const MAX_TURNS = "30";
 const JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const ANALYSIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes (Opus is slower but more thorough)
 const JOB_EXPIRE_MS = 30 * 60 * 1000; // 30 minutes
