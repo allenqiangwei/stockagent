@@ -501,6 +501,8 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
   1-2段话概括今日核心结论和具体操作建议。
 
   Keep thinking_process under 3000 Chinese characters.
+  IMPORTANT: Inside JSON string values, NEVER use double quotes ("). Use 「」 for emphasis or quoting.
+  For example: 这是我们的「安全网」策略 (NOT: 这是我们的"安全网"策略).
 
 ═══ END WORKFLOW ═══
 
@@ -658,34 +660,52 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
 
     // Parse the result JSON — Claude may wrap it in markdown fences or preamble text
     job.progress = "正在保存报告...";
-    let reportData: Record<string, unknown>;
-    try {
-      // Strategy 1: try direct parse
-      reportData = JSON.parse(lastResultText.trim());
-    } catch {
-      try {
-        // Strategy 2: extract JSON from markdown code block
-        const fenceMatch = lastResultText.match(/```(?:json)?\s*\n([\s\S]*?)```/);
-        if (fenceMatch) {
-          reportData = JSON.parse(fenceMatch[1].trim());
-        } else {
-          // Strategy 3: find first { ... last } in the text
-          const firstBrace = lastResultText.indexOf("{");
-          const lastBrace = lastResultText.lastIndexOf("}");
-          if (firstBrace !== -1 && lastBrace > firstBrace) {
-            reportData = JSON.parse(lastResultText.slice(firstBrace, lastBrace + 1));
-          } else {
-            throw new Error("No JSON found");
-          }
+
+    // Helper: extract JSON string from text (fence block or brace matching)
+    function extractJsonStr(text: string): string | null {
+      const fenceMatch = text.match(/```(?:json)?\s*\n([\s\S]*?)```/);
+      if (fenceMatch) return fenceMatch[1].trim();
+      const firstBrace = text.indexOf("{");
+      const lastBrace = text.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace > firstBrace) return text.slice(firstBrace, lastBrace + 1);
+      return null;
+    }
+
+    // Helper: repair common JSON issues (unescaped quotes in string values)
+    function repairJson(jsonStr: string): string {
+      // Fix unescaped double quotes inside JSON string values.
+      // Strategy: extract long string fields (thinking_process, summary, reason) by regex,
+      // escape internal quotes, then reconstruct.
+      return jsonStr.replace(
+        /("(?:thinking_process|summary|reason)"\s*:\s*")([\s\S]*?)("(?:\s*[,}]))/g,
+        (_match, prefix: string, content: string, suffix: string) => {
+          // Escape any unescaped double quotes inside the content
+          const fixed = content.replace(/(?<!\\)"/g, '\\"');
+          return prefix + fixed + suffix;
         }
-      } catch {
-        // Fallback: wrap entire text as summary
-        reportData = {
-          report_type: "daily",
-          summary: lastResultText.slice(0, 2000),
-          thinking_process: lastResultText,
-        };
-      }
+      );
+    }
+
+    // Helper: try parsing with optional repair
+    function tryParse(jsonStr: string): Record<string, unknown> | null {
+      try { return JSON.parse(jsonStr); } catch { /* ignore */ }
+      try { return JSON.parse(repairJson(jsonStr)); } catch { /* ignore */ }
+      return null;
+    }
+
+    let reportData: Record<string, unknown>;
+    const jsonStr = extractJsonStr(lastResultText) || lastResultText.trim();
+    const parsed = tryParse(jsonStr);
+
+    if (parsed && parsed.report_type) {
+      reportData = parsed;
+    } else {
+      // Fallback: wrap entire text as summary
+      reportData = {
+        report_type: "daily",
+        summary: lastResultText.slice(0, 2000),
+        thinking_process: lastResultText,
+      };
     }
 
     reportData.report_date = reportDate;
