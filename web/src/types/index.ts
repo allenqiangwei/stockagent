@@ -527,3 +527,80 @@ export interface NewsEventItem {
   source_titles: string[];
   created_at: string;
 }
+
+// ── Bot Trading ──
+export interface BotPortfolioItem {
+  stock_code: string;
+  stock_name: string;
+  quantity: number;
+  avg_cost: number;
+  total_invested: number;
+  first_buy_date: string;
+  close: number | null;
+  change_pct: number | null;
+  pnl: number | null;
+  pnl_pct: number | null;
+  market_value: number | null;
+}
+
+export interface BotTradeItem {
+  id: number;
+  stock_code: string;
+  stock_name: string;
+  action: string;
+  quantity: number;
+  price: number;
+  amount: number;
+  thinking: string;
+  report_id: number | null;
+  trade_date: string;
+  created_at: string;
+}
+
+export interface BotTradeReviewItem {
+  id: number;
+  stock_code: string;
+  stock_name: string;
+  total_buy_amount: number;
+  total_sell_amount: number;
+  pnl: number;
+  pnl_pct: number;
+  first_buy_date: string;
+  last_sell_date: string;
+  holding_days: number;
+  review_thinking: string;
+  memory_synced: boolean;
+  memory_note_id: string | null;
+  trades: BotTradeItem[] | null;
+  created_at: string;
+}
+
+export interface BotSummary {
+  total_invested: number;
+  current_market_value: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  active_positions: number;
+  completed_trades: number;
+  reviews_count: number;
+  win_count: number;
+  loss_count: number;
+}
+
+export interface BotStockTimeline {
+  stock_code: string;
+  stock_name: string;
+  status: string;
+  total_buy_amount: number;
+  total_sell_amount: number;
+  pnl: number;
+  pnl_pct: number;
+  first_buy_date: string;
+  last_trade_date: string;
+  holding_days: number;
+  current_quantity: number;
+  current_price: number | null;
+  current_market_value: number | null;
+  trades: BotTradeItem[];
+  review: BotTradeReviewItem | null;
+}

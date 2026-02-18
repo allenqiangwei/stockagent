@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { market, stocks, strategies, signals, backtest, news, appConfig, lab, marketOverview } from "@/lib/api";
+import { market, stocks, strategies, signals, backtest, news, appConfig, lab, marketOverview, ai, bot } from "@/lib/api";
 
 // ── Market ───────────────────────────────────────
 export function useKline(
@@ -97,11 +97,36 @@ export function useRemoveWatchlist() {
   });
 }
 
-// ── Strategies ───────────────────────────────────
-export function useStrategies() {
+// ── Portfolio ───────────────────────────────────
+export function usePortfolio() {
   return useQuery({
-    queryKey: ["strategies"],
-    queryFn: () => strategies.list(),
+    queryKey: ["portfolio"],
+    queryFn: () => stocks.portfolio(),
+  });
+}
+
+export function useAddPortfolio() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ code, quantity, avgCost, name }: { code: string; quantity: number; avgCost: number; name?: string }) =>
+      stocks.addPortfolio(code, quantity, avgCost, name),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio"] }),
+  });
+}
+
+export function useRemovePortfolio() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (code: string) => stocks.removePortfolio(code),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio"] }),
+  });
+}
+
+// ── Strategies ───────────────────────────────────
+export function useStrategies(category = "") {
+  return useQuery({
+    queryKey: ["strategies", category],
+    queryFn: () => strategies.list(category),
   });
 }
 
@@ -304,5 +329,168 @@ export function usePromoteStrategy() {
       qc.invalidateQueries({ queryKey: ["lab"] });
       qc.invalidateQueries({ queryKey: ["strategies"] });
     },
+  });
+}
+
+// ── AI Analyst ───────────────────────────────────
+export function useAIReports(limit = 30) {
+  return useQuery({
+    queryKey: ["ai-reports", limit],
+    queryFn: () => ai.reports(limit),
+  });
+}
+
+export function useAIReport(id: number) {
+  return useQuery({
+    queryKey: ["ai-report", id],
+    queryFn: () => ai.report(id),
+    enabled: !!id,
+  });
+}
+
+export function useAIReportByDate(date: string) {
+  return useQuery({
+    queryKey: ["ai-report-date", date],
+    queryFn: () => ai.reportByDate(date),
+    enabled: !!date,
+    retry: false,
+  });
+}
+
+export function useAIReportDates() {
+  return useQuery({
+    queryKey: ["ai-report-dates"],
+    queryFn: () => ai.reportDates(),
+  });
+}
+
+export function useAIChatSessions() {
+  return useQuery({
+    queryKey: ["ai-chat-sessions"],
+    queryFn: () => ai.chatSessions(),
+  });
+}
+
+export function useAIChatHistory(sessionId: string) {
+  return useQuery({
+    queryKey: ["ai-chat-history", sessionId],
+    queryFn: () => ai.chatHistory(sessionId),
+    enabled: !!sessionId,
+  });
+}
+
+export function useAIChatSend() {
+  return useMutation({
+    mutationFn: (data: { message: string; sessionId?: string }) =>
+      ai.sendMessage(data.message, data.sessionId),
+  });
+}
+
+export function useAIChatPoll(messageId: string | null) {
+  return useQuery({
+    queryKey: ["ai-chat-poll", messageId],
+    queryFn: () => ai.poll(messageId!),
+    enabled: !!messageId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (status === "completed" || status === "error") return false;
+      return 2000; // poll every 2 seconds
+    },
+  });
+}
+
+export function useTriggerAnalysis() {
+  return useMutation({
+    mutationFn: (date?: string) => ai.triggerAnalysis(date),
+  });
+}
+
+export function useAnalysisPoll(jobId: string | null) {
+  return useQuery({
+    queryKey: ["analysis-poll", jobId],
+    queryFn: () => ai.analysisProgress(jobId!),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      if (query.state.status === "error") return false;
+      const status = query.state.data?.status;
+      if (status === "completed" || status === "error") return false;
+      return 2000;
+    },
+  });
+}
+
+// ── News Signals ──────────────────────────────────────
+
+import { newsSignals } from "@/lib/api";
+
+export function useNewsSignalsToday(date?: string) {
+  return useQuery({
+    queryKey: ["news-signals-today", date],
+    queryFn: () => newsSignals.today(date),
+  });
+}
+
+export function useSectorHeat(date?: string) {
+  return useQuery({
+    queryKey: ["sector-heat", date],
+    queryFn: () => newsSignals.sectors(date),
+  });
+}
+
+export function useNewsEvents(date?: string) {
+  return useQuery({
+    queryKey: ["news-events", date],
+    queryFn: () => newsSignals.events(date),
+  });
+}
+
+export function useTriggerNewsAnalysis() {
+  return useMutation({
+    mutationFn: () => newsSignals.triggerAnalysis(),
+  });
+}
+
+export function useNewsAnalysisPoll(jobId: string | null) {
+  return useQuery({
+    queryKey: ["news-analysis-poll", jobId],
+    queryFn: () => newsSignals.pollAnalysis(jobId!),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      if (query.state.status === "error") return false;
+      const status = query.state.data?.status;
+      if (status === "completed" || status === "error") return false;
+      return 3000;
+    },
+  });
+}
+
+// ── Bot Trading ──────────────────────────────────────
+
+export function useBotPortfolio() {
+  return useQuery({
+    queryKey: ["bot-portfolio"],
+    queryFn: () => bot.portfolio(),
+  });
+}
+
+export function useBotSummary() {
+  return useQuery({
+    queryKey: ["bot-summary"],
+    queryFn: () => bot.summary(),
+  });
+}
+
+export function useBotTimeline(stockCode: string) {
+  return useQuery({
+    queryKey: ["bot-timeline", stockCode],
+    queryFn: () => bot.timeline(stockCode),
+    enabled: !!stockCode,
+  });
+}
+
+export function useBotReviews(limit = 50) {
+  return useQuery({
+    queryKey: ["bot-reviews", limit],
+    queryFn: () => bot.reviews(limit),
   });
 }

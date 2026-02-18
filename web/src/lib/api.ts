@@ -35,6 +35,7 @@ import type {
   IndicatorPoint,
   QuoteResponse,
   WatchlistItem,
+  PortfolioHoldingItem,
   StockInfo,
   Strategy,
   SignalItem,
@@ -52,6 +53,19 @@ import type {
   LabExperiment,
   LabExperimentListItem,
   IndexKlineResponse,
+  AIReportListItem,
+  AIReport,
+  ChatSessionListItem,
+  ChatMessage,
+  ChatSendResponse,
+  ChatPollResponse,
+  AnalysisTriggerResponse,
+  AnalysisPollResponse,
+  BotPortfolioItem,
+  BotTradeItem,
+  BotTradeReviewItem,
+  BotSummary,
+  BotStockTimeline,
 } from "@/types";
 
 export const market = {
@@ -90,11 +104,21 @@ export const stocks = {
       stock_name: name,
     }),
   removeWatchlist: (code: string) => del<{ removed: string }>(`/stocks/watchlist/${code}`),
+  portfolio: () => request<PortfolioHoldingItem[]>("/stocks/portfolio"),
+  addPortfolio: (code: string, quantity: number, avgCost: number, name = "") =>
+    post<PortfolioHoldingItem>("/stocks/portfolio", {
+      stock_code: code,
+      stock_name: name,
+      quantity,
+      avg_cost: avgCost,
+    }),
+  removePortfolio: (code: string) => del<{ removed: string }>(`/stocks/portfolio/${code}`),
 };
 
 // ── Strategies ────────────────────────────────────────
 export const strategies = {
-  list: () => request<Strategy[]>("/strategies"),
+  list: (category = "") =>
+    request<Strategy[]>(`/strategies${category ? `?category=${encodeURIComponent(category)}` : ""}`),
   get: (id: number) => request<Strategy>(`/strategies/${id}`),
   create: (data: Omit<Strategy, "id">) => post<Strategy>("/strategies", data),
   update: (id: number, data: Partial<Strategy>) =>
@@ -108,7 +132,7 @@ export const strategies = {
 export const signals = {
   meta: () => request<SignalMeta>("/signals/meta"),
   today: (date = "") =>
-    request<{ trade_date: string; total: number; items: SignalItem[] }>(
+    request<{ trade_date: string; total: number; items: SignalItem[]; alpha_top: SignalItem[] }>(
       `/signals/today?date=${date}`
     ),
   history: (page = 1, size = 50, action = "", date = "", strategy = "") =>
@@ -202,4 +226,76 @@ export const backtest = {
       body: JSON.stringify(data),
     });
   },
+};
+
+// ── AI Analyst ───────────────────────────────────────
+export const ai = {
+  reports: (limit = 30) =>
+    request<AIReportListItem[]>(`/ai/reports?limit=${limit}`),
+  report: (id: number) =>
+    request<AIReport>(`/ai/reports/${id}`),
+  reportByDate: (date: string) =>
+    request<AIReport>(`/ai/reports/date/${date}`),
+  reportDates: (limit = 90) =>
+    request<{ dates: string[] }>(`/ai/reports/dates?limit=${limit}`),
+  triggerAnalysis: (date?: string) =>
+    post<AnalysisTriggerResponse>("/ai/analyze", { date: date || null }),
+  analysisProgress: (jobId: string) =>
+    request<AnalysisPollResponse>(`/ai/analyze/poll?jobId=${jobId}`),
+  sendMessage: (message: string, sessionId?: string) =>
+    post<ChatSendResponse>(
+      "/ai/chat",
+      { message, session_id: sessionId || null }
+    ),
+  poll: (messageId: string) =>
+    request<ChatPollResponse>(`/ai/chat/poll?messageId=${messageId}`),
+  chatSessions: (limit = 20) =>
+    request<ChatSessionListItem[]>(`/ai/chat/sessions?limit=${limit}`),
+  chatHistory: (sessionId: string) =>
+    request<{ session_id: string; title: string; messages: ChatMessage[] }>(
+      `/ai/chat/sessions/${sessionId}`
+    ),
+};
+
+// ── Bot Trading ──────────────────────────────────────
+export const bot = {
+  portfolio: () => request<BotPortfolioItem[]>("/bot/portfolio"),
+  trades: (stockCode = "", limit = 100) =>
+    request<BotTradeItem[]>(
+      `/bot/trades?stock_code=${stockCode}&limit=${limit}`
+    ),
+  timeline: (stockCode: string) =>
+    request<BotStockTimeline>(`/bot/trades/${stockCode}/timeline`),
+  reviews: (limit = 50) =>
+    request<BotTradeReviewItem[]>(`/bot/reviews?limit=${limit}`),
+  summary: () => request<BotSummary>("/bot/summary"),
+};
+
+// ── News Signals ──────────────────────────────────────
+
+import type { NewsSignalItem, SectorHeatItem, NewsEventItem } from "@/types";
+
+export const newsSignals = {
+  today: (date?: string) =>
+    request<{ date: string; count: number; signals: NewsSignalItem[] }>(
+      `/news-signals/today${date ? `?date=${date}` : ""}`
+    ),
+  history: (page = 1, size = 20, action = "") =>
+    request<{ page: number; total: number; items: NewsSignalItem[] }>(
+      `/news-signals/history?page=${page}&size=${size}${action ? `&action=${action}` : ""}`
+    ),
+  sectors: (date?: string) =>
+    request<{ count: number; sectors: SectorHeatItem[] }>(
+      `/news-signals/sectors${date ? `?date=${date}` : ""}`
+    ),
+  events: (date?: string) =>
+    request<{ count: number; events: NewsEventItem[] }>(
+      `/news-signals/events${date ? `?date=${date}` : ""}`
+    ),
+  triggerAnalysis: () =>
+    post<{ job_id: string; status: string }>("/news-signals/analyze", {}),
+  pollAnalysis: (jobId: string) =>
+    request<{ status: string; result: Record<string, unknown> | null; error: string | null }>(
+      `/news-signals/analyze/poll?job_id=${jobId}`
+    ),
 };
