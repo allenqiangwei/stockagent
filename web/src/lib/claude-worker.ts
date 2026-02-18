@@ -401,13 +401,15 @@ STEP 6: 生成今日信号 — Generate today's signals (using selected strategi
   - GET /api/signals/today?date=YYYY-MM-DD
     Review the generated signals. Pay attention to alpha_score rankings.
 
-STEP 7: 检查持仓 — Check portfolio holdings
-  - GET /api/stocks/portfolio
-    Check actual portfolio holdings. These are the user's real positions and highest priority.
-    The response includes: stock_code, stock_name, quantity, avg_cost, close, change_pct, pnl, pnl_pct, market_value.
-  - For each portfolio stock, fetch recent kline to assess technical conditions:
+STEP 7: 检查持仓 — Check portfolio holdings (user + bot)
+  - GET /api/stocks/portfolio → User's real portfolio (highest priority)
+  - GET /api/bot/portfolio → Robot simulated portfolio (auto-traded by AI)
+  Both portfolios need diagnosis. Sell/reduce recommendations apply to BOTH.
+  The response includes: stock_code, stock_name, quantity, avg_cost, close, change_pct, pnl, pnl_pct, market_value.
+  - For each holding (from both portfolios), fetch recent kline:
     GET /api/market/kline/{code}?period=daily&start=YYYY-MM-DD&end=YYYY-MM-DD
-  - Check if any portfolio stocks have triggered signals from Step 6.
+  - Check if any holdings have triggered signals from Step 6.
+  - In recommendations, use "source": "user" or "source": "bot" to indicate which portfolio.
 
 STEP 8: 综合分析 — Comprehensive analysis (includes sector rotation & cross-validation)
   Synthesize all gathered data into a coherent assessment:
@@ -453,6 +455,7 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
       // IMPORTANT: "sell", "hold", and "reduce" actions are ONLY for portfolio stocks.
       // "buy" can be any stock with strong signals.
       // Do NOT use "watch" — only output actionable recommendations (buy/sell/hold/reduce).
+      // Use "source": "user"|"bot" to indicate which portfolio a sell/hold/reduce applies to.
     ],
     "strategy_actions": [
       {"action": "activate|deactivate|monitor", "strategy_id": int, "strategy_name": "...", "reason": "...", "details": "..."}
@@ -484,7 +487,10 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
   "基于当前震荡格局，我选择了XX策略（实验得分0.825，历史收益+90.5%），因为…同时停用了YY策略，原因是…"
 
   ## 持仓诊断
-  逐一分析每只持仓股的当前状况，给出清晰的持有/减仓/卖出建议，并设定具体价格。
+  分两部分诊断：
+  **用户持仓**: 逐一分析每只持仓股的当前状况...
+  **机器人持仓**: 逐一分析 AI 模拟交易的持仓...
+  对每只持仓股，给出清晰的持有/减仓/卖出建议，并设定具体价格。
   "您持有的XX股（成本XX元，XX股），当前价XX元，盈亏XX%。从技术面看，上方阻力位在XX元，下方支撑在XX元。
   我的建议是减仓50%，挂单卖出价XX元（基于阻力位），止损设在XX元。"
 
@@ -527,6 +533,7 @@ Available API reference (complete list):
   GET  /api/news-signals/sectors?date=  (sector heat, with count)
   GET  /api/news-signals/events?limit=N  (major events, default 50, max 200)
   GET  /api/news-signals/events
+  GET  /api/bot/portfolio  (robot simulated portfolio — same format as /api/stocks/portfolio)
 
 Answer in Chinese. Be thorough and data-driven.`;
 
