@@ -419,7 +419,7 @@ STEP 8: 综合分析 — Comprehensive analysis (includes sector rotation & cros
      - Check if any stock patterns match known failure modes
      - Look for confirmation or contradiction with past decisions
   d) Portfolio diagnosis: For each portfolio stock, assess current technical + fundamental position
-  e) Top buy recommendations: For each buy candidate, determine:
+  e) Buy recommendations: ONLY output stocks you genuinely recommend buying. For each buy candidate, determine:
      - target_price: a preset limit-buy price for next trading day (based on support levels, recent lows, or pullback targets — NOT simply today's close)
      - position_pct: recommended position size as % of total portfolio (consider concentration risk, conviction level, and market regime)
      - stop_loss: a stop-loss price level (based on key support breakdown)
@@ -442,7 +442,7 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
     "recommendations": [
       {
         "stock_code": "XXXXXX", "stock_name": "名称",
-        "action": "buy|sell|hold|reduce|watch",
+        "action": "buy|sell|hold|reduce",
         "reason": "...",
         "alpha_score": float,
         "target_price": float,       // preset limit price for next trading day (buy=limit buy price, sell/reduce=limit sell price)
@@ -451,8 +451,8 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
         "stop_loss": float           // stop-loss price level (buy: below support; sell: trailing stop for remaining)
       }
       // IMPORTANT: "sell", "hold", and "reduce" actions are ONLY for portfolio stocks.
-      // "buy" and "watch" can be any stock with strong signals.
-      // "watch" does not require target_price/position_pct/stop_loss.
+      // "buy" can be any stock with strong signals.
+      // Do NOT use "watch" — only output actionable recommendations (buy/sell/hold/reduce).
     ],
     "strategy_actions": [
       {"action": "activate|deactivate|monitor", "strategy_id": int, "strategy_name": "...", "reason": "...", "details": "..."}
