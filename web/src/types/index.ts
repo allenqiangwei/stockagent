@@ -67,6 +67,18 @@ export interface WatchlistItem {
   date: string | null;
 }
 
+export interface PortfolioHoldingItem {
+  stock_code: string;
+  stock_name: string;
+  quantity: number;
+  avg_cost: number;
+  close: number | null;
+  change_pct: number | null;
+  pnl: number | null;
+  pnl_pct: number | null;
+  market_value: number | null;
+}
+
 export interface RankFactor {
   type: "indicator" | "kline" | "basic";
   field: string;
@@ -85,6 +97,17 @@ export interface PortfolioConfig {
   position_sizing: "equal_weight";
 }
 
+export interface BacktestSummary {
+  score: number;
+  total_return_pct: number;
+  max_drawdown_pct: number;
+  win_rate: number;
+  total_trades: number;
+  avg_hold_days: number;
+  avg_pnl_pct: number;
+  regime_stats?: Record<string, RegimeStatEntry> | null;
+}
+
 export interface Strategy {
   id: number;
   name: string;
@@ -101,6 +124,9 @@ export interface Strategy {
   enabled: boolean;
   rank_config?: RankConfig | null;
   portfolio_config?: PortfolioConfig | null;
+  category?: string | null;
+  backtest_summary?: BacktestSummary | null;
+  source_experiment_id?: number | null;
 }
 
 export interface SignalItem {
@@ -108,6 +134,10 @@ export interface SignalItem {
   stock_name: string;
   trade_date: string;
   final_score: number;
+  alpha_score: number;
+  oversold_score: number;
+  consensus_score: number;
+  volume_price_score: number;
   signal_level: number;
   signal_level_name: string;
   action: "buy" | "sell" | "hold";
@@ -381,5 +411,119 @@ export interface LabExperimentListItem {
   strategy_count: number;
   best_score: number;
   best_name: string;
+  created_at: string;
+}
+
+// ── AI Analyst ──────────────────────────────────
+export interface AIReportListItem {
+  id: number;
+  report_date: string;
+  report_type: string;
+  market_regime: string | null;
+  summary: string;
+  created_at: string;
+}
+
+export interface AIReport {
+  id: number;
+  report_date: string;
+  report_type: string;
+  market_regime: string | null;
+  market_regime_confidence: number | null;
+  recommendations: {
+    stock_code: string;
+    stock_name: string;
+    action: string;
+    reason: string;
+    alpha_score: number;
+    target_price?: number | null;
+    position_pct?: number | null;
+    stop_loss?: number | null;
+  }[] | null;
+  strategy_actions: { action: string; strategy_id: number; strategy_name: string; reason: string; details: Record<string, unknown> }[] | null;
+  thinking_process: string;
+  summary: string;
+  created_at: string;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+}
+
+export interface ChatSessionListItem {
+  id: number;
+  session_id: string;
+  title: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// ── AI Analysis (fire-and-forget + polling) ──
+export interface AnalysisTriggerResponse {
+  jobId: string;
+  reportDate: string;
+  status: "processing";
+}
+export interface AnalysisPollResponse {
+  status: "processing" | "completed" | "error";
+  progress: string;
+  reportId: number | null;
+  errorMessage: string;
+}
+
+// ── AI Chat (fire-and-forget + polling) ──────
+export interface ChatSendResponse {
+  messageId: string;
+  sessionId: string;
+  status: "processing";
+}
+
+export interface ChatPollResponse {
+  status: "processing" | "completed" | "error";
+  progress: string;
+  content: string;
+  errorMessage: string;
+  sessionId: string | null;
+}
+
+// ── News Signals ─────────────────────────────────
+
+export interface NewsSignalItem {
+  id: number;
+  stock_code: string;
+  stock_name: string;
+  action: "buy" | "sell" | "watch";
+  signal_source: string;
+  confidence: number;
+  reason: string;
+  sector_name: string;
+  created_at: string;
+  trade_date?: string;
+}
+
+export interface SectorHeatItem {
+  id: number;
+  sector_name: string;
+  sector_type: string;
+  heat_score: number;
+  trend: "rising" | "falling" | "flat";
+  news_count: number;
+  top_stocks: { code: string; name: string; reason: string }[];
+  event_summary: string;
+  snapshot_time: string;
+}
+
+export interface NewsEventItem {
+  id: number;
+  event_type: string;
+  impact_level: string;
+  impact_direction: string;
+  affected_codes: string[];
+  affected_sectors: string[];
+  summary: string;
+  source_titles: string[];
   created_at: string;
 }
