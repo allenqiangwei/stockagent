@@ -419,8 +419,16 @@ STEP 8: 综合分析 — Comprehensive analysis (includes sector rotation & cros
      - Check if any stock patterns match known failure modes
      - Look for confirmation or contradiction with past decisions
   d) Portfolio diagnosis: For each portfolio stock, assess current technical + fundamental position
-  e) Top buy recommendations: stocks with highest alpha scores + positive context
-  f) Sell/hold/reduce recommendations: ONLY for portfolio stocks. Do NOT include sell signals for stocks the user does not hold.
+  e) Top buy recommendations: For each buy candidate, determine:
+     - target_price: a preset limit-buy price for next trading day (based on support levels, recent lows, or pullback targets — NOT simply today's close)
+     - position_pct: recommended position size as % of total portfolio (consider concentration risk, conviction level, and market regime)
+     - stop_loss: a stop-loss price level (based on key support breakdown)
+     Explain price/position reasoning in thinking_process.
+  f) Sell/hold/reduce recommendations: ONLY for portfolio stocks. For each sell/reduce candidate, determine:
+     - target_price: a preset limit-sell price for next trading day (based on resistance levels, recent highs, or rebound targets)
+     - sell_pct: what % of the holding to sell (e.g. 50% = reduce half, 100% = full exit)
+     - stop_loss: a trailing stop or floor price to protect remaining position
+     Do NOT include sell signals for stocks the user does not hold.
   g) Strategy actions: which strategies to activate/deactivate and why
   h) Risk warnings: any concerning patterns from sentiment, technicals, or memory
 
@@ -432,9 +440,19 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
     "market_regime": "bull" | "bear" | "sideways" | "transition",
     "market_regime_confidence": float 0.0-1.0,
     "recommendations": [
-      {"stock_code": "XXXXXX", "stock_name": "名称", "action": "buy|sell|hold|watch", "reason": "...", "alpha_score": float}
-      // IMPORTANT: "sell" and "hold" actions are ONLY for portfolio stocks. Never recommend selling a stock the user does not hold.
+      {
+        "stock_code": "XXXXXX", "stock_name": "名称",
+        "action": "buy|sell|hold|reduce|watch",
+        "reason": "...",
+        "alpha_score": float,
+        "target_price": float,       // preset limit price for next trading day (buy=limit buy price, sell/reduce=limit sell price)
+        "position_pct": float,       // for buy: recommended position % of total portfolio (e.g. 10.0 = 10%)
+                                     // for sell/reduce: % of holding to sell (e.g. 50.0 = sell half, 100.0 = full exit)
+        "stop_loss": float           // stop-loss price level (buy: below support; sell: trailing stop for remaining)
+      }
+      // IMPORTANT: "sell", "hold", and "reduce" actions are ONLY for portfolio stocks.
       // "buy" and "watch" can be any stock with strong signals.
+      // "watch" does not require target_price/position_pct/stop_loss.
     ],
     "strategy_actions": [
       {"action": "activate|deactivate|monitor", "strategy_id": int, "strategy_name": "...", "reason": "...", "details": "..."}
@@ -466,12 +484,14 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
   "基于当前震荡格局，我选择了XX策略（实验得分0.825，历史收益+90.5%），因为…同时停用了YY策略，原因是…"
 
   ## 持仓诊断
-  逐一分析每只持仓股的当前状况，给出清晰的持有/减仓/加仓建议。
-  "您持有的XX股，目前…从技术面看…结合信号…我的建议是…"
+  逐一分析每只持仓股的当前状况，给出清晰的持有/减仓/卖出建议，并设定具体价格。
+  "您持有的XX股（成本XX元，XX股），当前价XX元，盈亏XX%。从技术面看，上方阻力位在XX元，下方支撑在XX元。
+  我的建议是减仓50%，挂单卖出价XX元（基于阻力位），止损设在XX元。"
 
   ## 机会与信号
-  从今日信号中提炼高价值机会，用记忆库数据验证推荐策略的历史表现。
-  "今天alpha评分最高的是…这个信号来自XX策略，该策略在过去实验中…"
+  从今日信号中提炼高价值机会，设定买入价和仓位，用记忆库数据验证推荐策略的历史表现。
+  "今天alpha评分最高的是XX（评分X.XX），建议以XX元挂单买入（基于支撑位/回调目标），建议仓位XX%。
+  这个信号来自XX策略，该策略在过去实验中…止损设在XX元（跌破关键支撑则出局）。"
 
   ## 风险提示
   识别潜在风险，用历史教训佐证风险判断。
@@ -480,7 +500,7 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
   ## 总结
   1-2段话概括今日核心结论和具体操作建议。
 
-  Keep thinking_process under 2500 Chinese characters.
+  Keep thinking_process under 3000 Chinese characters.
 
 ═══ END WORKFLOW ═══
 
