@@ -17,7 +17,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from api.models.base import Base, engine
-from api.routers import market, stocks, strategies, signals, backtest, news, config, ai_lab, ai_analyst, news_signals
+from api.routers import market, stocks, strategies, signals, backtest, news, config, ai_lab, ai_analyst, news_signals, bot_trading
 
 # Configure logging
 logging.basicConfig(
@@ -445,6 +445,7 @@ app.include_router(config.router)
 app.include_router(ai_lab.router)
 app.include_router(ai_analyst.router)
 app.include_router(news_signals.router)
+app.include_router(bot_trading.router)
 
 
 @app.get("/api/health")
