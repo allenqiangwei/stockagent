@@ -21,6 +21,25 @@ from api.schemas.ai_analyst import (
 router = APIRouter(prefix="/api/ai", tags=["ai-analyst"])
 
 
+# ── Scheduler status ─────────────────────────────
+
+@router.get("/scheduler-status")
+def get_scheduler_status():
+    """Return auto-analysis scheduler status (running, last/next run times)."""
+    from api.services.signal_scheduler import get_signal_scheduler
+
+    sched = get_signal_scheduler()
+    status = sched.get_status()
+    return {
+        "running": status["running"],
+        "is_refreshing": status["is_refreshing"],
+        "last_run_date": status["last_run_date"],
+        "next_run_time": status["next_run_time"],
+        "refresh_hour": status["refresh_hour"],
+        "refresh_minute": status["refresh_minute"],
+    }
+
+
 # ── Reports ──────────────────────────────────────
 
 @router.get("/reports", response_model=list[AIReportListItem])
@@ -90,23 +109,23 @@ def save_report(body: AIReportSaveRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(report)
 
-    # Auto-execute bot trades from recommendations
-    bot_trades_result = []
+    # Create trade plans from recommendations (plans execute on next trading day)
+    trade_plans_result = []
     if body.recommendations:
-        from api.services.bot_trading_engine import execute_bot_trades
+        from api.services.bot_trading_engine import create_trade_plans
         try:
-            bot_trades_result = execute_bot_trades(
+            trade_plans_result = create_trade_plans(
                 db, report.id, body.report_date, body.recommendations
             )
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning("Bot trade execution failed: %s", e)
+            logging.getLogger(__name__).warning("Trade plan creation failed: %s", e)
 
     return {
         "id": report.id,
         "report_date": report.report_date,
         "summary": report.summary,
-        "bot_trades": bot_trades_result,
+        "trade_plans": trade_plans_result,
     }
 
 
@@ -117,6 +136,17 @@ def get_report(report_id: int, db: Session = Depends(get_db)):
     if not report:
         raise HTTPException(404, "Report not found")
     return _report_to_response(report)
+
+
+@router.delete("/reports/{report_id}")
+def delete_report(report_id: int, db: Session = Depends(get_db)):
+    """Delete a report by ID."""
+    report = db.query(AIReport).get(report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+    db.delete(report)
+    db.commit()
+    return {"message": f"Report {report_id} deleted"}
 
 
 def _report_to_response(report: AIReport) -> AIReportResponse:
