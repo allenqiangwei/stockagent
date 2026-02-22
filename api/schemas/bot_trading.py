@@ -55,6 +55,25 @@ class BotTradeReviewItem(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class BotTradePlanItem(BaseModel):
+    id: int
+    stock_code: str
+    stock_name: str = ""
+    direction: str  # "buy" | "sell"
+    plan_price: float = 0.0
+    quantity: int = 0
+    sell_pct: float = 0.0
+    plan_date: str = ""
+    status: str = "pending"
+    thinking: str = ""
+    report_id: Optional[int] = None
+    created_at: str = ""
+    executed_at: Optional[str] = None
+    execution_price: Optional[float] = None
+
+    model_config = {"from_attributes": True}
+
+
 class BotSummary(BaseModel):
     total_invested: float = 0.0
     current_market_value: float = 0.0
