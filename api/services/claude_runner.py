@@ -205,13 +205,16 @@ def _run_cli(args: list[str], timeout: int = 180) -> dict:
     """Run Claude CLI and return parsed JSON output.
 
     Follows POAMASTER pattern: minimal env, parse stdout as JSON.
+    Strips CLAUDECODE env var to avoid nested-session detection.
     """
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     proc = subprocess.run(
         [_CLAUDE] + args,
         capture_output=True,
         text=True,
         timeout=timeout,
         cwd=_PROJECT_ROOT,
+        env=env,
     )
 
     output = json.loads(proc.stdout)
