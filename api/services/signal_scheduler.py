@@ -102,20 +102,7 @@ class SignalScheduler:
         try:
             db = SessionLocal()
             try:
-                # Step 0: Execute pending trade plans (runs on all days)
-                try:
-                    from api.services.bot_trading_engine import execute_pending_plans
-                    plan_results = execute_pending_plans(db, trade_date)
-                    if plan_results:
-                        logger.info("Executed %d trade plans for %s", len(plan_results), trade_date)
-                except Exception as e:
-                    logger.error("Trade plan execution failed (non-fatal): %s", e)
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-
-                # Step 0: Check if today is a trading day — skip heavy work if not
+                # Step 0: Check if today is a trading day
                 is_trading_day = True
                 try:
                     from api.services.data_collector import DataCollector
@@ -137,20 +124,68 @@ class SignalScheduler:
                     except Exception as e:
                         logger.warning("Signal scheduler gap repair failed (non-fatal): %s", e)
 
-                    # Step 1: Update daily prices for all tracked stocks
+                    # Step 1: Sync daily prices (must run before plan execution)
                     self._sync_daily_prices(db, trade_date)
 
-                    # Step 2: Generate signals
+                    # Step 2: Execute pending trade plans (needs today's OHLCV)
+                    try:
+                        from api.services.bot_trading_engine import execute_pending_plans
+                        plan_results = execute_pending_plans(db, trade_date)
+                        if plan_results:
+                            logger.info("Executed %d trade plans for %s", len(plan_results), trade_date)
+                    except Exception as e:
+                        logger.error("Trade plan execution failed (non-fatal): %s", e)
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+
+                    # Step 3: AI strategy selection
+                    selected_ids = None
+                    try:
+                        from api.services.strategy_selector import (
+                            build_family_summary, format_family_table,
+                            select_strategies_by_families, get_fallback_strategy_ids,
+                        )
+                        from api.services.claude_runner import run_strategy_selection
+
+                        summaries = build_family_summary(db)
+                        if summaries:
+                            table = format_family_table(summaries)
+                            selection = run_strategy_selection(table)
+                            if selection and selection.get("selected_families"):
+                                selected_ids = select_strategies_by_families(
+                                    db, selection["selected_families"]
+                                )
+                                logger.info(
+                                    "AI selected strategies: %s (IDs: %s)",
+                                    selection["selected_families"], selected_ids,
+                                )
+                            if not selected_ids:
+                                selected_ids = get_fallback_strategy_ids(db)
+                                logger.info("Using fallback strategy IDs: %s", selected_ids)
+                        else:
+                            logger.warning("No family summaries, running all strategies")
+                    except Exception as e:
+                        logger.error("Strategy selection failed (non-fatal): %s", e)
+                        try:
+                            from api.services.strategy_selector import get_fallback_strategy_ids
+                            selected_ids = get_fallback_strategy_ids(db)
+                            logger.info("Fallback after error, IDs: %s", selected_ids)
+                        except Exception:
+                            pass
+
+                    # Step 4: Generate signals (filtered by selected strategies)
                     engine = SignalEngine(db)
-                    for _ in engine.generate_signals_stream(trade_date):
+                    for _ in engine.generate_signals_stream(trade_date, strategy_ids=selected_ids):
                         pass
                     logger.info("Scheduled signal generation completed for %s", trade_date)
                 else:
-                    logger.info("Skipped data sync & signal generation (non-trading day)")
+                    logger.info("Skipped data sync, plans & signals (non-trading day)")
 
                 self._last_run_date = trade_date
 
-                # Step 3: Run AI daily analysis (runs on both trading and non-trading days)
+                # Step 5: Run AI daily analysis (runs on both trading and non-trading days)
                 self._run_ai_analysis(trade_date, db)
             finally:
                 db.close()
