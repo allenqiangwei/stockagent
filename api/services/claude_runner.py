@@ -33,8 +33,16 @@ You have access to a local API at http://localhost:8050 with these endpoints:
 - GET /api/news/sentiment/latest — latest news sentiment analysis
 - POST /api/news/sentiment/analyze?hours_back=N — trigger fresh news sentiment analysis (N=hours to look back, default 24, max 168)
 - GET /api/stocks/watchlist — user's watchlist
+- GET /api/bot/portfolio — current bot holdings (stock_code, stock_name, quantity, avg_cost, total_invested)
+- GET /api/bot/plans/pending — pending trade plans not yet executed
+- GET /api/bot/trades?limit=20 — recent trade history
 
 IMPORTANT: When calling curl, always use: NO_PROXY=localhost,127.0.0.1 curl ...
+
+CRITICAL WORKFLOW:
+1. FIRST fetch current holdings via /api/bot/portfolio and pending plans via /api/bot/plans/pending
+2. Then fetch signals, sentiment, and market data
+3. Base your recommendations on ACTUAL holdings — do NOT recommend "hold" for stocks you don't hold
 
 Your task is to produce a daily market analysis report with:
 1. Market regime assessment (bull/bear/sideways) with confidence 0-100
@@ -43,11 +51,18 @@ Your task is to produce a daily market analysis report with:
 4. Risk warnings — any concerning patterns
 5. Actionable recommendations — specific stocks to watch with entry/exit levels
 
+Recommendation action rules:
+- "buy": Only for stocks NOT currently held that you want to open a new position. Must include entry_price.
+- "hold": ONLY for stocks the bot currently holds and should keep. Never use "hold" for stocks not in portfolio.
+- "sell" / "reduce": ONLY for stocks currently held that should be exited or reduced. Must include target price.
+- Do NOT include stocks that require no action. If a signal fires but you don't recommend acting, skip it.
+
 Output your analysis as a JSON object with these fields:
 - report_type: "daily"
 - market_regime: "bull" | "bear" | "sideways" | "transition"
 - market_regime_confidence: float 0.0-1.0 (e.g. 0.75 means 75% confident)
-- recommendations: list of {stock_code, stock_name, action, reason, entry_price, stop_loss, target}
+- recommendations: list of {stock_code, stock_name, action, reason, entry_price, stop_loss, target, alpha_score}
+  - alpha_score: copy directly from /api/signals/today response for this stock (the "alpha_score" field). If the stock has no signal or no alpha_score, use 0.
 - strategy_actions: list of {strategy_name, signal_count, top_stocks}
 - thinking_process: your detailed reasoning (string)
 - summary: 2-3 sentence executive summary (string)
@@ -70,9 +85,117 @@ Available API endpoints:
 - GET /api/news/sentiment/latest — news sentiment
 - GET /api/stocks/watchlist — watchlist
 - GET /api/stocks/search?keyword= — search stocks
+- GET /api/bot/portfolio — current bot holdings
+- GET /api/bot/plans/pending — pending trade plans
+- GET /api/bot/trades?limit=20 — recent trade history
 
 Answer in Chinese. Be concise but thorough. Use data from the APIs to support your analysis.
+When discussing holdings or trade actions, always check /api/bot/portfolio first for actual positions.
 """
+
+_STRATEGY_SELECTION_PROMPT_TEMPLATE = """\
+You are the StockAgent 策略选择引擎 (Strategy Selection Engine).
+
+Your job is to assess the current A-share market regime and select the best 3-5 strategy families \
+for today's signal generation.
+
+You have access to a local API at http://localhost:8050 with these endpoints:
+- GET /api/news/sentiment/latest — latest news sentiment analysis
+- GET /api/market/quote?code=000001 — Shanghai Composite index quote (proxy for market state)
+- GET /api/bot/portfolio — current bot holdings
+
+IMPORTANT: When calling curl, always use: NO_PROXY=localhost,127.0.0.1 curl ...
+
+Here is the table of all available strategy families and their regime-specific performance:
+
+{family_table}
+
+Selection rules:
+1. Assess current market regime: bull / bear / ranging / transition
+2. Match regime to each family's historical performance in that regime (win rate, return, drawdown)
+3. If the bot currently holds positions (check /api/bot/portfolio), ensure at least one selected \
+family has strong sell-signal coverage so exit signals can fire
+4. Pick 3-5 families that balance offense (high return in current regime) and defense (low drawdown)
+5. Prefer families with higher StdA (standardized alpha) scores
+6. Diversify across indicator types — avoid selecting multiple families from the same indicator group
+
+Output your result as a JSON object with exactly these fields:
+{{
+  "market_assessment": "<bull|bear|ranging|transition> — 1-2 sentence reasoning",
+  "selected_families": ["FamilyName1", "FamilyName2", "FamilyName3"],
+  "reasoning": "Detailed explanation of why these families were chosen, regime match, offense/defense balance"
+}}
+
+Return ONLY the JSON object, no markdown fences or extra text.
+"""
+
+
+def run_strategy_selection(family_table: str) -> dict | None:
+    """Run Claude to analyze market and select optimal strategy families.
+
+    Args:
+        family_table: Markdown table of strategy families with regime performance data.
+
+    Returns:
+        Dict with market_assessment, selected_families, reasoning — or None on failure.
+    """
+    prompt = (
+        "Analyze the current A-share market regime using the available APIs, "
+        "then select the best 3-5 strategy families from the provided table. "
+        "Return the result as the specified JSON object."
+    )
+
+    system_prompt = _STRATEGY_SELECTION_PROMPT_TEMPLATE.format(
+        family_table=family_table
+    )
+
+    args = [
+        "-p", prompt,
+        "--output-format", "json",
+        "--model", "opus",
+        "--append-system-prompt", system_prompt,
+        "--permission-mode", "bypassPermissions",
+    ]
+
+    try:
+        output = _run_cli(args, timeout=300)
+    except Exception as e:
+        logger.error("Strategy selection CLI failed: %s", e)
+        return None
+
+    result_text = output.get("result", "")
+    if not result_text:
+        logger.warning("Strategy selection returned empty result")
+        return None
+
+    # Parse inner JSON — strip markdown fences if present
+    cleaned = result_text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines)
+
+    try:
+        result = json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.error("Strategy selection result not valid JSON: %s", cleaned[:500])
+        return None
+
+    # Validate selected_families
+    families = result.get("selected_families")
+    if not isinstance(families, list) or len(families) == 0:
+        logger.error("Strategy selection returned no families: %s", result)
+        return None
+
+    logger.info(
+        "Strategy selection complete — regime=%s, families=%s",
+        result.get("market_assessment", "unknown"),
+        families,
+    )
+    return result
 
 
 def _run_cli(args: list[str], timeout: int = 180) -> dict:
