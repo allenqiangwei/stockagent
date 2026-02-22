@@ -332,6 +332,13 @@ export function usePromoteStrategy() {
   });
 }
 
+export function useExplorationRounds(page = 1, size = 20) {
+  return useQuery({
+    queryKey: ["lab", "exploration-rounds", page, size],
+    queryFn: () => lab.explorationRounds(page, size),
+  });
+}
+
 // ── AI Analyst ───────────────────────────────────
 export function useAIReports(limit = 30) {
   return useQuery({
@@ -361,6 +368,14 @@ export function useAIReportDates() {
   return useQuery({
     queryKey: ["ai-report-dates"],
     queryFn: () => ai.reportDates(),
+  });
+}
+
+export function useAISchedulerStatus() {
+  return useQuery({
+    queryKey: ["ai-scheduler-status"],
+    queryFn: () => ai.schedulerStatus(),
+    refetchInterval: 30_000, // refresh every 30s
   });
 }
 
@@ -492,5 +507,19 @@ export function useBotReviews(limit = 50) {
   return useQuery({
     queryKey: ["bot-reviews", limit],
     queryFn: () => bot.reviews(limit),
+  });
+}
+
+export function useBotPlans(status?: string) {
+  return useQuery({
+    queryKey: ["bot-plans", status],
+    queryFn: () => bot.plans(status),
+  });
+}
+
+export function useBotPendingPlans() {
+  return useQuery({
+    queryKey: ["bot-plans", "pending"],
+    queryFn: () => bot.pendingPlans(),
   });
 }

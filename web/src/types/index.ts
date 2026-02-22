@@ -414,6 +414,31 @@ export interface LabExperimentListItem {
   created_at: string;
 }
 
+export interface ExplorationRound {
+  id: number;
+  round_number: number;
+  mode: string;
+  started_at: string;
+  finished_at: string;
+  experiment_ids: number[];
+  total_experiments: number;
+  total_strategies: number;
+  profitable_count: number;
+  profitability_pct: number;
+  std_a_count: number;
+  best_strategy_name: string;
+  best_strategy_score: number;
+  best_strategy_return: number;
+  best_strategy_dd: number;
+  insights: string[];
+  promoted: { id: number; name: string; label: string; score: number }[];
+  issues_resolved: string[];
+  next_suggestions: string[];
+  summary: string;
+  memory_synced: boolean;
+  pinecone_synced: boolean;
+}
+
 // ── AI Analyst ──────────────────────────────────
 export interface AIReportListItem {
   id: number;
@@ -587,6 +612,15 @@ export interface BotSummary {
   loss_count: number;
 }
 
+export interface AISchedulerStatus {
+  running: boolean;
+  is_refreshing: boolean;
+  last_run_date: string | null;
+  next_run_time: string;
+  refresh_hour: number;
+  refresh_minute: number;
+}
+
 export interface BotStockTimeline {
   stock_code: string;
   stock_name: string;
@@ -603,4 +637,21 @@ export interface BotStockTimeline {
   current_market_value: number | null;
   trades: BotTradeItem[];
   review: BotTradeReviewItem | null;
+}
+
+export interface BotTradePlanItem {
+  id: number;
+  stock_code: string;
+  stock_name: string;
+  direction: "buy" | "sell";
+  plan_price: number;
+  quantity: number;
+  sell_pct: number;
+  plan_date: string;
+  status: "pending" | "executed" | "expired";
+  thinking: string;
+  report_id: number | null;
+  created_at: string;
+  executed_at: string | null;
+  execution_price: number | null;
 }

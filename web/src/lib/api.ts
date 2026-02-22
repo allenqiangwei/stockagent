@@ -52,6 +52,7 @@ import type {
   LabTemplate,
   LabExperiment,
   LabExperimentListItem,
+  ExplorationRound,
   IndexKlineResponse,
   AIReportListItem,
   AIReport,
@@ -66,6 +67,7 @@ import type {
   BotTradeReviewItem,
   BotSummary,
   BotStockTimeline,
+  BotTradePlanItem,
 } from "@/types";
 
 export const market = {
@@ -195,6 +197,12 @@ export const lab = {
     }),
   promoteStrategy: (id: number) =>
     post<{ message: string; strategy_id: number }>(`/lab/strategies/${id}/promote`, {}),
+  explorationRounds: (page = 1, size = 20) =>
+    request<{ items: ExplorationRound[]; total: number; page: number; size: number }>(
+      `/lab/exploration-rounds?page=${page}&size=${size}`
+    ),
+  explorationRound: (id: number) =>
+    request<ExplorationRound>(`/lab/exploration-rounds/${id}`),
 };
 
 // ── Backtest ──────────────────────────────────────────
@@ -238,6 +246,8 @@ export const ai = {
     request<AIReport>(`/ai/reports/date/${date}`),
   reportDates: (limit = 90) =>
     request<{ dates: string[] }>(`/ai/reports/dates?limit=${limit}`),
+  schedulerStatus: () =>
+    request<import("@/types").AISchedulerStatus>("/ai/scheduler-status"),
   triggerAnalysis: (date?: string) =>
     post<AnalysisTriggerResponse>("/ai/analyze", { date: date || null }),
   analysisProgress: (jobId: string) =>
@@ -269,6 +279,11 @@ export const bot = {
   reviews: (limit = 50) =>
     request<BotTradeReviewItem[]>(`/bot/reviews?limit=${limit}`),
   summary: () => request<BotSummary>("/bot/summary"),
+  plans: (status?: string) =>
+    request<BotTradePlanItem[]>(
+      `/bot/plans${status ? `?status=${status}` : ""}`
+    ),
+  pendingPlans: () => request<BotTradePlanItem[]>("/bot/plans/pending"),
 };
 
 // ── News Signals ──────────────────────────────────────
