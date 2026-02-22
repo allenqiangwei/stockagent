@@ -6,49 +6,242 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from api.models.bot_trading import BotPortfolio, BotTrade, BotTradeReview
+from api.models.bot_trading import BotPortfolio, BotTrade, BotTradeReview, BotTradePlan
+from api.models.stock import DailyPrice
 
 logger = logging.getLogger(__name__)
 
 BUY_AMOUNT = 100_000  # ¥100,000 per buy
 
 
-def execute_bot_trades(db: Session, report_id: int, report_date: str, recommendations: list[dict]) -> list[dict]:
-    """Execute simulated trades based on AI report recommendations.
+def _get_next_trading_day(db: Session, after_date: str) -> str | None:
+    """Find the next trading day after the given date.
 
-    Returns list of executed trade summaries.
+    Uses DataCollector.get_trading_dates to query the exchange calendar.
+    Falls back to after_date + 1 weekday if API fails.
+    """
+    try:
+        from api.services.data_collector import DataCollector
+        from datetime import date, timedelta
+
+        base = date.fromisoformat(after_date)
+        end = base + timedelta(days=30)
+        collector = DataCollector(db)
+        dates = collector.get_trading_dates(after_date, end.isoformat())
+        if dates:
+            for d in sorted(dates):
+                if d > after_date:
+                    return d
+    except Exception as e:
+        logger.warning("get_next_trading_day failed: %s", e)
+
+    # Fallback: skip weekends
+    from datetime import date, timedelta
+    d = date.fromisoformat(after_date) + timedelta(days=1)
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d.isoformat()
+
+
+def create_trade_plans(db: Session, report_id: int, report_date: str, recommendations: list[dict]) -> list[dict]:
+    """Create trade plans from AI recommendations for the next trading day.
+
+    Instead of executing trades immediately, creates BotTradePlan records
+    that will be checked against actual market prices on the plan_date.
+    Returns list of created/updated plan summaries.
     """
     if not recommendations:
         return []
 
-    executed = []
+    next_td = _get_next_trading_day(db, report_date)
+    if not next_td:
+        logger.warning("Cannot find next trading day after %s, skipping plan creation", report_date)
+        return []
+
+    plans = []
 
     for rec in recommendations:
         action = rec.get("action", "")
         stock_code = rec.get("stock_code", "")
         stock_name = rec.get("stock_name", "")
-        target_price = rec.get("target_price")
-        position_pct = rec.get("position_pct", 0)
         reason = rec.get("reason", "")
 
         if not stock_code or not action:
             continue
 
         if action == "buy":
-            result = _execute_buy(db, stock_code, stock_name, target_price, reason, report_id, report_date)
-        elif action == "sell":
-            result = _execute_sell(db, stock_code, stock_name, target_price, 100.0, reason, report_id, report_date)
-        elif action == "reduce":
-            result = _execute_sell(db, stock_code, stock_name, target_price, position_pct, reason, report_id, report_date)
-        elif action == "hold":
-            result = _execute_hold(db, stock_code, stock_name, target_price, reason, report_id, report_date)
-        else:
-            continue
+            price = rec.get("entry_price") or rec.get("target_price")
+            if not price or price <= 0:
+                logger.warning("Plan skipped: no valid price for buy %s", stock_code)
+                continue
+            quantity = math.floor(BUY_AMOUNT / price / 100) * 100
+            if quantity <= 0:
+                quantity = 100
+            result = _upsert_plan(db, stock_code, stock_name, "buy", price, quantity, 0.0,
+                                  next_td, reason, report_id)
+            plans.append(result)
 
-        if result:
-            executed.append(result)
+        elif action in ("sell", "reduce"):
+            price = rec.get("target_price") or rec.get("target")
+            if not price or price <= 0:
+                logger.warning("Plan skipped: no valid price for sell %s", stock_code)
+                continue
+            holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == stock_code).first()
+            if not holding or holding.quantity <= 0:
+                logger.info("Plan skipped: no holding for sell %s", stock_code)
+                continue
+            sell_pct = 100.0 if action == "sell" else rec.get("position_pct", 50.0)
+            quantity = math.floor(holding.quantity * sell_pct / 100 / 100) * 100
+            if quantity <= 0:
+                quantity = min(100, holding.quantity)
+            result = _upsert_plan(db, stock_code, stock_name, "sell", price, quantity, sell_pct,
+                                  next_td, reason, report_id)
+            plans.append(result)
+
+        elif action == "hold":
+            _execute_hold(db, stock_code, stock_name, rec.get("target_price"), reason, report_id, report_date)
 
     db.commit()
+    logger.info("Created/updated %d trade plans for %s", len(plans), next_td)
+    return plans
+
+
+def _upsert_plan(db: Session, code: str, name: str, direction: str,
+                 price: float, quantity: int, sell_pct: float,
+                 plan_date: str, thinking: str, report_id: int) -> dict:
+    """Insert or update a pending trade plan. One pending plan per stock+direction."""
+    existing = (
+        db.query(BotTradePlan)
+        .filter(
+            BotTradePlan.stock_code == code,
+            BotTradePlan.direction == direction,
+            BotTradePlan.status == "pending",
+        )
+        .first()
+    )
+
+    if existing:
+        existing.plan_price = price
+        existing.quantity = quantity
+        existing.sell_pct = sell_pct
+        existing.plan_date = plan_date
+        existing.thinking = thinking
+        existing.report_id = report_id
+        existing.stock_name = name
+        logger.info("Plan UPDATED: %s %s %s @ ¥%.2f for %s", direction.upper(), code, name, price, plan_date)
+        return {"action": "plan_updated", "direction": direction, "stock_code": code,
+                "plan_price": price, "quantity": quantity, "plan_date": plan_date}
+    else:
+        plan = BotTradePlan(
+            stock_code=code, stock_name=name, direction=direction,
+            plan_price=price, quantity=quantity, sell_pct=sell_pct,
+            plan_date=plan_date, status="pending",
+            thinking=thinking, report_id=report_id,
+        )
+        db.add(plan)
+        logger.info("Plan CREATED: %s %s %s @ ¥%.2f for %s", direction.upper(), code, name, price, plan_date)
+        return {"action": "plan_created", "direction": direction, "stock_code": code,
+                "plan_price": price, "quantity": quantity, "plan_date": plan_date}
+
+
+def execute_pending_plans(db: Session, trade_date: str) -> list[dict]:
+    """Check pending trade plans for today and execute those triggered by market prices.
+
+    Buy trigger:  daily low  <= plan_price
+    Sell trigger: daily high >= plan_price
+    Untriggered plans are marked expired.
+    Plans with plan_date < trade_date (missed days) are also expired.
+    """
+    plans = (
+        db.query(BotTradePlan)
+        .filter(BotTradePlan.status == "pending", BotTradePlan.plan_date <= trade_date)
+        .all()
+    )
+
+    if not plans:
+        logger.info("No pending trade plans for %s", trade_date)
+        return []
+
+    executed = []
+
+    for plan in plans:
+        # Missed day cleanup
+        if plan.plan_date < trade_date:
+            plan.status = "expired"
+            logger.info("Plan EXPIRED (missed): %s %s %s, plan_date=%s", plan.direction, plan.stock_code, plan.stock_name, plan.plan_date)
+            continue
+
+        # Get today's OHLCV
+        ohlcv = (
+            db.query(DailyPrice)
+            .filter(DailyPrice.stock_code == plan.stock_code, DailyPrice.trade_date == trade_date)
+            .first()
+        )
+
+        if not ohlcv:
+            # Try to fetch data
+            try:
+                from api.services.data_collector import DataCollector
+                collector = DataCollector(db)
+                collector.get_daily_df(plan.stock_code, trade_date, trade_date, local_only=False)
+                ohlcv = (
+                    db.query(DailyPrice)
+                    .filter(DailyPrice.stock_code == plan.stock_code, DailyPrice.trade_date == trade_date)
+                    .first()
+                )
+            except Exception as e:
+                logger.warning("Failed to fetch OHLCV for %s on %s: %s", plan.stock_code, trade_date, e)
+
+        if not ohlcv:
+            plan.status = "expired"
+            logger.info("Plan EXPIRED (no data): %s %s %s", plan.direction, plan.stock_code, plan.stock_name)
+            continue
+
+        high = float(ohlcv.high)
+        low = float(ohlcv.low)
+
+        if plan.direction == "buy":
+            triggered = low <= plan.plan_price
+        else:  # sell
+            triggered = high >= plan.plan_price
+
+        if triggered:
+            if plan.direction == "buy":
+                result = _execute_buy(
+                    db, plan.stock_code, plan.stock_name, plan.plan_price,
+                    plan.thinking, plan.report_id, trade_date,
+                )
+            else:
+                # Re-check holding quantity (may have changed since plan creation)
+                holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == plan.stock_code).first()
+                if not holding or holding.quantity <= 0:
+                    plan.status = "expired"
+                    logger.info("Plan EXPIRED (no holding): sell %s", plan.stock_code)
+                    continue
+                actual_sell_pct = plan.sell_pct
+                if plan.quantity > holding.quantity:
+                    actual_sell_pct = 100.0  # Sell whatever is left
+                result = _execute_sell(
+                    db, plan.stock_code, plan.stock_name, plan.plan_price,
+                    actual_sell_pct, plan.thinking, plan.report_id, trade_date,
+                )
+
+            if result:
+                plan.status = "executed"
+                plan.executed_at = datetime.now()
+                plan.execution_price = plan.plan_price
+                executed.append(result)
+                logger.info("Plan EXECUTED: %s %s %s @ ¥%.2f", plan.direction, plan.stock_code, plan.stock_name, plan.plan_price)
+            else:
+                plan.status = "expired"
+                logger.info("Plan EXPIRED (exec failed): %s %s %s", plan.direction, plan.stock_code, plan.stock_name)
+        else:
+            plan.status = "expired"
+            logger.info("Plan EXPIRED (not triggered): %s %s %s, price=¥%.2f, high=%.2f, low=%.2f",
+                        plan.direction, plan.stock_code, plan.stock_name, plan.plan_price, high, low)
+
+    db.commit()
+    logger.info("Plan execution done for %s: %d executed, %d total", trade_date, len(executed), len(plans))
     return executed
 
 
@@ -56,6 +249,16 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
     """Buy ~¥100,000 worth of stock."""
     if not price or price <= 0:
         logger.warning("Bot buy skipped: no valid target_price for %s", code)
+        return None
+
+    # Rule: same stock can only be bought once per day
+    already_bought = (
+        db.query(BotTrade)
+        .filter(BotTrade.stock_code == code, BotTrade.action == "buy", BotTrade.trade_date == trade_date)
+        .first()
+    )
+    if already_bought:
+        logger.info("Bot buy skipped: %s already bought on %s", code, trade_date)
         return None
 
     quantity = math.floor(BUY_AMOUNT / price / 100) * 100  # Round to lots of 100
@@ -106,6 +309,16 @@ def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_p
     holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == code).first()
     if not holding or holding.quantity <= 0:
         logger.warning("Bot sell skipped: no holding for %s", code)
+        return None
+
+    # Rule: T+1 — cannot sell stock bought on the same day
+    bought_today = (
+        db.query(BotTrade)
+        .filter(BotTrade.stock_code == code, BotTrade.action == "buy", BotTrade.trade_date == trade_date)
+        .first()
+    )
+    if bought_today:
+        logger.info("Bot sell skipped: %s was bought today (T+1 rule), date=%s", code, trade_date)
         return None
 
     if not price or price <= 0:
