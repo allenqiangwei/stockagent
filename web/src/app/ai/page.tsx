@@ -24,6 +24,9 @@ import {
   Brain,
   ArrowUpRight,
   ArrowDownRight,
+  Clock,
+  CircleCheck,
+  CircleX,
 } from "lucide-react";
 import {
   useAIReports,
@@ -36,9 +39,11 @@ import {
   useBotPortfolio,
   useBotSummary,
   useBotReviews,
+  useBotPlans,
+  useAISchedulerStatus,
 } from "@/hooks/use-queries";
 import { bot } from "@/lib/api";
-import type { AIReport, AIReportListItem, BotTradeItem, BotStockTimeline } from "@/types";
+import type { AIReport, AIReportListItem, BotTradeItem, BotStockTimeline, BotTradePlanItem } from "@/types";
 
 // ── helpers ────────────────────────────────────────────
 
@@ -541,7 +546,8 @@ function BotTradingPanel() {
   const { data: summary } = useBotSummary();
   const { data: portfolio } = useBotPortfolio();
   const { data: reviews } = useBotReviews();
-  const [subTab, setSubTab] = useState<"holding" | "closed">("holding");
+  const { data: plans } = useBotPlans();
+  const [subTab, setSubTab] = useState<"holding" | "plans" | "closed">("holding");
   const [expandedCode, setExpandedCode] = useState<string | null>(null);
   const [timelines, setTimelines] = useState<Record<string, BotStockTimeline>>({});
 
@@ -588,7 +594,7 @@ function BotTradingPanel() {
 
       {/* Sub-tabs */}
       <div className="flex gap-1 border-b border-border/30 pb-0">
-        {(["holding", "closed"] as const).map(tab => (
+        {(["holding", "plans", "closed"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setSubTab(tab)}
@@ -598,7 +604,7 @@ function BotTradingPanel() {
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
           >
-            {tab === "holding" ? `当前持仓 (${portfolio?.length || 0})` : `已完结 (${reviews?.length || 0})`}
+            {tab === "holding" ? `当前持仓 (${portfolio?.length || 0})` : tab === "plans" ? `计划 (${plans?.length || 0})` : `已完结 (${reviews?.length || 0})`}
           </button>
         ))}
       </div>
@@ -664,6 +670,73 @@ function BotTradingPanel() {
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Plans */}
+      {subTab === "plans" && (
+        <div className="space-y-3">
+          {!plans?.length ? (
+            <p className="text-center text-muted-foreground py-8">暂无交易计划</p>
+          ) : (
+            <>
+              {/* Pending plans */}
+              {plans.filter((p: BotTradePlanItem) => p.status === "pending").map((plan: BotTradePlanItem) => (
+                <div key={plan.id} className="border border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-700 rounded-lg p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${plan.direction === "buy" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"}`}>
+                        {plan.direction === "buy" ? "买入" : "卖出"}
+                      </span>
+                      <span className="font-mono font-bold">{plan.stock_code}</span>
+                      <span className="text-muted-foreground text-sm">{plan.stock_name}</span>
+                    </div>
+                    <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">待执行 {plan.plan_date}</span>
+                  </div>
+                  <div className="mt-2 flex gap-4 text-sm text-muted-foreground">
+                    <span>目标价: <span className="text-foreground">¥{plan.plan_price.toFixed(2)}</span></span>
+                    <span>数量: <span className="text-foreground">{plan.quantity}</span></span>
+                    {plan.direction === "sell" && <span>比例: <span className="text-foreground">{plan.sell_pct}%</span></span>}
+                  </div>
+                  {plan.thinking && (
+                    <p className="mt-2 text-xs text-muted-foreground line-clamp-2">{plan.thinking}</p>
+                  )}
+                </div>
+              ))}
+
+              {/* Executed/Expired plans */}
+              {plans.filter((p: BotTradePlanItem) => p.status !== "pending").length > 0 && (
+                <details className="mt-4">
+                  <summary className="text-sm text-muted-foreground cursor-pointer">
+                    历史计划 ({plans.filter((p: BotTradePlanItem) => p.status !== "pending").length})
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    {plans.filter((p: BotTradePlanItem) => p.status !== "pending").map((plan: BotTradePlanItem) => (
+                      <div key={plan.id} className="border border-border rounded-lg p-2 opacity-60">
+                        <div className="flex items-center justify-between text-sm">
+                          <div className="flex items-center gap-2">
+                            <span className={plan.direction === "buy" ? "text-green-600" : "text-red-600"}>
+                              {plan.direction === "buy" ? "买" : "卖"}
+                            </span>
+                            <span className="font-mono">{plan.stock_code}</span>
+                            <span className="text-muted-foreground">{plan.stock_name}</span>
+                          </div>
+                          <span className={`text-xs px-1.5 py-0.5 rounded ${plan.status === "executed" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"}`}>
+                            {plan.status === "executed" ? "已执行" : "已过期"}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex gap-3 text-xs text-muted-foreground">
+                          <span>¥{plan.plan_price.toFixed(2)}</span>
+                          <span>{plan.quantity}股</span>
+                          <span>{plan.plan_date}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -819,6 +892,10 @@ export default function AIPage() {
   const [analysisJobId, setAnalysisJobId] = useState<string | null>(null);
   const [analysisReportDate, setAnalysisReportDate] = useState<string>("");
   const [mainTab, setMainTab] = useState<"analysis" | "trading">("analysis");
+  // Mobile view: "reports" | "content" | "chat"
+  const [mobileView, setMobileView] = useState<"reports" | "content" | "chat">("reports");
+  // Tablet: show/hide chat overlay
+  const [showChat, setShowChat] = useState(false);
   const queryClient = useQueryClient();
 
   const reportsQuery = useAIReports();
@@ -826,6 +903,7 @@ export default function AIPage() {
   const datesQuery = useAIReportDates();
   const triggerMutation = useTriggerAnalysis();
   const pollQuery = useAnalysisPoll(analysisJobId);
+  const { data: schedulerStatus } = useAISchedulerStatus();
 
   // Restore analysis state from localStorage on mount
   useEffect(() => {
@@ -895,8 +973,278 @@ export default function AIPage() {
   const reports = reportsQuery.data ?? [];
   const report = reportQuery.data;
 
-  return (
-    <div className="flex h-[calc(100vh-3rem)]">
+  // ── Shared sub-components ──
+
+  const reportListContent = (
+    <>
+      {/* Scheduler status */}
+      {schedulerStatus && (
+        <div className="mx-3 mt-2 mb-1 rounded-lg border border-border/40 bg-muted/30 px-3 py-2 text-[11px] space-y-1">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              {schedulerStatus.running ? (
+                <CircleCheck className="h-3 w-3 text-green-500" />
+              ) : (
+                <CircleX className="h-3 w-3 text-red-500" />
+              )}
+              <span className={schedulerStatus.running ? "text-green-500" : "text-red-500"}>
+                {schedulerStatus.running ? "自动分析运行中" : "自动分析已停止"}
+              </span>
+            </div>
+            {schedulerStatus.is_refreshing && (
+              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 text-amber-500 border-amber-500/30">
+                <Loader2 className="h-2.5 w-2.5 animate-spin mr-1" />
+                分析中
+              </Badge>
+            )}
+          </div>
+          <div className="flex items-center gap-3 text-muted-foreground">
+            <div className="flex items-center gap-1">
+              <Clock className="h-3 w-3" />
+              <span>上次: {schedulerStatus.last_run_date || "—"}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <Clock className="h-3 w-3" />
+              <span>下次: {schedulerStatus.next_run_time?.slice(5) || "—"}</span>
+            </div>
+          </div>
+        </div>
+      )}
+      <div className="py-1">
+        {reportsQuery.isLoading && (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        )}
+        {reports.map((r: AIReportListItem) => (
+          <button
+            key={r.id}
+            onClick={() => {
+              setSelectedId(r.id);
+              setMobileView("content");
+              if (isAnalyzing) {
+                setAnalysisJobId(null);
+                clearAnalysisState();
+              }
+            }}
+            className={`w-full text-left px-3 py-2 text-sm transition-colors hover:bg-accent/50 ${
+              selectedId === r.id && !isAnalyzing
+                ? "bg-accent text-accent-foreground"
+                : "text-muted-foreground"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              <Calendar className="h-3.5 w-3.5 shrink-0" />
+              <span className="font-mono text-xs">{r.report_date}</span>
+            </div>
+            <div className="flex items-center gap-1.5 mt-1">
+              {regimeBadge(r.market_regime)}
+              <span className="text-xs truncate">{r.report_type}</span>
+            </div>
+            <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+              {r.summary}
+            </p>
+          </button>
+        ))}
+        {!reportsQuery.isLoading && reports.length === 0 && (
+          <div className="text-center py-8 text-xs text-muted-foreground">
+            <p>暂无报告</p>
+            <p className="mt-1">点击上方按钮触发分析</p>
+          </div>
+        )}
+      </div>
+    </>
+  );
+
+  const mainTabBar = (
+    <div className="flex border-b border-border/30 px-4">
+      <button
+        onClick={() => setMainTab("analysis")}
+        className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-[1px] ${
+          mainTab === "analysis"
+            ? "border-primary text-primary"
+            : "border-transparent text-muted-foreground hover:text-foreground"
+        }`}
+      >
+        市场分析
+      </button>
+      <button
+        onClick={() => setMainTab("trading")}
+        className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-[1px] ${
+          mainTab === "trading"
+            ? "border-primary text-primary"
+            : "border-transparent text-muted-foreground hover:text-foreground"
+        }`}
+      >
+        AI交易
+      </button>
+    </div>
+  );
+
+  const centerContent = (
+    <>
+      {mainTab === "analysis" ? (
+        <>
+          {isAnalyzing ? (
+            <AnalysisProgress
+              progress={pollQuery.data?.progress || "正在准备分析..."}
+              errorMessage={pollQuery.data?.status === "error" ? (pollQuery.data.errorMessage || "分析失败") : ""}
+              onRetry={handleRetry}
+            />
+          ) : reportQuery.isLoading ? (
+            <div className="flex-1 flex items-center justify-center">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : reportQuery.isError && selectedId ? (
+            <div className="flex-1 flex items-center justify-center text-muted-foreground">
+              <div className="text-center space-y-2">
+                <p className="text-sm">报告加载失败</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isAnalyzing}
+                  onClick={() => handleTrigger()}
+                >
+                  <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+                  生成新报告
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <ReportViewer report={report} />
+          )}
+        </>
+      ) : (
+        <ScrollArea className="flex-1">
+          <BotTradingPanel />
+        </ScrollArea>
+      )}
+    </>
+  );
+
+  // ── Mobile layout (<768px) ──
+  // Tab bar at bottom, full-screen panels
+  const mobileLayout = (
+    <div className="flex flex-col h-[calc(100vh-3rem)] lg:hidden">
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/40 shrink-0">
+        {mobileView === "content" ? (
+          <>
+            <button
+              onClick={() => setMobileView("reports")}
+              className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+            >
+              <ChevronDown className="h-3 w-3 rotate-90" />
+              返回
+            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setMainTab("analysis")}
+                className={`text-xs font-medium px-2 py-1 rounded-md transition-colors ${
+                  mainTab === "analysis" ? "bg-primary/10 text-primary" : "text-muted-foreground"
+                }`}
+              >
+                市场分析
+              </button>
+              <button
+                onClick={() => setMainTab("trading")}
+                className={`text-xs font-medium px-2 py-1 rounded-md transition-colors ${
+                  mainTab === "trading" ? "bg-primary/10 text-primary" : "text-muted-foreground"
+                }`}
+              >
+                AI交易
+              </button>
+            </div>
+            <button
+              onClick={() => setMobileView("chat")}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              <MessageSquare className="h-4 w-4" />
+            </button>
+          </>
+        ) : mobileView === "chat" ? (
+          <>
+            <button
+              onClick={() => setMobileView("reports")}
+              className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+            >
+              <ChevronDown className="h-3 w-3 rotate-90" />
+              返回
+            </button>
+            <span className="text-sm font-medium">AI 对话</span>
+            <div className="w-6" />
+          </>
+        ) : (
+          <>
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Sparkles className="h-4 w-4 text-chart-1" />
+              分析报告
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                disabled={isAnalyzing || triggerMutation.isPending}
+                onClick={() => handleTrigger()}
+              >
+                {isAnalyzing || triggerMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+              </Button>
+              <button
+                onClick={() => setMobileView("chat")}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <MessageSquare className="h-4 w-4" />
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        {mobileView === "reports" && (
+          <ScrollArea className="flex-1">
+            {reportListContent}
+          </ScrollArea>
+        )}
+        {mobileView === "content" && (
+          <div className="flex-1 overflow-y-auto">{centerContent}</div>
+        )}
+        {mobileView === "chat" && <ChatWidget />}
+      </div>
+
+      {/* Bottom tab bar */}
+      <div className="flex border-t border-border/40 bg-background shrink-0">
+        {([
+          { key: "reports" as const, label: "报告", icon: Sparkles },
+          { key: "content" as const, label: "分析", icon: Brain },
+          { key: "chat" as const, label: "对话", icon: MessageSquare },
+        ]).map(({ key, label, icon: Icon }) => (
+          <button
+            key={key}
+            onClick={() => setMobileView(key)}
+            className={`flex-1 flex flex-col items-center gap-0.5 py-2 text-[10px] transition-colors ${
+              mobileView === key
+                ? "text-primary"
+                : "text-muted-foreground"
+            }`}
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  // ── Desktop layout (>=1024px) ──
+  const desktopLayout = (
+    <div className="hidden lg:flex h-[calc(100vh-3rem)]">
       {/* Left panel — Report list */}
       <div className="w-56 shrink-0 border-r border-border/40 flex flex-col">
         <div className="flex items-center justify-between px-3 py-2 border-b border-border/40">
@@ -919,115 +1267,15 @@ export default function AIPage() {
             )}
           </Button>
         </div>
-
         <ScrollArea className="flex-1">
-          <div className="py-1">
-            {reportsQuery.isLoading && (
-              <div className="flex items-center justify-center py-8">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-              </div>
-            )}
-            {reports.map((r: AIReportListItem) => (
-              <button
-                key={r.id}
-                onClick={() => {
-                  setSelectedId(r.id);
-                  if (isAnalyzing) {
-                    setAnalysisJobId(null);
-                    clearAnalysisState();
-                  }
-                }}
-                className={`w-full text-left px-3 py-2 text-sm transition-colors hover:bg-accent/50 ${
-                  selectedId === r.id && !isAnalyzing
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground"
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <Calendar className="h-3.5 w-3.5 shrink-0" />
-                  <span className="font-mono text-xs">{r.report_date}</span>
-                </div>
-                <div className="flex items-center gap-1.5 mt-1">
-                  {regimeBadge(r.market_regime)}
-                  <span className="text-xs truncate">{r.report_type}</span>
-                </div>
-                <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                  {r.summary}
-                </p>
-              </button>
-            ))}
-            {!reportsQuery.isLoading && reports.length === 0 && (
-              <div className="text-center py-8 text-xs text-muted-foreground">
-                <p>暂无报告</p>
-                <p className="mt-1">点击上方按钮触发分析</p>
-              </div>
-            )}
-          </div>
+          {reportListContent}
         </ScrollArea>
       </div>
 
-      {/* Center panel — Report viewer / Analysis progress / Bot Trading */}
+      {/* Center panel */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Main tab switcher */}
-        <div className="flex border-b border-border/30 px-4">
-          <button
-            onClick={() => setMainTab("analysis")}
-            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-[1px] ${
-              mainTab === "analysis"
-                ? "border-primary text-primary"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            市场分析
-          </button>
-          <button
-            onClick={() => setMainTab("trading")}
-            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-[1px] ${
-              mainTab === "trading"
-                ? "border-primary text-primary"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            AI交易
-          </button>
-        </div>
-
-        {mainTab === "analysis" ? (
-          <>
-            {isAnalyzing ? (
-              <AnalysisProgress
-                progress={pollQuery.data?.progress || "正在准备分析..."}
-                errorMessage={pollQuery.data?.status === "error" ? (pollQuery.data.errorMessage || "分析失败") : ""}
-                onRetry={handleRetry}
-              />
-            ) : reportQuery.isLoading ? (
-              <div className="flex-1 flex items-center justify-center">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : reportQuery.isError && selectedId ? (
-              <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                <div className="text-center space-y-2">
-                  <p className="text-sm">报告加载失败</p>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={isAnalyzing}
-                    onClick={() => handleTrigger()}
-                  >
-                    <Sparkles className="h-3.5 w-3.5 mr-1.5" />
-                    生成新报告
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <ReportViewer report={report} />
-            )}
-          </>
-        ) : (
-          <ScrollArea className="flex-1">
-            <BotTradingPanel />
-          </ScrollArea>
-        )}
+        {mainTabBar}
+        {centerContent}
       </div>
 
       {/* Right panel — Chat */}
@@ -1035,5 +1283,12 @@ export default function AIPage() {
         <ChatWidget />
       </div>
     </div>
+  );
+
+  return (
+    <>
+      {mobileLayout}
+      {desktopLayout}
+    </>
   );
 }
