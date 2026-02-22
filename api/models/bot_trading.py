@@ -66,3 +66,29 @@ class BotTradeReview(Base):
     memory_note_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     trades: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class BotTradePlan(Base):
+    """Pending trade plan — created from AI recommendations, executed on next trading day."""
+
+    __tablename__ = "bot_trade_plans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stock_code: Mapped[str] = mapped_column(String(6), index=True)
+    stock_name: Mapped[str] = mapped_column(String(50), default="")
+    direction: Mapped[str] = mapped_column(String(4))  # "buy" | "sell"
+    plan_price: Mapped[float] = mapped_column(Float, default=0.0)
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    sell_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    plan_date: Mapped[str] = mapped_column(String(10), index=True)
+    status: Mapped[str] = mapped_column(String(10), default="pending")  # pending|executed|expired
+    thinking: Mapped[str] = mapped_column(Text, default="")
+    report_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    execution_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        Index("ix_trade_plan_code_dir_status", "stock_code", "direction", "status"),
+        Index("ix_trade_plan_date_status", "plan_date", "status"),
+    )
