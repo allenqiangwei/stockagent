@@ -111,6 +111,7 @@ class SignalEngine:
         self,
         trade_date: str,
         stock_codes: Optional[list[str]] = None,
+        strategy_ids: Optional[list[int]] = None,
     ) -> Generator[str, None, None]:
         """Generate signals with SSE progress streaming.
 
@@ -123,9 +124,10 @@ class SignalEngine:
             yield self._sse_event({"type": "error", "message": "没有可用的股票数据"})
             return
 
-        strategies = (
-            self.db.query(Strategy).filter(Strategy.enabled.is_(True)).all()
-        )
+        query = self.db.query(Strategy).filter(Strategy.enabled.is_(True))
+        if strategy_ids:
+            query = query.filter(Strategy.id.in_(strategy_ids))
+        strategies = query.all()
         if not strategies:
             yield self._sse_event({"type": "error", "message": "没有启用的策略"})
             return
