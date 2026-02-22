@@ -171,10 +171,42 @@ def trigger_analysis(
     db: Session = Depends(get_db),
 ):
     """Manually trigger AI daily analysis for a given date."""
-    from api.services.claude_runner import run_daily_analysis
+    import logging
+    from api.services.claude_runner import run_daily_analysis, run_strategy_selection
+    from api.services.strategy_selector import (
+        build_family_summary, format_family_table,
+        select_strategies_by_families, get_fallback_strategy_ids,
+    )
+    from api.services.signal_engine import SignalEngine
 
+    _logger = logging.getLogger(__name__)
     target_date = report_date or date.today().isoformat()
 
+    # Step 1: AI strategy selection + signal generation
+    selected_ids = None
+    try:
+        summaries = build_family_summary(db)
+        if summaries:
+            table = format_family_table(summaries)
+            selection = run_strategy_selection(table)
+            if selection and selection.get("selected_families"):
+                selected_ids = select_strategies_by_families(
+                    db, selection["selected_families"]
+                )
+            if not selected_ids:
+                selected_ids = get_fallback_strategy_ids(db)
+    except Exception as e:
+        _logger.warning("Strategy selection failed in manual analyze: %s", e)
+
+    if selected_ids:
+        try:
+            engine = SignalEngine(db)
+            for _ in engine.generate_signals_stream(target_date, strategy_ids=selected_ids):
+                pass
+        except Exception as e:
+            _logger.warning("Signal generation failed in manual analyze: %s", e)
+
+    # Step 2: AI analysis
     result = run_daily_analysis(target_date)
 
     if result is None:
