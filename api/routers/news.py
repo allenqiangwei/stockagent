@@ -197,12 +197,15 @@ def get_sentiment_history(
 
 
 @router.post("/sentiment/analyze")
-def trigger_sentiment_analysis(db: Session = Depends(get_db)):
+def trigger_sentiment_analysis(
+    hours_back: float = Query(24, ge=1, le=168, description="Hours of news to analyze (1-168)"),
+    db: Session = Depends(get_db),
+):
     """Manually trigger a market sentiment analysis."""
     from api.services.news_sentiment_engine import NewsSentimentEngine
 
     engine = NewsSentimentEngine()
-    result = engine.analyze_market(db, period_type="manual", hours_back=24)
+    result = engine.analyze_market(db, period_type="manual", hours_back=hours_back)
 
     if not result:
         return {"message": "无最新新闻可分析", "result": None}
