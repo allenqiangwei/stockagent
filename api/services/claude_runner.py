@@ -44,6 +44,9 @@ CRITICAL WORKFLOW:
 2. Then fetch signals, sentiment, and market data
 3. Base your recommendations on ACTUAL holdings — do NOT recommend "hold" for stocks you don't hold
 
+注意：今日信号是基于 AI 策略选择引擎筛选的策略生成的，不是全部策略库。
+信号中的 alpha_score 反映了选中策略的综合评分，直接在 recommendations 中传回。
+
 Your task is to produce a daily market analysis report with:
 1. Market regime assessment (bull/bear/sideways) with confidence 0-100
 2. Key signal highlights — which stocks have strong buy/sell signals and why
