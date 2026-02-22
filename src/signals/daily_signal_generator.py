@@ -100,10 +100,10 @@ class DailySignalGenerator:
         self.lookback_days = lookback_days
 
         # Initialize components
-        self.indicator_calculator = IndicatorCalculator(
-            config=indicator_config or IndicatorConfig()
-        )
         self.signal_combiner = SignalCombiner()
+        self.indicator_calculator = IndicatorCalculator(
+            config=indicator_config or self.signal_combiner.get_indicator_config()
+        )
         self.feature_engineer = FeatureEngineer() if ml_model else None
 
     def generate_signals(

@@ -51,6 +51,7 @@ function getSessionStore(): Map<string, SessionState> {
 // ── Config ───────────────────────────────────────────
 
 const CLAUDE_BIN = "/opt/homebrew/bin/claude";
+const CHAT_MODEL = "sonnet";
 const MODEL = "opus";
 const MAX_TURNS = "30";
 const JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -214,10 +215,10 @@ export function startClaudeJob(
     "--output-format", "stream-json",
     "--verbose",
     "--max-turns", MAX_TURNS,
-    "--model", MODEL,
+    "--model", CHAT_MODEL,
     "--append-system-prompt", SYSTEM_PROMPT,
     "--permission-mode", "bypassPermissions",
-    "--max-budget-usd", "0.5",
+    "--max-budget-usd", "2.0",
   ];
 
   if (claudeSessionId) {
@@ -251,6 +252,7 @@ export function startClaudeJob(
   // Parse stdout (stream-json: one JSON object per line)
   let buffer = "";
   let lastResultText = "";
+  let lastAssistantText = "";
   let lastSessionId: string | null = null;
 
   child.stdout?.on("data", (chunk: Buffer) => {
@@ -280,6 +282,18 @@ export function startClaudeJob(
         lastSessionId = event.session_id;
       }
 
+      // Capture assistant message content as fallback
+      if (event.type === "assistant" && event.message) {
+        const msg = event.message as { content?: { type: string; text?: string }[] };
+        if (msg.content) {
+          const textParts = msg.content
+            .filter((c) => c.type === "text" && c.text)
+            .map((c) => c.text)
+            .join("\n");
+          if (textParts) lastAssistantText = textParts;
+        }
+      }
+
       // Capture result
       if (event.type === "result") {
         lastResultText = (event.result as string) || "";
@@ -288,6 +302,9 @@ export function startClaudeJob(
         }
         if (event.subtype === "error_max_turns") {
           lastResultText = "抱歉，这个问题比较复杂，达到了回合数限制。请简化问题或拆分成多个小问题。";
+        }
+        if (event.subtype === "error_max_budget_usd") {
+          lastResultText = lastAssistantText || "抱歉，本次对话费用已达上限，请重新开始对话。";
         }
       }
     }
@@ -328,14 +345,17 @@ export function startClaudeJob(
       return;
     }
 
-    if (code === 0 && lastResultText) {
+    // Use lastResultText, or fall back to lastAssistantText if available
+    const finalText = lastResultText || lastAssistantText;
+
+    if (code === 0 && finalText) {
       job.status = "completed";
-      job.content = lastResultText;
+      job.content = finalText;
       job.progress = "";
-    } else if (lastResultText) {
-      // Non-zero exit but we got a result (e.g. max_turns)
+    } else if (finalText) {
+      // Non-zero exit but we got a result (e.g. max_turns, budget exceeded)
       job.status = "completed";
-      job.content = lastResultText;
+      job.content = finalText;
       job.progress = "";
     } else {
       job.status = "error";
@@ -456,6 +476,9 @@ STEP 8: 综合分析 — Comprehensive analysis (includes sector rotation & cros
      - target_price: a preset limit-buy price for next trading day (based on support levels, recent lows, or pullback targets — NOT simply today's close)
      - position_pct: recommended position size as % of total portfolio (consider concentration risk, conviction level, and market regime)
      - stop_loss: a stop-loss price level (based on key support breakdown)
+     CRITICAL: target_price and stop_loss MUST be non-zero concrete prices. Use the LAST AVAILABLE kline data
+     to calculate support/resistance levels. Even during holidays, you have the last trading day's kline data —
+     use it to set prices. A recommendation without concrete prices is useless.
      Explain price/position reasoning in thinking_process.
   f) Sell/hold/reduce recommendations: ONLY for portfolio stocks. For each sell/reduce candidate, determine:
      - target_price: a preset limit-sell price for next trading day (based on resistance levels, recent highs, or rebound targets)
@@ -631,6 +654,7 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
 
   let buffer = "";
   let lastResultText = "";
+  const allAssistantTexts: string[] = []; // Capture ALL assistant messages for JSON recovery
 
   child.stdout?.on("data", (chunk: Buffer) => {
     buffer += chunk.toString();
@@ -651,6 +675,16 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
       const progress = mapProgress(event);
       if (progress && job.status === "processing") {
         job.progress = progress;
+      }
+
+      // Capture assistant text for JSON recovery (Claude may output JSON mid-conversation)
+      if (event.type === "assistant" && event.message) {
+        const msg = event.message as { content?: { type: string; text?: string }[] };
+        if (msg.content) {
+          for (const c of msg.content) {
+            if (c.type === "text" && c.text) allAssistantTexts.push(c.text);
+          }
+        }
       }
 
       if (event.type === "result") {
@@ -687,7 +721,7 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
 
     if (job.status !== "processing") return;
 
-    if (!lastResultText) {
+    if (!lastResultText && allAssistantTexts.length === 0) {
       job.status = "error";
       job.errorMessage = stderrBuf
         ? `AI 服务错误: ${stderrBuf.slice(0, 300)}`
@@ -696,21 +730,43 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
       return;
     }
 
-    // Parse the result JSON — Claude may wrap it in markdown fences or preamble text
+    // Parse the result JSON — try multiple sources for the structured report
     job.progress = "正在保存报告...";
 
-    let reportData: Record<string, unknown>;
-    const jsonStr = extractJsonStr(lastResultText) || lastResultText.trim();
-    const parsed = tryParse(jsonStr);
+    let reportData: Record<string, unknown> | null = null;
 
-    if (parsed && parsed.report_type) {
-      reportData = parsed;
-    } else {
-      // Fallback: wrap entire text as summary
+    // 1) Try parsing the result text first (ideal case: Claude's final output is JSON)
+    if (lastResultText) {
+      const jsonStr = extractJsonStr(lastResultText) || lastResultText.trim();
+      const parsed = tryParse(jsonStr);
+      if (parsed && parsed.report_type) {
+        reportData = parsed;
+      }
+    }
+
+    // 2) If result text didn't have JSON, scan ALL assistant messages (reverse order = most recent first)
+    //    This handles the case where Claude output JSON then added a summary comment after
+    if (!reportData) {
+      for (let i = allAssistantTexts.length - 1; i >= 0; i--) {
+        const text = allAssistantTexts[i];
+        const jsonStr = extractJsonStr(text);
+        if (jsonStr) {
+          const parsed = tryParse(jsonStr);
+          if (parsed && parsed.report_type) {
+            reportData = parsed;
+            break;
+          }
+        }
+      }
+    }
+
+    // 3) Final fallback: wrap available text as summary
+    if (!reportData) {
+      const fallbackText = lastResultText || allAssistantTexts[allAssistantTexts.length - 1] || "";
       reportData = {
         report_type: "daily",
-        summary: lastResultText.slice(0, 2000),
-        thinking_process: lastResultText,
+        summary: fallbackText.slice(0, 2000),
+        thinking_process: fallbackText,
       };
     }
 

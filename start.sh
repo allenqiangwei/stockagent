@@ -184,6 +184,8 @@ create_directories() {
     print_info "创建必要目录..."
 
     mkdir -p data/parquet
+    mkdir -p data/signal_cache
+    mkdir -p data/news_cache
     mkdir -p logs
     mkdir -p models
 
@@ -209,6 +211,56 @@ except Exception as e:
 "
 }
 
+# 启动新闻后台服务
+start_news_service() {
+    print_info "启动新闻后台服务..."
+
+    # 设置环境变量
+    if [ -d "/opt/homebrew/opt/libomp/lib" ]; then
+        export DYLD_LIBRARY_PATH="/opt/homebrew/opt/libomp/lib:$DYLD_LIBRARY_PATH"
+    fi
+    export NO_PROXY='*'
+
+    # 后台启动新闻服务
+    python -c "
+from src.services.news_service import start_news_service
+import time
+import signal
+import sys
+
+service = start_news_service()
+print('新闻服务已启动')
+
+def handler(sig, frame):
+    service.stop()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, handler)
+signal.signal(signal.SIGINT, handler)
+
+while True:
+    time.sleep(1)
+" &
+    NEWS_SERVICE_PID=$!
+    echo $NEWS_SERVICE_PID > "$PROJECT_DIR/.news_service.pid"
+    print_success "新闻后台服务已启动 (PID: $NEWS_SERVICE_PID)"
+}
+
+# 停止新闻后台服务
+stop_news_service() {
+    if [ -f "$PROJECT_DIR/.news_service.pid" ]; then
+        PID=$(cat "$PROJECT_DIR/.news_service.pid")
+        if kill -0 $PID 2>/dev/null; then
+            print_info "停止新闻后台服务 (PID: $PID)..."
+            kill $PID 2>/dev/null
+            rm -f "$PROJECT_DIR/.news_service.pid"
+            print_success "新闻后台服务已停止"
+        else
+            rm -f "$PROJECT_DIR/.news_service.pid"
+        fi
+    fi
+}
+
 # 启动仪表盘
 start_dashboard() {
     print_info "启动仪表盘..."
@@ -220,6 +272,20 @@ start_dashboard() {
     echo -e "${GREEN}  观察账号: viewer / viewer123${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
     echo ""
+
+    # 设置 XGBoost 所需的 OpenMP 库路径 (macOS)
+    if [ -d "/opt/homebrew/opt/libomp/lib" ]; then
+        export DYLD_LIBRARY_PATH="/opt/homebrew/opt/libomp/lib:$DYLD_LIBRARY_PATH"
+    fi
+
+    # 禁用代理，直连国内数据源
+    export NO_PROXY='*'
+
+    # 先启动新闻后台服务
+    start_news_service
+
+    # 确保退出时停止新闻服务
+    trap stop_news_service EXIT
 
     streamlit run src/dashboard/app.py \
         --server.address=0.0.0.0 \

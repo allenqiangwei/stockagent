@@ -1,10 +1,14 @@
-"""AkShare数据采集器（备用数据源）"""
+"""AkShare数据采集器（备用数据源）
+
+数据获取时自动绕过系统代理，直连国内数据源。
+"""
 import time
 import pandas as pd
 import akshare as ak
 
 from src.data_collector.base_collector import BaseCollector
 from src.utils.logger import get_logger
+from src.utils.network import no_proxy
 
 logger = get_logger(__name__)
 
@@ -69,7 +73,8 @@ class AkShareCollector(BaseCollector):
         logger.info("正在通过AkShare获取A股股票列表...")
         self._rate_limit()
 
-        df = ak.stock_info_a_code_name()
+        with no_proxy():
+            df = ak.stock_info_a_code_name()
 
         # 转换为统一格式
         df["ts_code"] = df["code"].apply(self._convert_code_to_ts)
@@ -108,13 +113,14 @@ class AkShareCollector(BaseCollector):
         start = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
         end = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
 
-        df = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            start_date=start,
-            end_date=end,
-            adjust="qfq",  # 前复权
-        )
+        with no_proxy():
+            df = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date=start,
+                end_date=end,
+                adjust="qfq",  # 前复权
+            )
 
         if df.empty:
             return pd.DataFrame()
@@ -166,7 +172,8 @@ class AkShareCollector(BaseCollector):
             logger.warning(f"未知指数代码: {ts_code}")
             return pd.DataFrame()
 
-        df = ak.stock_zh_index_daily(symbol=ak_code)
+        with no_proxy():
+            df = ak.stock_zh_index_daily(symbol=ak_code)
 
         if df.empty:
             return pd.DataFrame()

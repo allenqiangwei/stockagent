@@ -36,7 +36,7 @@ from src.backtest.portfolio_engine import PortfolioBacktestEngine, SignalExplosi
 logger = logging.getLogger(__name__)
 
 # Limit concurrent backtests to avoid SQLite contention (P14)
-_BACKTEST_SEMAPHORE = threading.Semaphore(3)
+_BACKTEST_SEMAPHORE = threading.Semaphore(1)
 
 
 # ── Progress buffer (thread-safe, multi-consumer) ──────────
@@ -1029,8 +1029,8 @@ class AILabEngine:
         return None
 
     # ── Quick signal pre-scan (P4) ──────────────────────────
-    _PRESCAN_SAMPLE_SIZE = 100
-    _PRESCAN_DAYS = 60
+    _PRESCAN_SAMPLE_SIZE = 200
+    _PRESCAN_DAYS = 250
 
     def _quick_signal_check(
         self, strat: ExperimentStrategy, stock_data: dict,
@@ -1072,7 +1072,7 @@ class AILabEngine:
                     [df_tail.reset_index(drop=True), indicators.reset_index(drop=True)],
                     axis=1,
                 )
-                for i in range(max(0, len(df_full) - 30), len(df_full)):
+                for i in range(max(0, len(df_full) - self._PRESCAN_DAYS), len(df_full)):
                     df_slice = df_full.iloc[: i + 1]
                     triggered, _ = evaluate_conditions(buy_conditions, df_slice, mode="AND")
                     if triggered:
@@ -1142,7 +1142,7 @@ class AILabEngine:
         if not combo_config and stock_data:
             if not self._quick_signal_check(strat, stock_data):
                 strat.status = "invalid"
-                strat.error_message = "预扫描: 100只股票×60天无任何买入信号"
+                strat.error_message = f"预扫描: {self._PRESCAN_SAMPLE_SIZE}只股票×{self._PRESCAN_DAYS}天无任何买入信号"
                 strat.score = 0.0
                 self.db.commit()
                 logger.info("Pre-scan: zero signals for %s, marking invalid", strat.name)

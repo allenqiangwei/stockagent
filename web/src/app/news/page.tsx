@@ -126,12 +126,12 @@ export default function NewsPage() {
   const empty = d.total_count === 0;
 
   return (
-    <div className="space-y-6 p-6 max-w-6xl mx-auto">
+    <div className="space-y-4 sm:space-y-6 p-3 sm:p-6 max-w-6xl mx-auto">
       {/* ── Header ─────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Newspaper className="h-6 w-6 text-chart-1" />
-          <h1 className="text-xl font-semibold">财经资讯</h1>
+          <Newspaper className="h-5 sm:h-6 w-5 sm:w-6 text-chart-1" />
+          <h1 className="text-lg sm:text-xl font-semibold">财经资讯</h1>
         </div>
         {d.fetch_time && (
           <span className="text-xs text-muted-foreground">
@@ -429,8 +429,8 @@ function NewsCard({
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium leading-snug">{item.title}</p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <Badge variant="outline" className="text-[10px]">
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            <Badge variant="outline" className="text-[10px] hidden sm:inline-flex">
               {SOURCE_LABELS[item.source] ?? item.source}
             </Badge>
             {sentimentBadge(item.sentiment_score)}

@@ -15,6 +15,7 @@ from .swing_strategy import SwingStrategy
 from .trend_strategy import TrendStrategy
 from .signal_combiner import SignalCombiner, CombinedSignal
 from .daily_signal_generator import DailySignalGenerator, DailySignalReport
+from .market_regime import MarketRegime, MarketRegimeDetector
 
 __all__ = [
     # Base types
@@ -31,4 +32,7 @@ __all__ = [
     # Generator
     "DailySignalGenerator",
     "DailySignalReport",
+    # Market Regime
+    "MarketRegime",
+    "MarketRegimeDetector",
 ]

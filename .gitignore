@@ -37,10 +37,14 @@ env/
 *~
 
 # Data files
-data/market_data/
-data/backups/
+data/
 *.parquet
 *.db
+*.db-shm
+*.db-wal
+
+# Screenshots
+*.png
 
 # Logs
 logs/

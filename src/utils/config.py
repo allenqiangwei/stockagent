@@ -29,6 +29,8 @@ class Config:
         Raises:
             ConfigError: 文件不存在或格式错误
         """
+        self._config_path = config_path
+
         if not os.path.exists(config_path):
             raise ConfigError(f"配置文件不存在: {config_path}")
 
@@ -67,3 +69,42 @@ class Config:
         if value is None:
             raise KeyError(key)
         return value
+
+    def set(self, key: str, value: Any) -> None:
+        """设置配置值
+
+        支持点分隔的嵌套key，如 "data_sources.tushare.token"
+
+        Args:
+            key: 配置key，支持点分隔
+            value: 要设置的值
+        """
+        keys = key.split(".")
+        data = self._data
+
+        # 遍历到倒数第二层
+        for k in keys[:-1]:
+            if k not in data:
+                data[k] = {}
+            data = data[k]
+
+        # 设置最后一层的值
+        data[keys[-1]] = value
+
+    def save(self) -> None:
+        """保存配置到文件
+
+        Raises:
+            ConfigError: 保存失败
+        """
+        try:
+            with open(self._config_path, "w", encoding="utf-8") as f:
+                yaml.dump(
+                    self._data,
+                    f,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False
+                )
+        except Exception as e:
+            raise ConfigError(f"保存配置失败: {e}")

@@ -1,10 +1,14 @@
-"""TuShare数据采集器"""
+"""TuShare数据采集器
+
+数据获取时自动绕过系统代理，直连国内数据源。
+"""
 import time
 import pandas as pd
 import tushare as ts
 
 from src.data_collector.base_collector import BaseCollector
 from src.utils.logger import get_logger
+from src.utils.network import no_proxy
 
 logger = get_logger(__name__)
 
@@ -48,11 +52,12 @@ class TuShareCollector(BaseCollector):
         logger.info("正在获取A股股票列表...")
         self._rate_limit()
 
-        df = self._api.stock_basic(
-            exchange="",
-            list_status="L",  # 上市状态
-            fields="ts_code,name,industry,market,list_date"
-        )
+        with no_proxy():
+            df = self._api.stock_basic(
+                exchange="",
+                list_status="L",  # 上市状态
+                fields="ts_code,name,industry,market,list_date"
+            )
 
         logger.info(f"获取到 {len(df)} 只股票")
         return df
@@ -75,11 +80,12 @@ class TuShareCollector(BaseCollector):
         """
         self._rate_limit()
 
-        df = self._api.daily(
-            ts_code=ts_code,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        with no_proxy():
+            df = self._api.daily(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
 
         return df
 
@@ -95,7 +101,8 @@ class TuShareCollector(BaseCollector):
         logger.info(f"正在获取 {trade_date} 全市场日线数据...")
         self._rate_limit()
 
-        df = self._api.daily(trade_date=trade_date)
+        with no_proxy():
+            df = self._api.daily(trade_date=trade_date)
 
         logger.info(f"获取到 {len(df)} 条记录")
         return df
@@ -118,11 +125,12 @@ class TuShareCollector(BaseCollector):
         """
         self._rate_limit()
 
-        df = self._api.index_daily(
-            ts_code=ts_code,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        with no_proxy():
+            df = self._api.index_daily(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+            )
 
         return df
 
@@ -138,7 +146,8 @@ class TuShareCollector(BaseCollector):
         logger.info(f"正在获取 {trade_date} 资金流数据...")
         self._rate_limit()
 
-        df = self._api.moneyflow(trade_date=trade_date)
+        with no_proxy():
+            df = self._api.moneyflow(trade_date=trade_date)
 
         logger.info(f"获取到 {len(df)} 条资金流记录")
         return df
@@ -159,11 +168,12 @@ class TuShareCollector(BaseCollector):
         """
         self._rate_limit()
 
-        df = self._api.trade_cal(
-            exchange="SSE",
-            start_date=start_date,
-            end_date=end_date,
-        )
+        with no_proxy():
+            df = self._api.trade_cal(
+                exchange="SSE",
+                start_date=start_date,
+                end_date=end_date,
+            )
 
         return df
 
@@ -181,10 +191,11 @@ class TuShareCollector(BaseCollector):
         logger.info(f"正在获取 {trade_date} 基本面数据...")
         self._rate_limit()
 
-        df = self._api.daily_basic(
-            trade_date=trade_date,
-            fields="ts_code,trade_date,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,total_share,float_share,total_mv,circ_mv"
-        )
+        with no_proxy():
+            df = self._api.daily_basic(
+                trade_date=trade_date,
+                fields="ts_code,trade_date,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,total_share,float_share,total_mv,circ_mv"
+            )
 
         logger.info(f"获取到 {len(df)} 条基本面记录")
         return df

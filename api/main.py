@@ -409,8 +409,13 @@ async def lifespan(app: FastAPI):
     start_news_agent_scheduler()
     logger.info("News agent scheduler started (08:00 pre_market, 18:00 evening)")
 
+    from api.services.signal_scheduler import start_signal_scheduler, stop_signal_scheduler
+    start_signal_scheduler()
+    logger.info("Signal + AI analysis scheduler started.")
+
     yield
 
+    stop_signal_scheduler()
     stop_news_agent_scheduler()
 
     stop_news_sentiment_scheduler()

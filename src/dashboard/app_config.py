@@ -80,6 +80,25 @@ def get_page_config() -> list[PageConfig]:
             requires_auth=True
         ),
         PageConfig(
+            name="财经新闻",
+            icon="📰",
+            path="pages.news",
+            requires_auth=True
+        ),
+        PageConfig(
+            name="策略回测",
+            icon="🔬",
+            path="pages.backtest",
+            requires_auth=True
+        ),
+        PageConfig(
+            name="策略管理",
+            icon="🔧",
+            path="pages.indicator_manager",
+            requires_auth=True,
+            allowed_roles=["admin"]
+        ),
+        PageConfig(
             name="系统设置",
             icon="⚙️",
             path="pages.settings",
