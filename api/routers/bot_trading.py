@@ -4,11 +4,11 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 
 from api.models.base import get_db
-from api.models.bot_trading import BotPortfolio, BotTrade, BotTradeReview
+from api.models.bot_trading import BotPortfolio, BotTrade, BotTradeReview, BotTradePlan
 from api.models.stock import DailyPrice
 from api.schemas.bot_trading import (
     BotPortfolioItem, BotTradeItem, BotTradeReviewItem,
-    BotSummary, BotStockTimeline,
+    BotSummary, BotStockTimeline, BotTradePlanItem,
 )
 
 router = APIRouter(prefix="/api/bot", tags=["bot-trading"])
@@ -187,6 +187,53 @@ def list_reviews(
             created_at=r.created_at.isoformat() if r.created_at else "",
         )
         for r in rows
+    ]
+
+
+@router.get("/plans", response_model=list[BotTradePlanItem])
+def list_plans(
+    status: str = Query("", description="Filter by status: pending|executed|expired"),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """List trade plans, optionally filtered by status."""
+    q = db.query(BotTradePlan)
+    if status:
+        q = q.filter(BotTradePlan.status == status)
+    rows = q.order_by(BotTradePlan.plan_date.desc(), BotTradePlan.id.desc()).limit(limit).all()
+    return [
+        BotTradePlanItem(
+            id=p.id, stock_code=p.stock_code, stock_name=p.stock_name,
+            direction=p.direction, plan_price=p.plan_price, quantity=p.quantity,
+            sell_pct=p.sell_pct, plan_date=p.plan_date, status=p.status,
+            thinking=p.thinking, report_id=p.report_id,
+            created_at=p.created_at.isoformat() if p.created_at else "",
+            executed_at=p.executed_at.isoformat() if p.executed_at else None,
+            execution_price=p.execution_price,
+        )
+        for p in rows
+    ]
+
+
+@router.get("/plans/pending", response_model=list[BotTradePlanItem])
+def list_pending_plans(db: Session = Depends(get_db)):
+    """List only pending trade plans (shortcut)."""
+    rows = (
+        db.query(BotTradePlan)
+        .filter(BotTradePlan.status == "pending")
+        .order_by(BotTradePlan.plan_date, BotTradePlan.id)
+        .all()
+    )
+    return [
+        BotTradePlanItem(
+            id=p.id, stock_code=p.stock_code, stock_name=p.stock_name,
+            direction=p.direction, plan_price=p.plan_price, quantity=p.quantity,
+            sell_pct=p.sell_pct, plan_date=p.plan_date, status=p.status,
+            thinking=p.thinking, report_id=p.report_id,
+            created_at=p.created_at.isoformat() if p.created_at else "",
+            executed_at=None, execution_price=None,
+        )
+        for p in rows
     ]
 
 
