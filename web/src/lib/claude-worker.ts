@@ -61,6 +61,14 @@ const JOB_EXPIRE_MS = 30 * 60 * 1000; // 30 minutes
 const PROJECT_ROOT = process.cwd();
 const FASTAPI_BASE = "http://localhost:8050";
 
+/** Build a clean env that strips CLAUDECODE to avoid nested-session detection. */
+function cleanEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+  if (extra) Object.assign(env, extra);
+  return env;
+}
+
 // ── JSON parsing helpers (shared) ────────────────────
 
 /** Extract JSON string from text (fence block or brace matching) */
@@ -230,6 +238,7 @@ export function startClaudeJob(
   try {
     child = spawn(CLAUDE_BIN, args, {
       cwd: PROJECT_ROOT,
+      env: cleanEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (err) {
@@ -634,6 +643,7 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
   try {
     child = spawn(CLAUDE_BIN, args, {
       cwd: PROJECT_ROOT,
+      env: cleanEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch {
@@ -870,7 +880,7 @@ ${tradesJson}
 
   const child = spawn(CLAUDE_BIN, args, {
     cwd: "/Users/allenqiang/stockagent",
-    env: { ...process.env, NO_PROXY: "localhost,127.0.0.1" },
+    env: cleanEnv({ NO_PROXY: "localhost,127.0.0.1" }),
     stdio: ["ignore", "pipe", "pipe"],
   });
 

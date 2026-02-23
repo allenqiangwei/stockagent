@@ -27,6 +27,7 @@ import {
   Clock,
   CircleCheck,
   CircleX,
+  FileDown,
 } from "lucide-react";
 import {
   useAIReports,
@@ -120,17 +121,28 @@ function ReportViewer({ report }: { report: AIReport | undefined }) {
               {report.report_date}
             </h1>
           </div>
-          <div className={`flex items-center gap-2.5 px-3.5 py-2 rounded-lg border ${regime.bg} ${regime.border}`}>
-            <RegimeIcon className={`h-5 w-5 ${regime.color}`} />
-            <div>
-              <div className={`text-sm font-semibold ${regime.color}`}>
-                {regimeLabel(report.market_regime)}
-              </div>
-              {report.market_regime_confidence != null && (
-                <div className="text-[10px] text-muted-foreground font-mono">
-                  置信度 {(report.market_regime_confidence * 100).toFixed(0)}%
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => window.open(`/api/ai/reports/${report.id}/pdf`, '_blank')}
+              title="导出PDF报告"
+            >
+              <FileDown className="h-4 w-4 mr-1.5" />
+              导出PDF
+            </Button>
+            <div className={`flex items-center gap-2.5 px-3.5 py-2 rounded-lg border ${regime.bg} ${regime.border}`}>
+              <RegimeIcon className={`h-5 w-5 ${regime.color}`} />
+              <div>
+                <div className={`text-sm font-semibold ${regime.color}`}>
+                  {regimeLabel(report.market_regime)}
                 </div>
-              )}
+                {report.market_regime_confidence != null && (
+                  <div className="text-[10px] text-muted-foreground font-mono">
+                    置信度 {(report.market_regime_confidence * 100).toFixed(0)}%
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>

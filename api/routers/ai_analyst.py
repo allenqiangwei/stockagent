@@ -129,6 +129,35 @@ def save_report(body: AIReportSaveRequest, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/reports/{report_id}/pdf")
+def download_report_pdf(report_id: int, db: Session = Depends(get_db)):
+    """Download an AI report as a professionally formatted PDF."""
+    from io import BytesIO
+    from fastapi.responses import StreamingResponse
+    from api.services.pdf_builder import build_report_pdf
+
+    report = db.query(AIReport).get(report_id)
+    if not report:
+        raise HTTPException(404, "Report not found")
+
+    pdf_bytes = build_report_pdf(report)
+    # RFC 5987: use filename* for UTF-8 names, ASCII fallback for filename
+    from urllib.parse import quote
+    utf8_name = f"AI分析报告_{report.report_date}.pdf"
+    ascii_name = f"report_{report.report_date}.pdf"
+
+    return StreamingResponse(
+        BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(utf8_name)}"
+            ),
+        },
+    )
+
+
 @router.get("/reports/{report_id}", response_model=AIReportResponse)
 def get_report(report_id: int, db: Session = Depends(get_db)):
     """Get a single report by ID."""
