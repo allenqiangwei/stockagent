@@ -702,7 +702,7 @@ function BotTradingPanel() {
                       </span>
                       <span className="font-mono font-bold">{plan.stock_code}</span>
                       <span className="text-muted-foreground text-sm">{plan.stock_name}</span>
-                      {plan.today_close != null && (
+                      {plan.today_close != null ? (
                         <span className="flex items-center gap-1.5 text-xs ml-1">
                           <span className="text-foreground font-medium">¥{plan.today_close.toFixed(2)}</span>
                           <span className={plan.today_change_pct! >= 0 ? "text-red-500" : "text-green-500"}>
@@ -712,6 +712,8 @@ function BotTradingPanel() {
                             {plan.today_low?.toFixed(2)}~{plan.today_high?.toFixed(2)}
                           </span>
                         </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground/60 ml-1">数据未更新</span>
                       )}
                     </div>
                     <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">待执行 {plan.plan_date}</span>
@@ -743,13 +745,15 @@ function BotTradingPanel() {
                             </span>
                             <span className="font-mono">{plan.stock_code}</span>
                             <span className="text-muted-foreground">{plan.stock_name}</span>
-                            {plan.today_close != null && (
+                            {plan.today_close != null ? (
                               <span className="flex items-center gap-1 text-xs">
                                 <span className="text-foreground">¥{plan.today_close.toFixed(2)}</span>
                                 <span className={plan.today_change_pct! >= 0 ? "text-red-500" : "text-green-500"}>
                                   {plan.today_change_pct! >= 0 ? "+" : ""}{plan.today_change_pct!.toFixed(2)}%
                                 </span>
                               </span>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground/60">数据未更新</span>
                             )}
                           </div>
                           <span className={`text-xs px-1.5 py-0.5 rounded ${plan.status === "executed" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"}`}>

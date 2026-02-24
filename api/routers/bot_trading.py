@@ -191,35 +191,23 @@ def list_reviews(
 
 
 def _get_today_prices(db: Session, stock_codes: list[str]) -> dict:
-    """Fetch today's OHLCV for a list of stocks. Returns {code: {close, change_pct, high, low}}."""
+    """Fetch today's OHLCV for a list of stocks. Only returns data dated today."""
     if not stock_codes:
         return {}
     from datetime import date as _date
     from api.models.stock import DailyPrice
-    from sqlalchemy import func
 
-    # Find the latest trade_date for these stocks
-    latest = (
-        db.query(DailyPrice.stock_code, func.max(DailyPrice.trade_date).label("max_date"))
-        .filter(DailyPrice.stock_code.in_(stock_codes))
-        .group_by(DailyPrice.stock_code)
+    today = _date.today()
+    rows = (
+        db.query(DailyPrice)
+        .filter(DailyPrice.stock_code.in_(stock_codes), DailyPrice.trade_date == today)
         .all()
     )
-    if not latest:
-        return {}
-
-    # Batch-fetch the latest rows
-    date_map = {row.stock_code: row.max_date for row in latest}
     result = {}
-    for code, max_date in date_map.items():
-        row = (
-            db.query(DailyPrice)
-            .filter(DailyPrice.stock_code == code, DailyPrice.trade_date == max_date)
-            .first()
-        )
-        if row and row.close:
+    for row in rows:
+        if row.close:
             change_pct = ((row.close - row.open) / row.open * 100) if row.open else 0.0
-            result[code] = {
+            result[row.stock_code] = {
                 "close": round(row.close, 2),
                 "change_pct": round(change_pct, 2),
                 "high": round(row.high, 2) if row.high else None,
