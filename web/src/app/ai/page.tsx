@@ -991,7 +991,7 @@ export default function AIPage() {
     <>
       {/* Scheduler status */}
       {schedulerStatus && (
-        <div className="mx-3 mt-2 mb-1 rounded-lg border border-border/40 bg-muted/30 px-3 py-2 text-[11px] space-y-1">
+        <div className="mx-3 mt-2 mb-1 rounded-lg border border-border/40 bg-muted/30 px-3 py-2 text-[11px] space-y-1.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               {schedulerStatus.running ? (
@@ -1006,10 +1006,24 @@ export default function AIPage() {
             {schedulerStatus.is_refreshing && (
               <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 text-amber-500 border-amber-500/30">
                 <Loader2 className="h-2.5 w-2.5 animate-spin mr-1" />
-                同步中
+                {schedulerStatus.sync_step || "同步中"}
               </Badge>
             )}
           </div>
+          {schedulerStatus.is_refreshing && schedulerStatus.sync_total > 0 && (
+            <div className="space-y-0.5">
+              <div className="flex items-center justify-between text-muted-foreground">
+                <span>{schedulerStatus.sync_step}</span>
+                <span>{schedulerStatus.sync_done}/{schedulerStatus.sync_total} ({Math.round(schedulerStatus.sync_done / schedulerStatus.sync_total * 100)}%)</span>
+              </div>
+              <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-amber-500 transition-all duration-500"
+                  style={{ width: `${Math.round(schedulerStatus.sync_done / schedulerStatus.sync_total * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
           <div className="flex items-center gap-3 text-muted-foreground">
             <div className="flex items-center gap-1">
               <Calendar className="h-3 w-3" />

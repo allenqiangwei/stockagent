@@ -38,6 +38,9 @@ def get_scheduler_status():
         "refresh_hour": status["refresh_hour"],
         "refresh_minute": status["refresh_minute"],
         "latest_data_date": status["latest_data_date"],
+        "sync_total": status["sync_total"],
+        "sync_done": status["sync_done"],
+        "sync_step": status["sync_step"],
     }
 
 

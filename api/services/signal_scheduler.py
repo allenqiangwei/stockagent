@@ -25,6 +25,9 @@ class SignalScheduler:
         self._thread: Optional[threading.Thread] = None
         self._last_run_date: Optional[str] = None
         self._is_refreshing = False
+        self._sync_total: int = 0
+        self._sync_done: int = 0
+        self._sync_step: str = ""  # current step label
         self._lock = threading.Lock()
 
     def start(self):
@@ -85,6 +88,9 @@ class SignalScheduler:
             "refresh_hour": self.refresh_hour,
             "refresh_minute": self.refresh_minute,
             "latest_data_date": self.get_latest_data_date(),
+            "sync_total": self._sync_total,
+            "sync_done": self._sync_done,
+            "sync_step": self._sync_step,
         }
 
     # ── Main loop ─────────────────────────────────────
@@ -115,6 +121,10 @@ class SignalScheduler:
                 return
             self._is_refreshing = True
 
+        self._sync_total = 0
+        self._sync_done = 0
+        self._sync_step = "检查交易日"
+
         try:
             db = SessionLocal()
             try:
@@ -133,6 +143,7 @@ class SignalScheduler:
 
                 if is_trading_day:
                     # Step 0b: Data integrity check
+                    self._sync_step = "数据完整性检查"
                     try:
                         if not collector:
                             from api.services.data_collector import DataCollector
@@ -142,9 +153,11 @@ class SignalScheduler:
                         logger.warning("Gap repair failed (non-fatal): %s", e)
 
                     # Step 1: Sync daily prices
+                    self._sync_step = "同步日线数据"
                     self._sync_daily_prices(db, trade_date)
 
                     # Step 2: Execute pending trade plans (needs today's OHLCV)
+                    self._sync_step = "执行交易计划"
                     try:
                         from api.services.bot_trading_engine import execute_pending_plans
                         plan_results = execute_pending_plans(db, trade_date)
@@ -168,6 +181,9 @@ class SignalScheduler:
             logger.error("Scheduled data sync failed: %s", e)
         finally:
             self._is_refreshing = False
+            self._sync_step = ""
+            self._sync_total = 0
+            self._sync_done = 0
 
     def _sync_daily_prices(self, db, trade_date: str):
         """Fetch latest daily prices for all stocks with existing data."""
@@ -179,6 +195,8 @@ class SignalScheduler:
             logger.warning("No stocks with sufficient data to sync")
             return
 
+        self._sync_total = len(codes)
+        self._sync_done = 0
         logger.info("Syncing daily prices for %d stocks...", len(codes))
         updated = 0
         errors = 0
@@ -191,6 +209,8 @@ class SignalScheduler:
                 errors += 1
                 if errors <= 3:
                     logger.debug("Price sync failed for %s: %s", code, e)
+
+            self._sync_done += 1
 
             # Rate limit to avoid API throttling
             if updated % 50 == 0 and updated > 0:

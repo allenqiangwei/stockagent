@@ -620,6 +620,9 @@ export interface AISchedulerStatus {
   refresh_hour: number;
   refresh_minute: number;
   latest_data_date: string | null;
+  sync_total: number;
+  sync_done: number;
+  sync_step: string;
 }
 
 export interface BotStockTimeline {

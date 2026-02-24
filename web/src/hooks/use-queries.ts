@@ -375,7 +375,11 @@ export function useAISchedulerStatus() {
   return useQuery({
     queryKey: ["ai-scheduler-status"],
     queryFn: () => ai.schedulerStatus(),
-    refetchInterval: 30_000, // refresh every 30s
+    refetchInterval: (query) => {
+      // Poll faster (3s) while syncing, otherwise every 30s
+      const data = query.state.data as import("@/types").AISchedulerStatus | undefined;
+      return data?.is_refreshing ? 3_000 : 30_000;
+    },
   });
 }
 
