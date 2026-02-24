@@ -61,7 +61,7 @@ for exp_summary in all_exps:
         ret = s.get('total_return_pct',0) or 0
         dd = abs(s.get('max_drawdown_pct',100) or 100)
         trades = s.get('total_trades',0) or 0
-        if score >= 0.65 and ret > 10 and dd < 30 and trades >= 50:
+        if score >= 0.70 and ret > 20 and dd < 25 and trades >= 50:
             result = promote(s['id'], '[AI]')
             msg = result.get('message','')
             if msg != 'Already promoted':
@@ -118,6 +118,40 @@ Output summary:
 - 策略启用: Y个disabled→enabled
 - 当前策略库: Z个策略全部enabled
 ```
+
+### 1d: Sync Completed Background Rounds
+
+Background auto_finish scripts may complete between sessions. Check for exploration rounds where `memory_synced=false` and sync their results into memory.
+
+```bash
+NO_PROXY=localhost,127.0.0.1 python3 -c "
+import subprocess, json
+
+def api(path):
+    r = subprocess.run(['curl','-s',f'http://127.0.0.1:8050/api/{path}'],
+                       capture_output=True, text=True, env={'NO_PROXY':'localhost,127.0.0.1','PATH':'/usr/bin:/bin'})
+    return json.loads(r.stdout)
+
+rounds = api('lab/exploration-rounds')
+items = rounds.get('items', rounds) if isinstance(rounds, dict) else rounds
+unsynced = [r for r in items if not r.get('memory_synced', False)]
+if not unsynced:
+    print('所有探索轮次已同步，无需补同步')
+else:
+    for r in unsynced:
+        print(f'⚠️ R{r[\"round_number\"]} (id={r[\"id\"]}) 未同步! best={r.get(\"best_strategy_name\",\"?\")} score={r.get(\"best_strategy_score\",0)} ret={r.get(\"best_strategy_return\",0)}%')
+    print(f'发现 {len(unsynced)} 个未同步轮次，需要执行 Step 8 (Update Memory) 补同步')
+"
+```
+
+If unsynced rounds are found:
+1. Read `/tmp/r{N}_summary.json` (if exists) for the full analysis data
+2. Execute Step 8 (Update Memory) for each unsynced round — update `docs/lab-experiment-analysis.md`, `memory/semantic/strategy-knowledge.md`, `memory/episodic/experiments/`, `memory/MEMORY.md`
+3. Run `python3 scripts/sync-memory.py` to push to Pinecone
+4. Update the exploration round via `PUT /api/lab/exploration-rounds/{id}` with `memory_synced=true, pinecone_synced=true`
+5. Run StdA+ cleanup: `POST /api/strategies/cleanup` to remove any strategies promoted by the background script that don't meet current StdA+ criteria
+
+**This step is BLOCKING**: Do NOT proceed until all unsynced rounds are fully synced.
 
 ## Step 1.5: Resolve Outstanding Issues (BLOCKING GATE)
 
@@ -359,7 +393,7 @@ def promote(sid, label):
 # Get all experiment IDs
 exp_ids = [e['id'] for e in api('lab/experiments?page=1&size=100').get('items', [])]
 
-# Standard A: score >= 0.65, ret > 10%, dd < 30%, trades >= 50
+# Standard A: score >= 0.70, ret > 20%, dd < 25%, trades >= 50
 promoted_a = []
 for eid in exp_ids:
     for s in api(f'lab/experiments/{eid}').get('strategies', []):
@@ -368,7 +402,7 @@ for eid in exp_ids:
         ret = s.get('total_return_pct',0) or 0
         dd = abs(s.get('max_drawdown_pct',100) or 100)
         trades = s.get('total_trades',0) or 0
-        if score >= 0.65 and ret > 10 and dd < 30 and trades >= 50:
+        if score >= 0.70 and ret > 20 and dd < 25 and trades >= 50:
             result = promote(s['id'], '[AI]')
             promoted_a.append((s['id'], s['name'], result.get('message','')))
 
@@ -406,9 +440,9 @@ for sid, name, label, msg in promoted_b:
 ```
 
 **Standard A (高评分)** — ALL conditions must be met:
-- `score >= 0.65`
-- `total_return_pct > 10`
-- `max_drawdown_pct < 30` (absolute value)
+- `score >= 0.70`
+- `total_return_pct > 20`
+- `max_drawdown_pct < 25` (absolute value)
 - `total_trades >= 50`
 
 **Standard B (市场阶段冠军)** — ALL conditions must be met:
@@ -519,6 +553,51 @@ Field notes:
 - `pinecone_synced`: Whether Step 8b sync-memory.py Pinecone upsert succeeded
 - `summary`: The full Markdown summary from Step 9, with newlines escaped as `\n` for JSON
 - If the API call fails, log the error but continue — don't block the exploration loop
+
+### 9c: Background Auto-Finish Script Requirements
+
+When creating a background auto_finish script (for long-running batch experiments that outlive the Claude session), the script **MUST** update the exploration round API record when it completes. This ensures Step 1d can detect and sync results in the next session.
+
+**Required in every auto_finish script's `main()` function:**
+
+```python
+def api_put(path, data):
+    """PUT request to update existing records."""
+    import subprocess, json
+    r = subprocess.run(
+        ['curl', '-s', '-X', 'PUT', f'http://127.0.0.1:8050/api/{path}',
+         '-H', 'Content-Type: application/json', '-d', json.dumps(data)],
+        capture_output=True, text=True,
+        env={'NO_PROXY': 'localhost,127.0.0.1', 'PATH': '/usr/bin:/bin'})
+    return json.loads(r.stdout)
+
+# After analysis and promotion, update the exploration round record
+# (round_id should be saved when the round is first created in Step 9b)
+api_put(f'lab/exploration-rounds/{round_id}', {
+    "round_number": N,
+    "mode": "auto",
+    "started_at": started_at_iso,
+    "finished_at": datetime.now().isoformat(),
+    "total_experiments": total,
+    "total_strategies": valid,
+    "profitable_count": stda_count,
+    "profitability_pct": stda_count / valid * 100,
+    "std_a_count": stda_count,
+    "best_strategy_name": best_name,
+    "best_strategy_score": best_score,
+    "best_strategy_return": best_return,
+    "best_strategy_dd": best_dd,
+    "insights": [...],
+    "promoted": [...],
+    "issues_resolved": [],
+    "next_suggestions": [],
+    "summary": summary_text,
+    "memory_synced": False,  # Memory sync happens in next Claude session (Step 1d)
+    "pinecone_synced": False,
+})
+```
+
+**Key principle**: The script updates the API record with `memory_synced=False`. This signals to Step 1d in the next Claude session that memory files need to be synced. The Claude session then handles the actual memory file updates (which require file system access the background script doesn't have structured templates for).
 
 ## Auto Mode Loop
 

@@ -109,6 +109,59 @@ def delete_strategy(strategy_id: int, db: Session = Depends(get_db)):
     return {"deleted": strategy_id}
 
 
+@router.post("/cleanup")
+def cleanup_strategies(
+    min_score: float = Query(0.70, description="Minimum score to keep"),
+    min_return_pct: float = Query(20.0, description="Minimum return % to keep"),
+    max_drawdown_pct: float = Query(25.0, description="Maximum drawdown % to keep"),
+    min_trades: int = Query(50, description="Minimum trades to keep"),
+    dry_run: bool = Query(False, description="If true, only count without deleting"),
+    db: Session = Depends(get_db),
+):
+    """Delete promoted strategies below quality threshold and reset lab flags."""
+    from api.models.ai_lab import ExperimentStrategy
+
+    # Find strategies to delete: those with backtest_summary below threshold
+    all_strats = db.query(Strategy).all()
+    to_delete = []
+    for s in all_strats:
+        bs = s.backtest_summary or {}
+        score = bs.get("score", 0) or 0
+        ret = bs.get("total_return_pct", 0) or 0
+        dd = abs(bs.get("max_drawdown_pct", 0) or 0)
+        trades = bs.get("total_trades", 0) or 0
+        # Keep if meets ALL criteria; delete if fails ANY
+        if score < min_score or ret <= min_return_pct or dd >= max_drawdown_pct or trades < min_trades:
+            to_delete.append(s)
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "would_delete": len(to_delete),
+            "would_keep": len(all_strats) - len(to_delete),
+        }
+
+    # Delete and reset lab flags
+    deleted_ids = []
+    for s in to_delete:
+        # Unlink backtest runs
+        db.query(BacktestRun).filter(BacktestRun.strategy_id == s.id).update(
+            {"strategy_id": None}
+        )
+        # Reset lab experiment strategy promoted flags
+        db.query(ExperimentStrategy).filter(
+            ExperimentStrategy.promoted_strategy_id == s.id
+        ).update({"promoted": False, "promoted_strategy_id": None})
+        deleted_ids.append(s.id)
+        db.delete(s)
+
+    db.commit()
+    return {
+        "deleted": len(deleted_ids),
+        "kept": len(all_strats) - len(deleted_ids),
+    }
+
+
 @router.post("/combo", response_model=StrategyResponse, status_code=201)
 def create_combo_strategy(req: ComboCreate, db: Session = Depends(get_db)):
     """Create a combo (ensemble) strategy that votes across member strategies."""

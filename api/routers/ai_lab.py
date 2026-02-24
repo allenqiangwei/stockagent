@@ -827,6 +827,23 @@ def get_exploration_round(round_id: int, db: Session = Depends(get_db)):
     return row
 
 
+@router.put("/exploration-rounds/{round_id}", response_model=ExplorationRoundResponse)
+def update_exploration_round(round_id: int, data: ExplorationRoundCreate, db: Session = Depends(get_db)):
+    """Update an existing exploration round record."""
+    from datetime import datetime as dt
+    row = db.query(ExplorationRound).filter(ExplorationRound.id == round_id).first()
+    if not row:
+        raise HTTPException(404, "Exploration round not found")
+    for field in data.model_fields:
+        val = getattr(data, field)
+        if field in ("started_at", "finished_at"):
+            val = dt.fromisoformat(val)
+        setattr(row, field, val)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
 @router.post("/exploration-rounds", response_model=ExplorationRoundResponse)
 def create_exploration_round(data: ExplorationRoundCreate, db: Session = Depends(get_db)):
     from datetime import datetime as dt
