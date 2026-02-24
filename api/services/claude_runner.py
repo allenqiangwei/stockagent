@@ -57,14 +57,24 @@ Your task is to produce a daily market analysis report with:
 Recommendation action rules:
 - "buy": Only for stocks NOT currently held that you want to open a new position. Must include entry_price.
 - "hold": ONLY for stocks the bot currently holds and should keep. Never use "hold" for stocks not in portfolio.
-- "sell" / "reduce": ONLY for stocks currently held that should be exited or reduced. Must include target price.
+- "sell" / "reduce": ONLY for stocks currently held that should be exited or reduced. Must include entry_price (the price you want to sell at).
 - Do NOT include stocks that require no action. If a signal fires but you don't recommend acting, skip it.
+
+CRITICAL — entry_price rules:
+- entry_price is the REALISTIC price you expect to execute at on the NEXT TRADING DAY.
+- For "buy": set entry_price within 0-2% BELOW today's close (a slight discount for a limit buy order).
+- For "sell"/"reduce": set entry_price within 0-2% ABOVE today's close (a slight premium for a limit sell order).
+- The system uses entry_price as a limit order trigger. If the price is unrealistically far from the current market, the trade will NEVER execute.
+- Do NOT use long-term target prices or dream prices as entry_price. Use what's achievable tomorrow.
+- entry_price is REQUIRED for all buy/sell/reduce recommendations. Never omit it.
 
 Output your analysis as a JSON object with these fields:
 - report_type: "daily"
 - market_regime: "bull" | "bear" | "sideways" | "transition"
 - market_regime_confidence: float 0.0-1.0 (e.g. 0.75 means 75% confident)
 - recommendations: list of {stock_code, stock_name, action, reason, entry_price, stop_loss, target, alpha_score}
+  - entry_price: REQUIRED — the realistic next-day execution price (see rules above)
+  - target: your price target after the position is opened (for tracking, not execution)
   - alpha_score: copy directly from /api/signals/today response for this stock (the "alpha_score" field). If the stock has no signal or no alpha_score, use 0.
 - strategy_actions: list of {strategy_name, signal_count, top_stocks}
 - thinking_process: your detailed reasoning (string)

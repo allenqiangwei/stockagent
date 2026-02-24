@@ -43,6 +43,18 @@ def _get_next_trading_day(db: Session, after_date: str) -> str | None:
     return d.isoformat()
 
 
+def _get_prev_close(db: Session, stock_code: str, report_date: str) -> float | None:
+    """Get the previous close price for a stock as of report_date."""
+    from datetime import date as _date
+    row = (
+        db.query(DailyPrice)
+        .filter(DailyPrice.stock_code == stock_code, DailyPrice.trade_date <= _date.fromisoformat(report_date))
+        .order_by(DailyPrice.trade_date.desc())
+        .first()
+    )
+    return round(row.close, 2) if row and row.close else None
+
+
 def create_trade_plans(db: Session, report_id: int, report_date: str, recommendations: list[dict]) -> list[dict]:
     """Create trade plans from AI recommendations for the next trading day.
 
@@ -70,9 +82,9 @@ def create_trade_plans(db: Session, report_id: int, report_date: str, recommenda
             continue
 
         if action == "buy":
-            price = rec.get("entry_price") or rec.get("target_price")
+            price = _get_prev_close(db, stock_code, report_date)
             if not price or price <= 0:
-                logger.warning("Plan skipped: no valid price for buy %s", stock_code)
+                logger.warning("Plan skipped: no close price for buy %s", stock_code)
                 continue
             quantity = math.floor(BUY_AMOUNT / price / 100) * 100
             if quantity <= 0:
@@ -82,9 +94,9 @@ def create_trade_plans(db: Session, report_id: int, report_date: str, recommenda
             plans.append(result)
 
         elif action in ("sell", "reduce"):
-            price = rec.get("target_price") or rec.get("target")
+            price = _get_prev_close(db, stock_code, report_date)
             if not price or price <= 0:
-                logger.warning("Plan skipped: no valid price for sell %s", stock_code)
+                logger.warning("Plan skipped: no close price for sell %s", stock_code)
                 continue
             holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == stock_code).first()
             if not holding or holding.quantity <= 0:
