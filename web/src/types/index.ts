@@ -658,4 +658,8 @@ export interface BotTradePlanItem {
   created_at: string;
   executed_at: string | null;
   execution_price: number | null;
+  today_close: number | null;
+  today_change_pct: number | null;
+  today_high: number | null;
+  today_low: number | null;
 }

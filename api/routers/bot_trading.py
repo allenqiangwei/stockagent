@@ -190,6 +190,62 @@ def list_reviews(
     ]
 
 
+def _get_today_prices(db: Session, stock_codes: list[str]) -> dict:
+    """Fetch today's OHLCV for a list of stocks. Returns {code: {close, change_pct, high, low}}."""
+    if not stock_codes:
+        return {}
+    from datetime import date as _date
+    from api.models.stock import DailyPrice
+    from sqlalchemy import func
+
+    # Find the latest trade_date for these stocks
+    latest = (
+        db.query(DailyPrice.stock_code, func.max(DailyPrice.trade_date).label("max_date"))
+        .filter(DailyPrice.stock_code.in_(stock_codes))
+        .group_by(DailyPrice.stock_code)
+        .all()
+    )
+    if not latest:
+        return {}
+
+    # Batch-fetch the latest rows
+    date_map = {row.stock_code: row.max_date for row in latest}
+    result = {}
+    for code, max_date in date_map.items():
+        row = (
+            db.query(DailyPrice)
+            .filter(DailyPrice.stock_code == code, DailyPrice.trade_date == max_date)
+            .first()
+        )
+        if row and row.close:
+            change_pct = ((row.close - row.open) / row.open * 100) if row.open else 0.0
+            result[code] = {
+                "close": round(row.close, 2),
+                "change_pct": round(change_pct, 2),
+                "high": round(row.high, 2) if row.high else None,
+                "low": round(row.low, 2) if row.low else None,
+            }
+    return result
+
+
+def _plan_to_item(p, prices: dict) -> BotTradePlanItem:
+    """Convert ORM plan + price lookup to response item."""
+    px = prices.get(p.stock_code, {})
+    return BotTradePlanItem(
+        id=p.id, stock_code=p.stock_code, stock_name=p.stock_name,
+        direction=p.direction, plan_price=p.plan_price, quantity=p.quantity,
+        sell_pct=p.sell_pct, plan_date=p.plan_date, status=p.status,
+        thinking=p.thinking, report_id=p.report_id,
+        created_at=p.created_at.isoformat() if p.created_at else "",
+        executed_at=p.executed_at.isoformat() if p.executed_at else None,
+        execution_price=p.execution_price,
+        today_close=px.get("close"),
+        today_change_pct=px.get("change_pct"),
+        today_high=px.get("high"),
+        today_low=px.get("low"),
+    )
+
+
 @router.get("/plans", response_model=list[BotTradePlanItem])
 def list_plans(
     status: str = Query("", description="Filter by status: pending|executed|expired"),
@@ -201,18 +257,8 @@ def list_plans(
     if status:
         q = q.filter(BotTradePlan.status == status)
     rows = q.order_by(BotTradePlan.plan_date.desc(), BotTradePlan.id.desc()).limit(limit).all()
-    return [
-        BotTradePlanItem(
-            id=p.id, stock_code=p.stock_code, stock_name=p.stock_name,
-            direction=p.direction, plan_price=p.plan_price, quantity=p.quantity,
-            sell_pct=p.sell_pct, plan_date=p.plan_date, status=p.status,
-            thinking=p.thinking, report_id=p.report_id,
-            created_at=p.created_at.isoformat() if p.created_at else "",
-            executed_at=p.executed_at.isoformat() if p.executed_at else None,
-            execution_price=p.execution_price,
-        )
-        for p in rows
-    ]
+    prices = _get_today_prices(db, list({p.stock_code for p in rows}))
+    return [_plan_to_item(p, prices) for p in rows]
 
 
 @router.get("/plans/pending", response_model=list[BotTradePlanItem])
@@ -224,17 +270,8 @@ def list_pending_plans(db: Session = Depends(get_db)):
         .order_by(BotTradePlan.plan_date, BotTradePlan.id)
         .all()
     )
-    return [
-        BotTradePlanItem(
-            id=p.id, stock_code=p.stock_code, stock_name=p.stock_name,
-            direction=p.direction, plan_price=p.plan_price, quantity=p.quantity,
-            sell_pct=p.sell_pct, plan_date=p.plan_date, status=p.status,
-            thinking=p.thinking, report_id=p.report_id,
-            created_at=p.created_at.isoformat() if p.created_at else "",
-            executed_at=None, execution_price=None,
-        )
-        for p in rows
-    ]
+    prices = _get_today_prices(db, list({p.stock_code for p in rows}))
+    return [_plan_to_item(p, prices) for p in rows]
 
 
 @router.put("/reviews/{review_id}/update")

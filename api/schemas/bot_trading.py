@@ -70,6 +70,11 @@ class BotTradePlanItem(BaseModel):
     created_at: str = ""
     executed_at: Optional[str] = None
     execution_price: Optional[float] = None
+    # Today's market data (populated if available)
+    today_close: Optional[float] = None
+    today_change_pct: Optional[float] = None
+    today_high: Optional[float] = None
+    today_low: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
