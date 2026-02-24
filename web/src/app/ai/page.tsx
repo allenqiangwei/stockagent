@@ -1000,24 +1000,24 @@ export default function AIPage() {
                 <CircleX className="h-3 w-3 text-red-500" />
               )}
               <span className={schedulerStatus.running ? "text-green-500" : "text-red-500"}>
-                {schedulerStatus.running ? "自动分析运行中" : "自动分析已停止"}
+                {schedulerStatus.running ? "数据同步运行中" : "数据同步已停止"}
               </span>
             </div>
             {schedulerStatus.is_refreshing && (
               <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 text-amber-500 border-amber-500/30">
                 <Loader2 className="h-2.5 w-2.5 animate-spin mr-1" />
-                分析中
+                同步中
               </Badge>
             )}
           </div>
           <div className="flex items-center gap-3 text-muted-foreground">
             <div className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              <span>上次: {schedulerStatus.last_run_date || "—"}</span>
+              <Calendar className="h-3 w-3" />
+              <span>最新数据: {schedulerStatus.latest_data_date || "—"}</span>
             </div>
             <div className="flex items-center gap-1">
               <Clock className="h-3 w-3" />
-              <span>下次: {schedulerStatus.next_run_time?.slice(5) || "—"}</span>
+              <span>下次同步: {schedulerStatus.next_run_time?.slice(5) || "—"}</span>
             </div>
           </div>
         </div>

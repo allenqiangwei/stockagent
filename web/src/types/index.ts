@@ -619,6 +619,7 @@ export interface AISchedulerStatus {
   next_run_time: string;
   refresh_hour: number;
   refresh_minute: number;
+  latest_data_date: string | null;
 }
 
 export interface BotStockTimeline {

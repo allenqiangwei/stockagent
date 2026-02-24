@@ -411,7 +411,7 @@ async def lifespan(app: FastAPI):
 
     from api.services.signal_scheduler import start_signal_scheduler, stop_signal_scheduler
     start_signal_scheduler()
-    logger.info("Signal + AI analysis scheduler started.")
+    logger.info("Data sync scheduler started (19:00 daily).")
 
     yield
 

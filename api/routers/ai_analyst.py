@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api/ai", tags=["ai-analyst"])
 
 @router.get("/scheduler-status")
 def get_scheduler_status():
-    """Return auto-analysis scheduler status (running, last/next run times)."""
+    """Return data sync scheduler status (running, last/next run times, latest data date)."""
     from api.services.signal_scheduler import get_signal_scheduler
 
     sched = get_signal_scheduler()
@@ -37,6 +37,7 @@ def get_scheduler_status():
         "next_run_time": status["next_run_time"],
         "refresh_hour": status["refresh_hour"],
         "refresh_minute": status["refresh_minute"],
+        "latest_data_date": status["latest_data_date"],
     }
 
 

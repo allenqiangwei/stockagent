@@ -1,4 +1,4 @@
-"""Signal scheduler — runs signal generation daily at a configured time.
+"""Data sync scheduler — syncs daily prices and executes trade plans at a configured time.
 
 Daemon thread checks every 30 seconds whether the scheduled time has arrived.
 Reads schedule from config/config.yaml (signals.auto_refresh_hour/minute).
@@ -11,13 +11,12 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from api.models.base import SessionLocal
-from api.services.signal_engine import SignalEngine
 
 logger = logging.getLogger(__name__)
 
 
 class SignalScheduler:
-    """Background scheduler that generates signals daily."""
+    """Background scheduler that syncs daily data and executes trade plans."""
 
     def __init__(self, refresh_hour: int = 19, refresh_minute: int = 0):
         self.refresh_hour = refresh_hour
@@ -35,7 +34,7 @@ class SignalScheduler:
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         logger.info(
-            "Signal scheduler started — daily at %02d:%02d",
+            "Data sync scheduler started — daily at %02d:%02d",
             self.refresh_hour,
             self.refresh_minute,
         )
@@ -44,7 +43,7 @@ class SignalScheduler:
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
-        logger.info("Signal scheduler stopped.")
+        logger.info("Data sync scheduler stopped.")
 
     # ── Schedule helpers ──────────────────────────────
 
@@ -61,6 +60,22 @@ class SignalScheduler:
             target += timedelta(days=1)
         return target.strftime("%Y-%m-%d %H:%M")
 
+    def get_latest_data_date(self) -> Optional[str]:
+        """Query the latest trade_date from daily_prices table."""
+        try:
+            db = SessionLocal()
+            try:
+                from sqlalchemy import func
+                from api.models.stock import DailyPrice
+                result = db.query(func.max(DailyPrice.trade_date)).scalar()
+                if result:
+                    return result.isoformat() if hasattr(result, 'isoformat') else str(result)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug("Failed to query latest data date: %s", e)
+        return None
+
     def get_status(self) -> dict:
         return {
             "running": self._running,
@@ -69,6 +84,7 @@ class SignalScheduler:
             "next_run_time": self.get_next_run_time(),
             "refresh_hour": self.refresh_hour,
             "refresh_minute": self.refresh_minute,
+            "latest_data_date": self.get_latest_data_date(),
         }
 
     # ── Main loop ─────────────────────────────────────
@@ -84,7 +100,7 @@ class SignalScheduler:
             )
 
             if should_run and self._last_run_date != today and not self._is_refreshing:
-                logger.info("Scheduled signal generation triggered for %s", today)
+                logger.info("Scheduled data sync triggered for %s", today)
                 self._do_refresh(today)
 
             # Check every 30 seconds
@@ -104,13 +120,14 @@ class SignalScheduler:
             try:
                 # Step 0: Check if today is a trading day
                 is_trading_day = True
+                collector = None
                 try:
                     from api.services.data_collector import DataCollector
                     collector = DataCollector(db)
                     trading_dates = collector.get_trading_dates(trade_date, trade_date)
                     if not trading_dates or trade_date not in trading_dates:
                         is_trading_day = False
-                        logger.info("Scheduler: %s is not a trading day, skipping data sync & signals", trade_date)
+                        logger.info("Scheduler: %s is not a trading day, skipping", trade_date)
                 except Exception as e:
                     logger.warning("Trading day check failed (assuming trading day): %s", e)
 
@@ -122,9 +139,9 @@ class SignalScheduler:
                             collector = DataCollector(db)
                         collector.repair_daily_gaps(trade_date, trade_date)
                     except Exception as e:
-                        logger.warning("Signal scheduler gap repair failed (non-fatal): %s", e)
+                        logger.warning("Gap repair failed (non-fatal): %s", e)
 
-                    # Step 1: Sync daily prices (must run before plan execution)
+                    # Step 1: Sync daily prices
                     self._sync_daily_prices(db, trade_date)
 
                     # Step 2: Execute pending trade plans (needs today's OHLCV)
@@ -140,104 +157,20 @@ class SignalScheduler:
                         except Exception:
                             pass
 
-                    # Step 3: AI strategy selection
-                    selected_ids = None
-                    try:
-                        from api.services.strategy_selector import (
-                            build_family_summary, format_family_table,
-                            select_strategies_by_families, get_fallback_strategy_ids,
-                        )
-                        from api.services.claude_runner import run_strategy_selection
-
-                        summaries = build_family_summary(db)
-                        if summaries:
-                            table = format_family_table(summaries)
-                            selection = run_strategy_selection(table)
-                            if selection and selection.get("selected_families"):
-                                selected_ids = select_strategies_by_families(
-                                    db, selection["selected_families"]
-                                )
-                                logger.info(
-                                    "AI selected strategies: %s (IDs: %s)",
-                                    selection["selected_families"], selected_ids,
-                                )
-                            if not selected_ids:
-                                selected_ids = get_fallback_strategy_ids(db)
-                                logger.info("Using fallback strategy IDs: %s", selected_ids)
-                        else:
-                            logger.warning("No family summaries, running all strategies")
-                    except Exception as e:
-                        logger.error("Strategy selection failed (non-fatal): %s", e)
-                        try:
-                            from api.services.strategy_selector import get_fallback_strategy_ids
-                            selected_ids = get_fallback_strategy_ids(db)
-                            logger.info("Fallback after error, IDs: %s", selected_ids)
-                        except Exception:
-                            pass
-
-                    # Step 4: Generate signals (filtered by selected strategies)
-                    engine = SignalEngine(db)
-                    for _ in engine.generate_signals_stream(trade_date, strategy_ids=selected_ids):
-                        pass
-                    logger.info("Scheduled signal generation completed for %s", trade_date)
+                    logger.info("Daily data sync completed for %s", trade_date)
                 else:
-                    logger.info("Skipped data sync, plans & signals (non-trading day)")
+                    logger.info("Skipped data sync & plans (non-trading day)")
 
                 self._last_run_date = trade_date
-
-                # Step 5: Run AI daily analysis (runs on both trading and non-trading days)
-                self._run_ai_analysis(trade_date, db)
             finally:
                 db.close()
         except Exception as e:
-            logger.error("Scheduled signal generation failed: %s", e)
+            logger.error("Scheduled data sync failed: %s", e)
         finally:
             self._is_refreshing = False
 
-    def _run_ai_analysis(self, trade_date: str, db):
-        """Run Claude AI daily analysis after signal generation (non-fatal)."""
-        try:
-            from api.services.claude_runner import run_daily_analysis
-            from api.models.ai_analyst import AIReport
-
-            logger.info("Running AI daily analysis for %s...", trade_date)
-            report = run_daily_analysis(trade_date)
-            if report is None:
-                logger.warning("AI daily analysis returned no result for %s", trade_date)
-                return
-
-            ai_report = AIReport(
-                report_date=trade_date,
-                report_type=report.get("report_type", "daily"),
-                market_regime=report.get("market_regime"),
-                market_regime_confidence=report.get("market_regime_confidence"),
-                recommendations=report.get("recommendations"),
-                strategy_actions=report.get("strategy_actions"),
-                thinking_process=report.get("thinking_process", ""),
-                summary=report.get("summary", ""),
-            )
-            db.add(ai_report)
-            db.commit()
-            logger.info("AI daily analysis saved for %s", trade_date)
-
-            # Create trade plans from recommendations
-            recs = report.get("recommendations")
-            if recs:
-                try:
-                    from api.services.bot_trading_engine import create_trade_plans
-                    plan_results = create_trade_plans(db, ai_report.id, trade_date, recs)
-                    logger.info("Created %d trade plans from AI analysis", len(plan_results))
-                except Exception as e:
-                    logger.warning("Trade plan creation failed (non-fatal): %s", e)
-        except Exception as e:
-            logger.error("AI daily analysis failed (non-fatal): %s", e)
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
     def _sync_daily_prices(self, db, trade_date: str):
-        """Fetch latest daily prices for all stocks with existing data before generating signals."""
+        """Fetch latest daily prices for all stocks with existing data."""
         from api.services.data_collector import DataCollector
 
         collector = DataCollector(db)
@@ -246,7 +179,7 @@ class SignalScheduler:
             logger.warning("No stocks with sufficient data to sync")
             return
 
-        logger.info("Syncing daily prices for %d stocks before signal generation...", len(codes))
+        logger.info("Syncing daily prices for %d stocks...", len(codes))
         updated = 0
         errors = 0
         for code in codes:
