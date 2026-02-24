@@ -95,7 +95,32 @@ class SignalScheduler:
 
     # ── Main loop ─────────────────────────────────────
 
+    def _already_synced_today(self, today: str) -> bool:
+        """Check if daily_prices already has data for today (survives process restarts)."""
+        try:
+            from datetime import date as _date
+            from api.models.stock import DailyPrice
+            db = SessionLocal()
+            try:
+                count = (
+                    db.query(DailyPrice)
+                    .filter(DailyPrice.trade_date == _date.fromisoformat(today))
+                    .limit(1)
+                    .count()
+                )
+                return count > 0
+            finally:
+                db.close()
+        except Exception:
+            return False
+
     def _run_loop(self):
+        # On startup, check if today was already synced (recover from process restart)
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._already_synced_today(today):
+            self._last_run_date = today
+            logger.info("Data for %s already exists, skipping re-sync on startup", today)
+
         while self._running:
             now = datetime.now()
             today = now.strftime("%Y-%m-%d")
