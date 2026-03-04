@@ -177,8 +177,8 @@ class SignalScheduler:
                     except Exception as e:
                         logger.warning("Gap repair failed (non-fatal): %s", e)
 
-                    # Step 1: Sync daily prices
-                    self._sync_step = "同步日线数据"
+                    # Step 1: Sync daily prices (batch: 1 API call for entire market)
+                    self._sync_step = "批量同步日线数据"
                     self._sync_daily_prices(db, trade_date)
 
                     # Step 2: Execute pending trade plans (needs today's OHLCV)
@@ -194,6 +194,29 @@ class SignalScheduler:
                             db.rollback()
                         except Exception:
                             pass
+
+                    # Step 3: Monitor exit conditions (SL/TP/MHD)
+                    self._sync_step = "监控退出条件"
+                    try:
+                        from api.services.bot_trading_engine import monitor_exit_conditions
+                        exit_results = monitor_exit_conditions(db, trade_date)
+                        if exit_results:
+                            logger.info("Exit monitor: %d actions for %s", len(exit_results), trade_date)
+                    except Exception as e:
+                        logger.error("Exit monitoring failed (non-fatal): %s", e)
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+
+                    # Step 4: Aggregate beta insights (after reviews are created)
+                    try:
+                        from api.services.beta_engine import aggregate_beta_insights
+                        n = aggregate_beta_insights(db)
+                        if n:
+                            logger.info("Beta insight aggregation: %d insights updated", n)
+                    except Exception as e:
+                        logger.warning("Beta aggregation failed (non-fatal): %s", e)
 
                     logger.info("Daily data sync completed for %s", trade_date)
                 else:
@@ -211,37 +234,22 @@ class SignalScheduler:
             self._sync_done = 0
 
     def _sync_daily_prices(self, db, trade_date: str):
-        """Fetch latest daily prices for all stocks with existing data."""
+        """Fetch latest daily prices via batch API (one call for entire market)."""
         from api.services.data_collector import DataCollector
 
         collector = DataCollector(db)
-        codes = collector.get_stocks_with_data(min_rows=60)
-        if not codes:
-            logger.warning("No stocks with sufficient data to sync")
-            return
 
-        self._sync_total = len(codes)
+        self._sync_total = 1
         self._sync_done = 0
-        logger.info("Syncing daily prices for %d stocks...", len(codes))
-        updated = 0
-        errors = 0
-        for code in codes:
-            try:
-                df = collector.get_daily_df(code, trade_date, trade_date, local_only=False)
-                if df is not None and not df.empty:
-                    updated += 1
-            except Exception as e:
-                errors += 1
-                if errors <= 3:
-                    logger.debug("Price sync failed for %s: %s", code, e)
+        logger.info("Batch syncing daily prices for %s...", trade_date)
 
-            self._sync_done += 1
-
-            # Rate limit to avoid API throttling
-            if updated % 50 == 0 and updated > 0:
-                time.sleep(1)
-
-        logger.info("Daily price sync done: %d updated, %d errors", updated, errors)
+        try:
+            count = collector._fetch_daily_batch_by_date(trade_date)
+            self._sync_done = 1
+            logger.info("Batch daily sync done for %s: %d records", trade_date, count)
+        except Exception as e:
+            logger.error("Batch daily sync failed for %s: %s", trade_date, e)
+            self._sync_done = 1
 
 
 # ── Global singleton ──────────────────────────────

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,7 +43,7 @@ import {
   useBotPlans,
   useAISchedulerStatus,
 } from "@/hooks/use-queries";
-import { bot } from "@/lib/api";
+import { ai, bot } from "@/lib/api";
 import type { AIReport, AIReportListItem, BotTradeItem, BotStockTimeline, BotTradePlanItem } from "@/types";
 
 // ── helpers ────────────────────────────────────────────
@@ -603,6 +603,15 @@ function BotTradingPanel() {
           </div>
         </div>
       )}
+      {/* Exit stats row */}
+      {summary && (summary.sl_count > 0 || summary.tp_count > 0 || summary.mhd_count > 0 || summary.ai_sell_count > 0) && (
+        <div className="flex gap-3 text-[10px] text-muted-foreground px-1">
+          <span>止损 <span className="text-red-400 font-mono">{summary.sl_count}</span></span>
+          <span>止盈 <span className="text-green-400 font-mono">{summary.tp_count}</span></span>
+          <span>超期 <span className="text-amber-400 font-mono">{summary.mhd_count}</span></span>
+          <span>AI卖出 <span className="text-blue-400 font-mono">{summary.ai_sell_count}</span></span>
+        </div>
+      )}
 
       {/* Sub-tabs */}
       <div className="flex gap-1 border-b border-border/30 pb-0">
@@ -653,6 +662,43 @@ function BotTradingPanel() {
                   <span>投入 ¥{h.total_invested.toLocaleString()}</span>
                   <span>首买 {h.first_buy_date}</span>
                 </div>
+                {/* Exit config display */}
+                {h.exit_config && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {h.exit_config.stop_loss_pct != null && h.sl_price != null && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                        h.close != null && h.close < h.sl_price * 1.03
+                          ? "border-red-500/50 bg-red-500/10 text-red-400"
+                          : "border-border/50 text-muted-foreground"
+                      }`}>
+                        止损 {h.exit_config.stop_loss_pct}% ¥{h.sl_price.toFixed(2)}
+                        {h.close != null && <span className="ml-1">({((h.close - h.sl_price) / h.sl_price * 100).toFixed(1)}%)</span>}
+                      </span>
+                    )}
+                    {h.exit_config.take_profit_pct != null && h.tp_price != null && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                        h.close != null && h.close > h.tp_price * 0.97
+                          ? "border-green-500/50 bg-green-500/10 text-green-400"
+                          : "border-border/50 text-muted-foreground"
+                      }`}>
+                        止盈 +{h.exit_config.take_profit_pct}% ¥{h.tp_price.toFixed(2)}
+                        {h.close != null && <span className="ml-1">({((h.tp_price - h.close) / h.close * 100).toFixed(1)}%)</span>}
+                      </span>
+                    )}
+                    {h.exit_config.max_hold_days != null && h.days_remaining != null && (
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                        h.days_remaining <= 2
+                          ? "border-amber-500/50 bg-amber-500/10 text-amber-400"
+                          : "border-border/50 text-muted-foreground"
+                      }`}>
+                        剩余{h.days_remaining}天/{h.exit_config.max_hold_days}天
+                      </span>
+                    )}
+                  </div>
+                )}
+                {h.strategy_name && (
+                  <div className="mt-1 text-[10px] text-muted-foreground/70">策略: {h.strategy_name}</div>
+                )}
               </button>
 
               {/* Expanded timeline */}
@@ -670,6 +716,18 @@ function BotTradingPanel() {
                           <span className="font-medium">
                             {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action === "reduce" ? "减仓" : "持有"}
                           </span>
+                          {t.sell_reason && t.action !== "buy" && t.action !== "hold" && (
+                            <span className={`text-[10px] px-1 py-0.5 rounded ${
+                              t.sell_reason === "stop_loss" ? "bg-red-500/10 text-red-400" :
+                              t.sell_reason === "take_profit" ? "bg-green-500/10 text-green-400" :
+                              t.sell_reason === "max_hold" ? "bg-amber-500/10 text-amber-400" :
+                              "bg-blue-500/10 text-blue-400"
+                            }`}>
+                              {t.sell_reason === "stop_loss" ? "止损" :
+                               t.sell_reason === "take_profit" ? "止盈" :
+                               t.sell_reason === "max_hold" ? "超期" : "AI"}
+                            </span>
+                          )}
                           {t.quantity > 0 && <span className="font-mono">{t.quantity}股 @¥{t.price.toFixed(2)}</span>}
                         </div>
                         {t.thinking && (
@@ -694,11 +752,25 @@ function BotTradingPanel() {
             <>
               {/* Pending plans */}
               {plans.filter((p: BotTradePlanItem) => p.status === "pending").map((plan: BotTradePlanItem) => (
-                <div key={plan.id} className="border border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-700 rounded-lg p-3">
+                <div key={plan.id} className={`border rounded-lg p-3 ${
+                  plan.source === "stop_loss" ? "border-red-400 bg-red-50 dark:bg-red-950/20 dark:border-red-700" :
+                  plan.source === "take_profit" ? "border-green-400 bg-green-50 dark:bg-green-950/20 dark:border-green-700" :
+                  plan.source === "max_hold" ? "border-amber-400 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-600" :
+                  "border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-700"
+                }`}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${plan.direction === "buy" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"}`}>
-                        {plan.direction === "buy" ? "买入" : "卖出"}
+                      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
+                        plan.source === "stop_loss" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" :
+                        plan.source === "take_profit" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" :
+                        plan.source === "max_hold" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" :
+                        plan.direction === "buy" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" :
+                        "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      }`}>
+                        {plan.source === "stop_loss" ? "止损" :
+                         plan.source === "take_profit" ? "止盈" :
+                         plan.source === "max_hold" ? "超期" :
+                         plan.direction === "buy" ? "AI买入" : "AI卖出"}
                       </span>
                       <span className="font-mono font-bold">{plan.stock_code}</span>
                       <span className="text-muted-foreground text-sm">{plan.stock_name}</span>
@@ -825,6 +897,18 @@ function BotTradingPanel() {
                           <span className="font-medium">
                             {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action === "reduce" ? "减仓" : "持有"}
                           </span>
+                          {t.sell_reason && t.action !== "buy" && t.action !== "hold" && (
+                            <span className={`text-[10px] px-1 py-0.5 rounded ${
+                              t.sell_reason === "stop_loss" ? "bg-red-500/10 text-red-400" :
+                              t.sell_reason === "take_profit" ? "bg-green-500/10 text-green-400" :
+                              t.sell_reason === "max_hold" ? "bg-amber-500/10 text-amber-400" :
+                              "bg-blue-500/10 text-blue-400"
+                            }`}>
+                              {t.sell_reason === "stop_loss" ? "止损" :
+                               t.sell_reason === "take_profit" ? "止盈" :
+                               t.sell_reason === "max_hold" ? "超期" : "AI"}
+                            </span>
+                          )}
                           {t.quantity > 0 && <span className="font-mono">{t.quantity}股 @¥{t.price.toFixed(2)}</span>}
                         </div>
                         {t.thinking && (
@@ -942,6 +1026,13 @@ export default function AIPage() {
   const triggerMutation = useTriggerAnalysis();
   const pollQuery = useAnalysisPoll(analysisJobId);
   const { data: schedulerStatus } = useAISchedulerStatus();
+  const syncMutation = useMutation({
+    mutationFn: () => ai.triggerSync(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ai-scheduler-status"] }),
+  });
+  const betaAggregateMutation = useMutation({
+    mutationFn: () => ai.betaAggregate(),
+  });
 
   // Restore analysis state from localStorage on mount
   useEffect(() => {
@@ -1029,11 +1120,32 @@ export default function AIPage() {
                 {schedulerStatus.running ? "数据同步运行中" : "数据同步已停止"}
               </span>
             </div>
-            {schedulerStatus.is_refreshing && (
+            {schedulerStatus.is_refreshing ? (
               <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 text-amber-500 border-amber-500/30">
                 <Loader2 className="h-2.5 w-2.5 animate-spin mr-1" />
                 {schedulerStatus.sync_step || "同步中"}
               </Badge>
+            ) : (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => betaAggregateMutation.mutate()}
+                  disabled={betaAggregateMutation.isPending}
+                  className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                >
+                  <Zap className={`h-3 w-3 ${betaAggregateMutation.isPending ? "animate-spin" : ""}`} />
+                  {betaAggregateMutation.isSuccess
+                    ? `Beta聚合 (${betaAggregateMutation.data?.insights_updated ?? 0})`
+                    : "Beta聚合"}
+                </button>
+                <button
+                  onClick={() => syncMutation.mutate()}
+                  disabled={syncMutation.isPending}
+                  className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3 w-3 ${syncMutation.isPending ? "animate-spin" : ""}`} />
+                  立即同步
+                </button>
+              </div>
             )}
           </div>
           {schedulerStatus.is_refreshing && schedulerStatus.sync_total > 0 && (

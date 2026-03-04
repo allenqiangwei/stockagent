@@ -11,21 +11,31 @@ class Base(DeclarativeBase):
 
 
 _settings = get_settings()
-engine = create_engine(
-    _settings.database.url,
-    connect_args={"check_same_thread": False},  # SQLite needs this for FastAPI
-    echo=_settings.debug,
-)
+_is_sqlite = "sqlite" in _settings.database.url
 
+if _is_sqlite:
+    engine = create_engine(
+        _settings.database.url,
+        connect_args={"check_same_thread": False},
+        echo=_settings.debug,
+    )
 
-# Enable WAL mode for better concurrent read performance
-@event.listens_for(engine, "connect")
-def _set_sqlite_pragma(dbapi_conn, connection_record):
-    cursor = dbapi_conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.execute("PRAGMA busy_timeout=10000")  # 10s wait on lock instead of hanging
-    cursor.close()
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=10000")
+        cursor.close()
+else:
+    # PostgreSQL: connection pooling
+    engine = create_engine(
+        _settings.database.url,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,
+        echo=_settings.debug,
+    )
 
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)

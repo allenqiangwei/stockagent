@@ -1,5 +1,7 @@
 """Bot Trading router — simulated portfolio, trades, and reviews."""
 
+import json as _json
+
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 
@@ -12,6 +14,20 @@ from api.schemas.bot_trading import (
 )
 
 router = APIRouter(prefix="/api/bot", tags=["bot-trading"])
+
+
+def _parse_exit_config(val) -> dict | None:
+    """Safely parse exit_config which may be dict, JSON string, or None."""
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            return _json.loads(val)
+        except (_json.JSONDecodeError, ValueError):
+            return None
+    return None
 
 
 def _latest_close(db: Session, code: str) -> tuple[float | None, float | None]:
@@ -38,6 +54,8 @@ def _latest_close(db: Session, code: str) -> tuple[float | None, float | None]:
 def get_bot_portfolio(db: Session = Depends(get_db)):
     """List all bot portfolio holdings with current price and P&L."""
     holdings = db.query(BotPortfolio).order_by(BotPortfolio.first_buy_date.desc()).all()
+    from datetime import date as _date
+
     result = []
     for h in holdings:
         close, change_pct = _latest_close(db, h.stock_code)
@@ -49,6 +67,30 @@ def get_bot_portfolio(db: Session = Depends(get_db)):
             pnl = round((close - h.avg_cost) * h.quantity, 2)
             if h.avg_cost > 0:
                 pnl_pct = round((close - h.avg_cost) / h.avg_cost * 100, 2)
+
+        # Compute exit monitoring derived fields
+        hold_days = None
+        sl_price = None
+        tp_price = None
+        days_remaining = None
+        ec = _parse_exit_config(h.exit_config)
+        if ec and h.buy_price:
+            sl_pct = ec.get("stop_loss_pct", 0)
+            tp_pct = ec.get("take_profit_pct", 0)
+            mhd = ec.get("max_hold_days", 0)
+            if sl_pct:
+                sl_price = round(h.buy_price * (1 + sl_pct / 100), 2)
+            if tp_pct:
+                tp_price = round(h.buy_price * (1 + tp_pct / 100), 2)
+            if h.buy_date:
+                try:
+                    hd = (_date.today() - _date.fromisoformat(h.buy_date)).days
+                    hold_days = hd
+                    if mhd:
+                        days_remaining = max(0, mhd - hd)
+                except ValueError:
+                    pass
+
         result.append(BotPortfolioItem(
             stock_code=h.stock_code,
             stock_name=h.stock_name,
@@ -61,6 +103,15 @@ def get_bot_portfolio(db: Session = Depends(get_db)):
             pnl=pnl,
             pnl_pct=pnl_pct,
             market_value=market_value,
+            strategy_id=h.strategy_id,
+            strategy_name=h.strategy_name,
+            exit_config=h.exit_config,
+            buy_price=h.buy_price,
+            buy_date=h.buy_date,
+            hold_days=hold_days,
+            sl_price=sl_price,
+            tp_price=tp_price,
+            days_remaining=days_remaining,
         ))
     return result
 
@@ -89,6 +140,7 @@ def list_trades(
             report_id=t.report_id,
             trade_date=t.trade_date,
             created_at=t.created_at.isoformat() if t.created_at else "",
+            sell_reason=t.sell_reason,
         )
         for t in rows
     ]
@@ -147,6 +199,7 @@ def get_stock_timeline(stock_code: str, db: Session = Depends(get_db)):
                 amount=t.amount, thinking=t.thinking, report_id=t.report_id,
                 trade_date=t.trade_date,
                 created_at=t.created_at.isoformat() if t.created_at else "",
+                sell_reason=t.sell_reason,
             )
             for t in trades
         ],
@@ -224,6 +277,7 @@ def _plan_to_item(p, prices: dict) -> BotTradePlanItem:
         direction=p.direction, plan_price=p.plan_price, quantity=p.quantity,
         sell_pct=p.sell_pct, plan_date=p.plan_date, status=p.status,
         thinking=p.thinking, report_id=p.report_id,
+        source=getattr(p, "source", "ai") or "ai",
         created_at=p.created_at.isoformat() if p.created_at else "",
         executed_at=p.executed_at.isoformat() if p.executed_at else None,
         execution_price=p.execution_price,
@@ -302,6 +356,15 @@ def get_bot_summary(db: Session = Depends(get_db)):
     all_invested = total_invested + sum(r.total_buy_amount for r in reviews)
     total_pnl_pct = (total_pnl / all_invested * 100) if all_invested > 0 else 0.0
 
+    # Count exit reasons from trades
+    from sqlalchemy import func
+    exit_counts = dict(
+        db.query(BotTrade.sell_reason, func.count())
+        .filter(BotTrade.sell_reason.isnot(None))
+        .group_by(BotTrade.sell_reason)
+        .all()
+    )
+
     return BotSummary(
         total_invested=round(all_invested, 2),
         current_market_value=round(current_mv, 2),
@@ -312,4 +375,8 @@ def get_bot_summary(db: Session = Depends(get_db)):
         reviews_count=len(reviews),
         win_count=sum(1 for r in reviews if r.pnl > 0),
         loss_count=sum(1 for r in reviews if r.pnl <= 0),
+        sl_count=exit_counts.get("stop_loss", 0),
+        tp_count=exit_counts.get("take_profit", 0),
+        mhd_count=exit_counts.get("max_hold", 0),
+        ai_sell_count=exit_counts.get("ai_recommend", 0),
     )

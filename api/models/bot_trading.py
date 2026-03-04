@@ -22,6 +22,12 @@ class BotPortfolio(Base):
     total_invested: Mapped[float] = mapped_column(Float, default=0.0)
     first_buy_date: Mapped[str] = mapped_column(String(10), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # Exit monitoring — linked strategy + SL/TP/MHD config
+    strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    exit_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    buy_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    buy_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
 
 class BotTrade(Base):
@@ -40,6 +46,7 @@ class BotTrade(Base):
     report_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trade_date: Mapped[str] = mapped_column(String(10), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    sell_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)  # stop_loss|take_profit|max_hold|ai_recommend
 
     __table_args__ = (
         Index("ix_bot_trade_code_date", "stock_code", "trade_date"),
@@ -84,6 +91,8 @@ class BotTradePlan(Base):
     status: Mapped[str] = mapped_column(String(10), default="pending")  # pending|executed|expired
     thinking: Mapped[str] = mapped_column(Text, default="")
     report_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="ai")  # ai|stop_loss|take_profit|max_hold
+    strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     execution_price: Mapped[float | None] = mapped_column(Float, nullable=True)

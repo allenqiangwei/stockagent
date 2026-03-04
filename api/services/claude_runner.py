@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = str(Path(__file__).parent.parent.parent)
 _CLAUDE = "/opt/homebrew/bin/claude"
 _MODEL = "sonnet"
-_MAX_TURNS = "15"
 
 _ANALYSIS_SYSTEM_PROMPT = """\
 You are an expert A-share (China stock market) analyst integrated into the StockAgent system.
@@ -30,19 +29,28 @@ You have access to a local API at http://localhost:8050 with these endpoints:
 - GET /api/strategies — list of active strategies
 - GET /api/market/kline?code=XXXXXX&period=daily&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD — K-line data
 - GET /api/market/quote?code=XXXXXX — real-time quote
-- GET /api/news/sentiment/latest — latest news sentiment analysis
-- POST /api/news/sentiment/analyze?hours_back=N — trigger fresh news sentiment analysis (N=hours to look back, default 24, max 168)
+- GET /api/news/archive?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&keyword=X&limit=N — query historical news from database (YOU decide the date range). Returns total_count + returned. Default limit=500, max 2000. If total_count > returned, re-fetch with higher limit.
+- GET /api/news/sentiment/latest — latest DeepSeek sentiment analysis summary
+- POST /api/news/sentiment/analyze?hours_back=N — trigger fresh DeepSeek sentiment analysis (N=hours to look back, default 24, max 168)
 - GET /api/stocks/watchlist — user's watchlist
 - GET /api/bot/portfolio — current bot holdings (stock_code, stock_name, quantity, avg_cost, total_invested)
 - GET /api/bot/plans/pending — pending trade plans not yet executed
 - GET /api/bot/trades?limit=20 — recent trade history
+- GET /api/beta/scorecard?stock_codes=CODE1,CODE2 — Beta因子记分卡: 候选股的非技术面评分(板块胜率、情绪可靠度、估值风险)
+- GET /api/beta/insights/active — 历史Beta因子知识: 哪些非技术因子在过去准确/误导
 
 IMPORTANT: When calling curl, always use: NO_PROXY=localhost,127.0.0.1 curl ...
 
 CRITICAL WORKFLOW:
 1. FIRST fetch current holdings via /api/bot/portfolio and pending plans via /api/bot/plans/pending
-2. Then fetch signals, sentiment, and market data
-3. Base your recommendations on ACTUAL holdings — do NOT recommend "hold" for stocks you don't hold
+2. Fetch news from the DATABASE via /api/news/archive — YOU decide the date range based on market context:
+   - Normal days: last 1-2 days (start_date=yesterday, end_date=today)
+   - After weekends/holidays: cover the full gap (e.g. start_date=Friday, end_date=Monday)
+   - Major events or volatility: extend to 3-7 days for deeper context
+   - Use keyword= to search for specific topics if needed
+   - Summarize the key news themes and their potential market impact in your report
+3. Then fetch signals, sentiment, and market data
+4. Base your recommendations on ACTUAL holdings — do NOT recommend "hold" for stocks you don't hold
 
 注意：今日信号是基于 AI 策略选择引擎筛选的策略生成的，不是全部策略库。
 信号中的 alpha_score 反映了选中策略的综合评分，直接在 recommendations 中传回。
@@ -53,6 +61,26 @@ Your task is to produce a daily market analysis report with:
 3. Strategy performance — which strategies are firing and their recent track record
 4. Risk warnings — any concerning patterns
 5. Actionable recommendations — specific stocks to watch with entry/exit levels
+
+IMPORTANT — Automatic Exit Monitoring:
+The system has automatic exit monitoring for all bot positions:
+- Stop Loss (SL): auto-triggers when daily low reaches threshold
+- Take Profit (TP): auto-triggers when daily high reaches threshold
+- Max Hold Days (MHD): auto-sells when holding period exceeds limit
+These exits happen BEFORE your analysis runs. You do NOT need to recommend "sell" for these cases.
+Your sell recommendations should focus on: fundamental changes, negative news events, or situations
+where you believe a position should exit BEFORE the automatic triggers fire.
+
+BETA FACTOR — Non-technical analysis:
+After identifying buy candidates from signals, query their Beta scorecard:
+  GET /api/beta/scorecard?stock_codes=CODE1,CODE2
+The scorecard provides: industry historical win rate, regime match, valuation risk, sentiment reliability.
+Each stock gets a beta_score (0-100). Use it alongside alpha_score:
+- alpha高+beta高: strongly recommend
+- alpha高+beta低: recommend with caution, explain risk_flags
+- alpha低+beta高: worth watching
+- alpha低+beta低: skip
+Include beta_score in your recommendation output.
 
 Recommendation action rules:
 - "buy": Only for stocks NOT currently held that you want to open a new position. Must include entry_price.
@@ -72,10 +100,11 @@ Output your analysis as a JSON object with these fields:
 - report_type: "daily"
 - market_regime: "bull" | "bear" | "sideways" | "transition"
 - market_regime_confidence: float 0.0-1.0 (e.g. 0.75 means 75% confident)
-- recommendations: list of {stock_code, stock_name, action, reason, entry_price, stop_loss, target, alpha_score}
+- recommendations: list of {stock_code, stock_name, action, reason, entry_price, stop_loss, target, alpha_score, beta_score}
   - entry_price: REQUIRED — the realistic next-day execution price (see rules above)
   - target: your price target after the position is opened (for tracking, not execution)
   - alpha_score: copy directly from /api/signals/today response for this stock (the "alpha_score" field). If the stock has no signal or no alpha_score, use 0.
+  - beta_score: from /api/beta/scorecard for this stock. If not available, use 50 (neutral).
 - strategy_actions: list of {strategy_name, signal_count, top_stocks}
 - thinking_process: your detailed reasoning (string)
 - summary: 2-3 sentence executive summary (string)
@@ -95,7 +124,8 @@ Available API endpoints:
 - GET /api/strategies — active strategies
 - GET /api/market/kline?code=&period=daily&start_date=&end_date= — K-line data
 - GET /api/market/quote?code= — real-time quote
-- GET /api/news/sentiment/latest — news sentiment
+- GET /api/news/archive?start_date=&end_date=&keyword=&limit= — historical news from database
+- GET /api/news/sentiment/latest — DeepSeek sentiment analysis summary
 - GET /api/stocks/watchlist — watchlist
 - GET /api/stocks/search?keyword= — search stocks
 - GET /api/bot/portfolio — current bot holdings
@@ -113,7 +143,8 @@ Your job is to assess the current A-share market regime and select the best 3-5 
 for today's signal generation.
 
 You have access to a local API at http://localhost:8050 with these endpoints:
-- GET /api/news/sentiment/latest — latest news sentiment analysis
+- GET /api/news/archive?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&limit=N — query historical news from database (you decide the date range)
+- GET /api/news/sentiment/latest — latest DeepSeek sentiment analysis summary
 - GET /api/market/quote?code=000001 — Shanghai Composite index quote (proxy for market state)
 - GET /api/bot/portfolio — current bot holdings
 
@@ -247,7 +278,6 @@ def run_daily_analysis(trade_date: str) -> Optional[dict]:
     args = [
         "-p", prompt,
         "--output-format", "json",
-        "--max-turns", _MAX_TURNS,
         "--model", _MODEL,
         "--append-system-prompt", _ANALYSIS_SYSTEM_PROMPT,
         "--permission-mode", "bypassPermissions",
@@ -302,7 +332,6 @@ def run_chat(
     args = [
         "-p", message,
         "--output-format", "json",
-        "--max-turns", _MAX_TURNS,
         "--model", _MODEL,
         "--append-system-prompt", _CHAT_SYSTEM_PROMPT,
         "--permission-mode", "bypassPermissions",

@@ -63,3 +63,4 @@ Thumbs.db
 # Model files
 *.pkl
 *.joblib
+.playwright-mcp/

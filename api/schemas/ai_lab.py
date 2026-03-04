@@ -116,6 +116,22 @@ class CloneBacktestRequest(BaseModel):
     max_position_pct: float = 30.0
 
 
+# ── Batch Clone & Backtest ────────────────────────
+
+class BatchCloneBacktestRequest(BaseModel):
+    """Batch clone an experiment strategy with multiple exit configs.
+
+    Loads data + computes indicators ONCE, then runs N backtests with
+    different exit_configs using vectorized signals. 10-50x faster than
+    N individual clone-backtest calls.
+    """
+    source_strategy_id: int
+    exit_configs: list[dict]  # [{"name_suffix": "SL8_TP1", "exit_config": {...}}, ...]
+    initial_capital: float = 100000.0
+    max_positions: int = 10
+    max_position_pct: float = 30.0
+
+
 # ── Exploration Rounds ───────────────────────────
 
 class ExplorationRoundCreate(BaseModel):

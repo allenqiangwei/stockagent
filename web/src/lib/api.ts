@@ -248,6 +248,10 @@ export const ai = {
     request<{ dates: string[] }>(`/ai/reports/dates?limit=${limit}`),
   schedulerStatus: () =>
     request<import("@/types").AISchedulerStatus>("/ai/scheduler-status"),
+  triggerSync: (date?: string) =>
+    post<{ message: string }>(`/ai/sync-data${date ? `?trade_date=${date}` : ""}`, {}),
+  betaAggregate: () =>
+    post<{ insights_updated: number }>("/beta/insights/aggregate", {}),
   triggerAnalysis: (date?: string) =>
     post<AnalysisTriggerResponse>("/ai/analyze", { date: date || null }),
   analysisProgress: (jobId: string) =>

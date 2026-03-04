@@ -1,4 +1,4 @@
-"""SQLite数据库管理模块"""
+"""数据库管理模块 — 支持 PostgreSQL 和 SQLite"""
 import hashlib
 import json
 import sqlite3
@@ -6,9 +6,105 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PG = True
+except ImportError:
+    HAS_PG = False
+
+
+class _DictRow(dict):
+    """Dict that also supports integer index access (for SQLite compat)."""
+
+    def __init__(self, d):
+        super().__init__(d)
+        self._values = list(d.values())
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
+
+
+class _PgCursorWrapper:
+    """Wraps a psycopg2 cursor to auto-translate SQLite SQL syntax."""
+
+    def __init__(self, real_cursor):
+        self._cur = real_cursor
+
+    def _translate(self, sql):
+        """Translate SQLite SQL to PostgreSQL syntax."""
+        import re
+        # ? → %s  (positional params)
+        sql = sql.replace("?", "%s")
+        # :param_name → %(param_name)s  (named params, only if present)
+        sql = re.sub(r':(\w+)', r'%(\1)s', sql)
+        return sql
+
+    def execute(self, sql, params=None):
+        sql = self._translate(sql)
+        if params:
+            return self._cur.execute(sql, params)
+        return self._cur.execute(sql)
+
+    def executemany(self, sql, params_list):
+        sql = self._translate(sql)
+        return self._cur.executemany(sql, params_list)
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        if row is None:
+            return None
+        return _DictRow(row)
+
+    def fetchall(self):
+        return [_DictRow(r) for r in self._cur.fetchall()]
+
+    def __iter__(self):
+        return iter(self._cur)
+
+    @property
+    def description(self):
+        return self._cur.description
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    @property
+    def lastrowid(self):
+        """Get last inserted row ID via PostgreSQL's lastval()."""
+        try:
+            self._cur.execute("SELECT lastval()")
+            row = self._cur.fetchone()
+            return row["lastval"] if row else None
+        except Exception:
+            return None
+
+
+class _PgConnectionWrapper:
+    """Wraps a psycopg2 connection to return RealDictCursor with SQL translation."""
+
+    def __init__(self, real_conn):
+        self._conn = real_conn
+
+    def cursor(self):
+        real_cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        return _PgCursorWrapper(real_cur)
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        return self._conn.close()
+
 
 class Database:
-    """SQLite数据库管理器
+    """数据库管理器 — 支持 PostgreSQL (postgresql://) 和 SQLite (文件路径)
 
     管理股票列表、数据更新日志、新闻情绪等业务数据。
     """
@@ -17,23 +113,69 @@ class Database:
         """初始化数据库连接
 
         Args:
-            db_path: SQLite数据库文件路径
+            db_path: 数据库路径或 PostgreSQL URL (postgresql://...)
         """
         self.db_path = db_path
+        self._use_pg = db_path.startswith("postgresql://") and HAS_PG
+        # PostgreSQL uses %s placeholders; SQLite uses ?
+        self._ph = "%s" if self._use_pg else "?"
 
     @contextmanager
     def _get_connection(self):
-        """获取数据库连接的上下文管理器"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        """获取数据库连接的上下文管理器
+
+        Returns a connection wrapper that auto-translates SQL for the backend:
+        - ? → %s for PostgreSQL
+        - RealDictCursor for PG (dict rows)
+        - sqlite3.Row for SQLite (dict-like rows)
+        """
+        if self._use_pg:
+            raw_conn = psycopg2.connect(self.db_path)
+            raw_conn.autocommit = False
+            conn = _PgConnectionWrapper(raw_conn)
+            try:
+                yield conn
+                raw_conn.commit()
+            except Exception:
+                raw_conn.rollback()
+                raise
+            finally:
+                raw_conn.close()
+        else:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
+
+    def _dict_row(self, row):
+        """Convert a row to dict regardless of backend."""
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            return row
+        if hasattr(row, 'keys'):
+            return dict(row)
+        return row
+
+    def _sql(self, sql: str) -> str:
+        """Adapt SQL for the current backend.
+
+        - Replaces ? with %s for PostgreSQL
+        - Replaces INSERT OR REPLACE with INSERT ... ON CONFLICT DO NOTHING
+        """
+        if not self._use_pg:
+            return sql
+        # Replace ? placeholders with %s (but not inside quotes)
+        return sql.replace("?", "%s")
 
     def init_tables(self) -> None:
         """初始化所有数据表"""
+        if self._use_pg:
+            return  # Tables created by migration script or SQLAlchemy ORM
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
@@ -325,11 +467,22 @@ class Database:
             return 0
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.executemany("""
-                INSERT OR REPLACE INTO stock_daily
-                (stock_code, trade_date, open, high, low, close, volume, amount)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, [(stock_code, *row) for row in rows])
+            if self._use_pg:
+                sql = """
+                    INSERT INTO stock_daily
+                    (stock_code, trade_date, open, high, low, close, volume, amount)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (stock_code, trade_date) DO UPDATE SET
+                        open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
+                        close=EXCLUDED.close, volume=EXCLUDED.volume, amount=EXCLUDED.amount
+                """
+            else:
+                sql = """
+                    INSERT OR REPLACE INTO stock_daily
+                    (stock_code, trade_date, open, high, low, close, volume, amount)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            cursor.executemany(sql, [(stock_code, *row) for row in rows])
             return len(rows)
 
     def load_daily_data(self, stock_code: str, start_date: str, end_date: str):
@@ -375,14 +528,7 @@ class Database:
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.executemany("""
-                INSERT OR REPLACE INTO stock_list
-                (ts_code, name, industry, market, list_date, updated_at)
-                VALUES (
-                    :ts_code, :name, :industry,
-                    :market, :list_date, CURRENT_TIMESTAMP
-                )
-            """, [
+            stock_params = [
                 {
                     "ts_code": s.get("ts_code"),
                     "name": s.get("name"),
@@ -391,7 +537,30 @@ class Database:
                     "list_date": s.get("list_date"),
                 }
                 for s in stocks
-            ])
+            ]
+            if self._use_pg:
+                sql = """
+                    INSERT INTO stock_list
+                    (ts_code, name, industry, market, list_date, updated_at)
+                    VALUES (
+                        %(ts_code)s, %(name)s, %(industry)s,
+                        %(market)s, %(list_date)s, CURRENT_TIMESTAMP
+                    )
+                    ON CONFLICT (ts_code) DO UPDATE SET
+                        name=EXCLUDED.name, industry=EXCLUDED.industry,
+                        market=EXCLUDED.market, list_date=EXCLUDED.list_date,
+                        updated_at=CURRENT_TIMESTAMP
+                """
+            else:
+                sql = """
+                    INSERT OR REPLACE INTO stock_list
+                    (ts_code, name, industry, market, list_date, updated_at)
+                    VALUES (
+                        :ts_code, :name, :industry,
+                        :market, :list_date, CURRENT_TIMESTAMP
+                    )
+                """
+            cursor.executemany(sql, stock_params)
 
     def get_stock_list(self) -> List[Dict[str, Any]]:
         """获取所有股票列表
@@ -526,27 +695,40 @@ class Database:
 
                 title_hash = self._compute_title_hash(title)
 
-                try:
+                params = (
+                    title_hash,
+                    title,
+                    news.get("source", ""),
+                    news.get("sentiment_score", 50.0),
+                    news.get("keywords", ""),
+                    news.get("url", ""),
+                    news.get("publish_time", ""),
+                    news.get("content", ""),
+                    fetch_date
+                )
+                if self._use_pg:
                     cursor.execute("""
                         INSERT INTO news_archive
                         (title_hash, title, source, sentiment_score, keywords,
                          url, publish_time, content, fetch_date)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        title_hash,
-                        title,
-                        news.get("source", ""),
-                        news.get("sentiment_score", 50.0),
-                        news.get("keywords", ""),
-                        news.get("url", ""),
-                        news.get("publish_time", ""),
-                        news.get("content", ""),
-                        fetch_date
-                    ))
-                    inserted += 1
-                except sqlite3.IntegrityError:
-                    # 标题哈希重复，跳过
-                    skipped += 1
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (title_hash) DO NOTHING
+                    """, params)
+                    if cursor.rowcount > 0:
+                        inserted += 1
+                    else:
+                        skipped += 1
+                else:
+                    try:
+                        cursor.execute("""
+                            INSERT INTO news_archive
+                            (title_hash, title, source, sentiment_score, keywords,
+                             url, publish_time, content, fetch_date)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, params)
+                        inserted += 1
+                    except sqlite3.IntegrityError:
+                        skipped += 1
 
         return {"inserted": inserted, "skipped": skipped}
 
@@ -723,14 +905,33 @@ class Database:
                         import json
                         reasons = json.dumps(reasons, ensure_ascii=False)
 
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO trading_signals
-                        (stock_code, trade_date, final_score, signal_level,
-                         signal_level_name, swing_score, trend_score,
-                         ml_score, sentiment_score, market_regime,
-                         swing_weight, trend_weight, reasons)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
+                    if self._use_pg:
+                        sql = """
+                            INSERT INTO trading_signals
+                            (stock_code, trade_date, final_score, signal_level,
+                             signal_level_name, swing_score, trend_score,
+                             ml_score, sentiment_score, market_regime,
+                             swing_weight, trend_weight, reasons)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (stock_code, trade_date) DO UPDATE SET
+                                final_score=EXCLUDED.final_score, signal_level=EXCLUDED.signal_level,
+                                signal_level_name=EXCLUDED.signal_level_name,
+                                swing_score=EXCLUDED.swing_score, trend_score=EXCLUDED.trend_score,
+                                ml_score=EXCLUDED.ml_score, sentiment_score=EXCLUDED.sentiment_score,
+                                market_regime=EXCLUDED.market_regime,
+                                swing_weight=EXCLUDED.swing_weight, trend_weight=EXCLUDED.trend_weight,
+                                reasons=EXCLUDED.reasons
+                        """
+                    else:
+                        sql = """
+                            INSERT OR REPLACE INTO trading_signals
+                            (stock_code, trade_date, final_score, signal_level,
+                             signal_level_name, swing_score, trend_score,
+                             ml_score, sentiment_score, market_regime,
+                             swing_weight, trend_weight, reasons)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """
+                    cursor.execute(sql, (
                         sig["stock_code"],
                         trade_date,
                         sig["final_score"],
@@ -941,13 +1142,31 @@ class Database:
                     if isinstance(reasons, list):
                         reasons = json.dumps(reasons, ensure_ascii=False)
 
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO action_signals
-                        (stock_code, trade_date, action, strategy_name,
-                         confidence_score, sell_reason, trigger_rules,
-                         stop_loss_pct, take_profit_pct, max_hold_days, reasons)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
+                    if self._use_pg:
+                        sql = """
+                            INSERT INTO action_signals
+                            (stock_code, trade_date, action, strategy_name,
+                             confidence_score, sell_reason, trigger_rules,
+                             stop_loss_pct, take_profit_pct, max_hold_days, reasons)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (stock_code, trade_date, action, strategy_name) DO UPDATE SET
+                                confidence_score=EXCLUDED.confidence_score,
+                                sell_reason=EXCLUDED.sell_reason,
+                                trigger_rules=EXCLUDED.trigger_rules,
+                                stop_loss_pct=EXCLUDED.stop_loss_pct,
+                                take_profit_pct=EXCLUDED.take_profit_pct,
+                                max_hold_days=EXCLUDED.max_hold_days,
+                                reasons=EXCLUDED.reasons
+                        """
+                    else:
+                        sql = """
+                            INSERT OR REPLACE INTO action_signals
+                            (stock_code, trade_date, action, strategy_name,
+                             confidence_score, sell_reason, trigger_rules,
+                             stop_loss_pct, take_profit_pct, max_hold_days, reasons)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """
+                    cursor.execute(sql, (
                         sig["stock_code"],
                         trade_date,
                         sig["action"],

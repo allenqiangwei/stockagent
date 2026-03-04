@@ -41,12 +41,20 @@ class CombinedSignal:
     strategy_scores: dict = field(default_factory=dict)
 
 
+def _get_db_url() -> str:
+    """Get database URL from config (PostgreSQL or SQLite fallback)."""
+    try:
+        from api.config import get_settings
+        return get_settings().database.url
+    except Exception:
+        return str(Path(__file__).parent.parent.parent / "data" / "stockagent.db")
+
+
 def _load_strategies() -> List[Dict[str, Any]]:
     """从数据库加载所有启用的策略"""
     try:
         from src.data_storage.database import Database
-        db_path = Path(__file__).parent.parent.parent / "data" / "stockagent.db"
-        db = Database(str(db_path))
+        db = Database(_get_db_url())
         db.init_tables()
         db.seed_default_indicators_and_strategies()
         strategies = db.get_all_strategies()

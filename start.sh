@@ -3,11 +3,10 @@
 # A股量化交易系统 - 一键启动脚本
 #
 # 使用方法:
-#   ./start.sh              # 启动仪表盘
-#   ./start.sh update       # 更新数据后启动仪表盘
-#   ./start.sh dashboard    # 仅启动仪表盘
-#   ./start.sh data         # 仅更新数据
-#   ./start.sh test         # 运行测试
+#   ./start.sh install     # 安装所有依赖
+#   ./start.sh data        # 仅更新数据
+#   ./start.sh test        # 运行测试
+#   ./start.sh help        # 显示帮助信息
 #
 
 set -e
@@ -53,7 +52,6 @@ show_banner() {
     echo "║   Phase 1: 数据层      ✅ 43 tests                        ║"
     echo "║   Phase 2: 策略层      ✅ 160 tests                       ║"
     echo "║   Phase 3: 风控层      ✅ 62 tests                        ║"
-    echo "║   Phase 4: 仪表盘      ✅ 40 tests                        ║"
     echo "║                                                            ║"
     echo "╚════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -119,9 +117,8 @@ check_dependencies() {
     # 检查关键包
     MISSING=""
     python -c "import pandas" 2>/dev/null || MISSING="$MISSING pandas"
-    python -c "import streamlit" 2>/dev/null || MISSING="$MISSING streamlit"
     python -c "import plotly" 2>/dev/null || MISSING="$MISSING plotly"
-    python -c "import xgboost" 2>/dev/null || MISSING="$MISSING xgboost"
+    python -c "import pytdx" 2>/dev/null || MISSING="$MISSING pytdx"
 
     if [ -n "$MISSING" ]; then
         print_warning "缺少依赖:$MISSING"
@@ -167,11 +164,6 @@ signals:
   swing_weight: 0.35          # 波段策略权重
   trend_weight: 0.35          # 趋势策略权重
   ml_weight: 0.30             # ML策略权重
-
-# 仪表盘配置
-dashboard:
-  host: "0.0.0.0"
-  port: 8501
 EOF
         print_warning "请编辑 config/config.yaml 填入您的 TuShare Token"
     fi
@@ -211,88 +203,6 @@ except Exception as e:
 "
 }
 
-# 启动新闻后台服务
-start_news_service() {
-    print_info "启动新闻后台服务..."
-
-    # 设置环境变量
-    if [ -d "/opt/homebrew/opt/libomp/lib" ]; then
-        export DYLD_LIBRARY_PATH="/opt/homebrew/opt/libomp/lib:$DYLD_LIBRARY_PATH"
-    fi
-    export NO_PROXY='*'
-
-    # 后台启动新闻服务
-    python -c "
-from src.services.news_service import start_news_service
-import time
-import signal
-import sys
-
-service = start_news_service()
-print('新闻服务已启动')
-
-def handler(sig, frame):
-    service.stop()
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, handler)
-signal.signal(signal.SIGINT, handler)
-
-while True:
-    time.sleep(1)
-" &
-    NEWS_SERVICE_PID=$!
-    echo $NEWS_SERVICE_PID > "$PROJECT_DIR/.news_service.pid"
-    print_success "新闻后台服务已启动 (PID: $NEWS_SERVICE_PID)"
-}
-
-# 停止新闻后台服务
-stop_news_service() {
-    if [ -f "$PROJECT_DIR/.news_service.pid" ]; then
-        PID=$(cat "$PROJECT_DIR/.news_service.pid")
-        if kill -0 $PID 2>/dev/null; then
-            print_info "停止新闻后台服务 (PID: $PID)..."
-            kill $PID 2>/dev/null
-            rm -f "$PROJECT_DIR/.news_service.pid"
-            print_success "新闻后台服务已停止"
-        else
-            rm -f "$PROJECT_DIR/.news_service.pid"
-        fi
-    fi
-}
-
-# 启动仪表盘
-start_dashboard() {
-    print_info "启动仪表盘..."
-    echo ""
-    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}  仪表盘启动中...${NC}"
-    echo -e "${GREEN}  访问地址: http://localhost:8501${NC}"
-    echo -e "${GREEN}  默认账号: admin / admin123${NC}"
-    echo -e "${GREEN}  观察账号: viewer / viewer123${NC}"
-    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
-    echo ""
-
-    # 设置 XGBoost 所需的 OpenMP 库路径 (macOS)
-    if [ -d "/opt/homebrew/opt/libomp/lib" ]; then
-        export DYLD_LIBRARY_PATH="/opt/homebrew/opt/libomp/lib:$DYLD_LIBRARY_PATH"
-    fi
-
-    # 禁用代理，直连国内数据源
-    export NO_PROXY='*'
-
-    # 先启动新闻后台服务
-    start_news_service
-
-    # 确保退出时停止新闻服务
-    trap stop_news_service EXIT
-
-    streamlit run src/dashboard/app.py \
-        --server.address=0.0.0.0 \
-        --server.port=8501 \
-        --browser.gatherUsageStats=false
-}
-
 # 运行测试
 run_tests() {
     print_info "运行测试..."
@@ -307,18 +217,14 @@ show_help() {
     echo "使用方法: ./start.sh [命令]"
     echo ""
     echo "命令:"
-    echo "  (无参数)    启动仪表盘"
     echo "  install     安装所有依赖"
-    echo "  update      更新数据后启动仪表盘"
-    echo "  dashboard   仅启动仪表盘"
-    echo "  data        仅更新数据"
+    echo "  data        更新数据"
     echo "  test        运行测试"
     echo "  help        显示此帮助信息"
     echo ""
     echo "示例:"
     echo "  ./start.sh install      # 首次使用，安装依赖"
-    echo "  ./start.sh              # 启动仪表盘"
-    echo "  ./start.sh update       # 更新数据并启动"
+    echo "  ./start.sh data         # 更新市场数据"
     echo "  ./start.sh test         # 运行所有测试"
 }
 
@@ -326,31 +232,14 @@ show_help() {
 main() {
     show_banner
 
-    case "${1:-dashboard}" in
+    case "${1:-help}" in
         install)
             check_python
             setup_venv
             install_dependencies
             check_config
             create_directories
-            print_success "安装完成！运行 ./start.sh 启动系统"
-            ;;
-        update)
-            check_python
-            setup_venv
-            check_dependencies
-            check_config
-            create_directories
-            update_data
-            start_dashboard
-            ;;
-        dashboard)
-            check_python
-            setup_venv
-            check_dependencies
-            check_config
-            create_directories
-            start_dashboard
+            print_success "安装完成！"
             ;;
         data)
             check_python

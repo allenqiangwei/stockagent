@@ -53,7 +53,6 @@ function getSessionStore(): Map<string, SessionState> {
 const CLAUDE_BIN = "/opt/homebrew/bin/claude";
 const CHAT_MODEL = "sonnet";
 const MODEL = "opus";
-const MAX_TURNS = "30";
 const JOB_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const ANALYSIS_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes (Opus is slower but more thorough)
 const REVIEW_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for review jobs
@@ -112,7 +111,8 @@ Available API endpoints:
 - GET /api/strategies — active strategies
 - GET /api/market/kline?code=&period=daily&start_date=&end_date= — K-line data
 - GET /api/market/quote?code= — real-time quote
-- GET /api/news/sentiment/latest — news sentiment
+- GET /api/news/archive?start_date=&end_date=&keyword=&limit= — raw news from database (you decide date range)
+- GET /api/news/sentiment/latest — DeepSeek sentiment analysis summary
 - GET /api/news-signals/today — today's news-driven signals
 - GET /api/news-signals/sectors — sector heat rankings
 - GET /api/news-signals/events — major market events
@@ -222,7 +222,6 @@ export function startClaudeJob(
     "-p", prompt,
     "--output-format", "stream-json",
     "--verbose",
-    "--max-turns", MAX_TURNS,
     "--model", CHAT_MODEL,
     "--append-system-prompt", SYSTEM_PROMPT,
     "--permission-mode", "bypassPermissions",
@@ -415,26 +414,30 @@ STEP 2: 获取行情数据 — Fetch market data
 STEP 3: 获取新闻与情绪 — Fetch news and sentiment
   You must decide the appropriate scope of news analysis based on market conditions.
 
-  3a) First, get the baseline data:
-    - GET /api/news/sentiment/latest — latest sentiment analysis (check news_count and analysis_time)
-    - GET /api/news/latest — cached news list (check total_count and fetch_time to see how fresh)
+  3a) Fetch raw news from the DATABASE — YOU decide the date range:
+    - GET /api/news/archive?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&limit=N
+      - Normal trading days: last 1-2 days (start_date=yesterday, end_date=today)
+      - After weekends/holidays: cover the full gap (e.g. start_date=Friday, end_date=Monday)
+      - Major events or high volatility: extend to 3-7 days for deeper context
+      - Use keyword=X to search for specific topics if needed
+      - Response includes total_count (all matching news) and returned (actual rows returned)
+      - Default limit=500, max 2000. ALWAYS set limit high enough to cover total_count.
+        If total_count > returned, increase limit and re-fetch to get ALL news.
+    This is the PRIMARY news source — read the actual headlines and content.
 
-  3b) Then decide your analysis scope. Consider:
-    - If it's a normal trading day: the default latest sentiment + today's signals may suffice
-    - If it's after a long holiday (e.g. Spring Festival): you need broader coverage — call
-      GET /api/news/sentiment/history?days=N to see sentiment trend over the break
-    - If market is at a turning point or high volatility: consider more events for context
-    - If the latest sentiment analysis is stale (>12 hours old): note this limitation
+  3b) Get sentiment analysis summary:
+    - GET /api/news/sentiment/latest — latest DeepSeek sentiment analysis (check news_count and analysis_time)
+    - GET /api/news/sentiment/history?days=N — sentiment trend over N days (use for multi-day context)
 
-  3c) Fetch signal data based on your decision:
+  3c) Fetch news-driven signals:
     - GET /api/news-signals/today — today's news-driven stock signals (count field shows total)
     - GET /api/news-signals/sectors — sector heat rankings (count field shows total)
     - GET /api/news-signals/events?limit=N — major events (default 50, increase to 100-200 if after holiday or high volatility)
 
   3d) Record and explain your decision:
-    - How many news articles were analyzed in total (from news_count/count fields across all APIs)
-    - What time range does this cover
-    - WHY you chose this scope (e.g. "长假后需要更广覆盖" or "常规交易日，最新情绪分析已足够")
+    - How many news articles you read from /api/news/archive (the raw news count)
+    - What date range you chose and WHY (e.g. "周末后覆盖周五至今天" or "常规日取最近1天")
+    - Key themes and their potential market impact (summarize the raw news)
     This explanation will go into the thinking_process.
 
 STEP 4: 检索记忆库 — Read memory base (single comprehensive pass)
@@ -481,7 +484,19 @@ STEP 8: 综合分析 — Comprehensive analysis (includes sector rotation & cros
      - Check if any stock patterns match known failure modes
      - Look for confirmation or contradiction with past decisions
   d) Portfolio diagnosis: For each portfolio stock, assess current technical + fundamental position
-  e) Buy recommendations: ONLY output stocks you genuinely recommend buying. For each buy candidate, determine:
+  e) BETA FACTOR — Non-technical analysis:
+     After identifying buy candidates from signals, query their Beta scorecard:
+       GET /api/beta/scorecard?stock_codes=CODE1,CODE2
+     The scorecard provides: industry historical win rate, regime match, valuation risk, sentiment reliability.
+     Each stock gets a beta_score (0-100). Use it alongside alpha_score:
+     - alpha高+beta高: strongly recommend
+     - alpha高+beta低: recommend with caution, explain risk_flags
+     - alpha低+beta高: worth watching
+     - alpha低+beta低: skip
+     Also check historical beta insights:
+       GET /api/beta/insights/active
+     Include beta_score in your recommendation output.
+  f) Buy recommendations: ONLY output stocks you genuinely recommend buying. For each buy candidate, determine:
      - target_price: a preset limit-buy price for next trading day (based on support levels, recent lows, or pullback targets — NOT simply today's close)
      - position_pct: recommended position size as % of total portfolio (consider concentration risk, conviction level, and market regime)
      - stop_loss: a stop-loss price level (based on key support breakdown)
@@ -489,13 +504,13 @@ STEP 8: 综合分析 — Comprehensive analysis (includes sector rotation & cros
      to calculate support/resistance levels. Even during holidays, you have the last trading day's kline data —
      use it to set prices. A recommendation without concrete prices is useless.
      Explain price/position reasoning in thinking_process.
-  f) Sell/hold/reduce recommendations: ONLY for portfolio stocks. For each sell/reduce candidate, determine:
+  g) Sell/hold/reduce recommendations: ONLY for portfolio stocks. For each sell/reduce candidate, determine:
      - target_price: a preset limit-sell price for next trading day (based on resistance levels, recent highs, or rebound targets)
      - sell_pct: what % of the holding to sell (e.g. 50% = reduce half, 100% = full exit)
      - stop_loss: a trailing stop or floor price to protect remaining position
      Do NOT include sell signals for stocks the user does not hold.
-  g) Strategy actions: which strategies to activate/deactivate and why
-  h) Risk warnings: any concerning patterns from sentiment, technicals, or memory
+  h) Strategy actions: which strategies to activate/deactivate and why
+  i) Risk warnings: any concerning patterns from sentiment, technicals, or memory
 
 STEP 9: 输出JSON — Output structured report (investment advisor narrative style)
   Output ONLY a JSON object (no markdown fences, no extra text) with these fields:
@@ -510,6 +525,7 @@ STEP 9: 输出JSON — Output structured report (investment advisor narrative st
         "action": "buy|sell|hold|reduce",
         "reason": "...",
         "alpha_score": float,
+        "beta_score": float,         // from /api/beta/scorecard (0-100, 50=neutral if unavailable)
         "target_price": float,       // preset limit price for next trading day (buy=limit buy price, sell/reduce=limit sell price)
         "position_pct": float,       // for buy: recommended position % of total portfolio (e.g. 10.0 = 10%)
                                      // for sell/reduce: % of holding to sell (e.g. 50.0 = sell half, 100.0 = full exit)
@@ -589,7 +605,8 @@ Available API reference (complete list):
   GET  /api/signals/history?page=1&size=50&action=buy|sell&date=&strategy=
   POST /api/signals/generate?date=YYYY-MM-DD&strategy_ids=1,3,5
   GET  /api/stocks/portfolio
-  GET  /api/news/sentiment/latest  (latest analysis with news_count)
+  GET  /api/news/archive?start_date=&end_date=&keyword=&limit=  (raw news from DB, returns total_count + returned, default limit=500 max 2000)
+  GET  /api/news/sentiment/latest  (DeepSeek sentiment analysis summary)
   GET  /api/news/sentiment/history?days=N  (sentiment trend over N days, default 30)
   GET  /api/news/latest  (cached news list with total_count, fetch_time)
   GET  /api/news-signals/today?date=  (news-driven signals, with count)
@@ -597,6 +614,8 @@ Available API reference (complete list):
   GET  /api/news-signals/events?limit=N  (major events, default 50, max 200)
   GET  /api/news-signals/events
   GET  /api/bot/portfolio  (robot simulated portfolio — same format as /api/stocks/portfolio)
+  GET  /api/beta/scorecard?stock_codes=CODE1,CODE2  (Beta因子记分卡: 候选股的非技术面评分)
+  GET  /api/beta/insights/active  (历史Beta因子知识: 哪些非技术因子在过去准确/误导)
 
 Answer in Chinese. Be thorough and data-driven.`;
 
@@ -632,7 +651,6 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
     "-p", prompt,
     "--output-format", "stream-json",
     "--verbose",
-    "--max-turns", MAX_TURNS,
     "--model", MODEL,
     "--append-system-prompt", ANALYSIS_SYSTEM_PROMPT,
     "--permission-mode", "bypassPermissions",
@@ -874,7 +892,6 @@ ${tradesJson}
     "-p", userPrompt,
     "--output-format", "text",
     "--model", MODEL,
-    "--max-turns", "10",
     "--system-prompt", REVIEW_SYSTEM_PROMPT,
   ];
 

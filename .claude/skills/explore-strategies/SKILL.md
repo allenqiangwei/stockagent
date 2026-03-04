@@ -1,6 +1,6 @@
 ---
 name: explore-strategies
-description: Iterative strategy discovery — analyze experiments, plan new ones, auto-promote winners, then resolve ALL identified problems and implement follow-up actions. Use /explore-strategies for semi-auto, /explore-strategies auto for full-auto (default 50), /explore-strategies auto N for N experiments.
+description: Iterative strategy discovery — analyze experiments, plan new ones, auto-promote winners, then resolve ALL identified problems and implement follow-up actions. Use /explore-strategies for semi-auto, /explore-strategies auto for full-auto (default 50), /explore-strategies auto N for N experiments, /explore-strategies time Xh for time-limited continuous exploration (300 strategies per batch).
 ---
 
 # Strategy Explorer
@@ -12,8 +12,21 @@ You are a quantitative strategy researcher for the Chinese A-share market. Your 
 - **Default** (no args): Semi-auto — present plan, wait for user approval, then execute
 - **`auto`** argument: Full-auto with default 50 experiments per round
 - **`auto N`** argument: Full-auto with N experiments per round (e.g. `auto 30` = 30 experiments)
+- **`time Xh`** or **`time Xm`** argument: Time-limited continuous exploration — runs in batches of ~300 strategies per round until the specified duration expires. Examples: `time 2h` = 2 hours, `time 90m` = 90 minutes, `time 0.5h` = 30 minutes.
 
 The number N controls the total experiment count for the round. Direction allocation is decided dynamically by the AI based on memory analysis (Step 3).
+
+### Time Mode Details
+
+In `time` mode, the skill operates like `auto` mode but with these differences:
+1. **Batch size**: Each round targets ~300 strategies (not N experiments). Since each experiment typically generates ~4-6 strategies, this means ~50-75 experiments per round. The AI dynamically adjusts experiment count to hit the ~300 strategy target.
+2. **No user prompts**: Rounds transition automatically without asking the user. No `AskUserQuestion` between rounds.
+3. **Time-based exit**: The skill records the start time and checks remaining time before each new round. If remaining time < 30 minutes (estimated minimum for a useful round), it stops and proceeds to Step 10.
+4. **Background auto-finish**: If a round's backtests are still running when time is about to expire, the skill creates a background `auto_finish` script for the remaining backtests and exits gracefully.
+5. **Clock display**: At the start of each round, display elapsed time and remaining time:
+   ```
+   ⏱️ 已用时: 1h 23m / 总计: 3h | 剩余: 1h 37m
+   ```
 
 ## Step 1: Load Memory & Verify Promote/Enable State
 
@@ -61,12 +74,13 @@ for exp_summary in all_exps:
         ret = s.get('total_return_pct',0) or 0
         dd = abs(s.get('max_drawdown_pct',100) or 100)
         trades = s.get('total_trades',0) or 0
-        if score >= 0.70 and ret > 20 and dd < 25 and trades >= 50:
+        wr = s.get('win_rate',0) or 0
+        if score >= 0.75 and ret > 60 and dd < 18 and trades >= 50 and wr > 60:
             result = promote(s['id'], '[AI]')
             msg = result.get('message','')
             if msg != 'Already promoted':
                 missing += 1
-                print(f'  PROMOTED: S{s[\"id\"]} {s.get(\"name\",\"?\")[:50]} (score={score:.3f}, ret={ret:.1f}%) -> {msg}')
+                print(f'  PROMOTED: S{s[\"id\"]} {s.get(\"name\",\"?\")[:50]} (score={score:.3f}, ret={ret:.1f}%, wr={wr:.1f}%) -> {msg}')
             promoted += 1
 
 print(f'Promote检查完成: {promoted}个StdA策略, 其中{missing}个补漏promote')
@@ -199,6 +213,8 @@ Check if there are recent experiments whose results haven't been analyzed yet. I
 
 Based on the accumulated insights from **核心洞察**, **探索状态**, **最佳策略** and the **下一步建议** from previous sessions, generate a batch of **N experiment plans** (N = user-specified count, default 50).
 
+**In `time` mode**: Target ~300 strategies per round. Since each experiment produces ~4-6 strategies, plan ~50-75 experiments per round. The exact count should be dynamically adjusted based on the experiment types being used (grid search produces more strategies per experiment than DeepSeek).
+
 ### 3a: Decision Framework — Dynamic Allocation
 
 Synthesize all available evidence to decide the next exploration directions **and how many experiments to allocate to each**. There is NO fixed ratio — the AI decides allocation based on what memory says is most promising.
@@ -208,14 +224,15 @@ Synthesize all available evidence to decide the next exploration directions **an
 3. **Check 下一步建议**: Previous sessions' recommendations are high-priority inputs — convert each actionable suggestion into 1-3 experiment plans.
 4. **Identify gaps**: Are there promising indicator combinations not yet tested? Are there parameter ranges for top strategies not yet grid-searched?
 5. **Assess method effectiveness**: Check historical success rates of each experiment type (DeepSeek generation, grid search, variant testing, etc.) and allocate proportionally. For example, if DeepSeek has >50% invalid rate, allocate few or zero to it; if grid search has >90% success rate, allocate heavily.
-6. **Decide allocation**: Present a brief allocation rationale before listing experiments:
+6. **🆕 NEW INDICATOR EXPLORATION (MANDATORY)**: Every round MUST allocate **at least 5 experiments** (or 5% of N, whichever is larger) to testing a new or under-explored indicator. See the **Indicator Exploration Tracker** below.
+7. **Decide allocation**: Present a brief allocation rationale before listing experiments:
 
 ```
 本轮分配 (共N个实验):
 - Grid search (clone-backtest): X个 — 理由: [why]
 - Variant testing: Y个 — 理由: [why]
-- DeepSeek exploration: Z个 — 理由: [why]
-- New direction: W个 — 理由: [why]
+- 🆕 New indicator exploration: Z个 — 目标指标: [indicator name] — 理由: [why this indicator]
+- Other new direction: W个 — 理由: [why]
 (X + Y + Z + W = N)
 ```
 
@@ -226,11 +243,89 @@ Available experiment categories (use any subset, allocate any amount including 0
 | **Grid search (clone-backtest)** | Parameter optimization of proven strategies (SL/TP/hold days) |
 | **Variant testing** | Modify top strategies with small changes (add/remove 1 condition, adjust thresholds) |
 | **DeepSeek exploration** | New indicator/strategy ideas via DeepSeek generation |
+| **🆕 New indicator exploration** | **MANDATORY every round.** Test indicators from the tracker below that are 未探索 or 浅探索 |
 | **New direction** | Untested hypotheses or newly enabled features (e.g. new condition types) |
+
+### 3a-extra: Indicator Exploration Tracker
+
+**Every round MUST pick at least one indicator from the 未探索/浅探索 list below and run 5+ experiments with it.** The goal is to systematically test every available indicator over time, preventing stagnation in the same proven families.
+
+**How to use this tracker:**
+1. Read the tracker below to find indicators with status 未探索 or 浅探索
+2. Pick the highest-priority one (prefer 未探索 > 浅探索, prefer higher priority indicators)
+3. Design 5+ experiments: combine it with KDJ (proven base), try solo, try with PSAR/MACD
+4. After running experiments, update the tracker status in `docs/lab-experiment-analysis.md`
+5. If ALL indicators are 已探索/已弃, try **new combinations** of explored indicators that haven't been paired before
+
+**Experiment design for new indicators:**
+- Pair with KDJ (the strongest base indicator) as primary approach
+- Try 2-3 standalone strategies (conservative/moderate/aggressive thresholds)
+- Try 1-2 combos with PSAR or MACD (proven secondary indicators)
+- Use clone-backtest where possible: if a working strategy exists with similar logic, clone and add the new indicator as a filter condition
+- If clone-backtest isn't possible, use DeepSeek with explicit few-shot examples showing the correct indicator column names
+
+#### Available Indicators & Exploration Status
+
+**Built-in indicators (8):**
+
+| Indicator | Status | Notes |
+|-----------|--------|-------|
+| KDJ | ✅ 深度探索 | 最有效单指标, 所有组合的核心 |
+| MACD | ✅ 深度探索 | KDJ+MACD最佳双指标组合 |
+| RSI | ✅ 已探索 | 极端超卖(<25)有效但信号少, RSI+KDJ组合有效 |
+| ADX | ✅ 已探索 | 趋势过滤无法对抗震荡市, PSAR+ADX+CCI有效 |
+| MA | ✅ 已弃 | 纯均线策略在A股无效 |
+| EMA | ✅ 已弃 | EMA+ATR灾难性(-50%~-98%) |
+| OBV | ⚠️ 避免 | 规则引擎建议避免 |
+| ATR | ✅ 已探索 | EMA+ATR失败, 但ATR作为波动过滤可能有用 |
+
+**Extended indicators (33) — exploration priority:**
+
+| Priority | Indicator | Status | Columns | Notes |
+|----------|-----------|--------|---------|-------|
+| 🔴高 | **KAMA** | ✅ 深度探索 | KAMA_{length} | R31-R32探索, KAMA突破88个T+1存活, KAMA终极震荡全军覆没(0/65, 前视偏差), 保守版F/G各14个存活 |
+| 🔴高 | **NVI** | ✅ 浅探索 | NVI | R32探索, 仅1/11达StdA+(score 0.760, T+1存活), 机构追踪理论合理但效果有限 |
+| 🔴高 | **VPT** | ✅ 已弃 | VPT | R32探索, 0/21 StdA+, OBV改进版在A股同样失效 |
+| 🟡中 | BOLL | ✅ 深度探索 | BOLL_upper/middle/lower/pctb | BOLL+KDJ有效, BOLL%B+StochRSI达StdA |
+| 🟡中 | PSAR | ✅ 深度探索 | PSAR_{af}_{max_af} | 最强趋势指标, T+1 top=0.816, 91.3%存活(313/343) |
+| 🟡中 | ULTOSC | ✅ 深度探索 | ULTOSC_{s}_{m}_{l} | T+1仅14.9%存活(26/175), 低TP策略受T+1冲击大 |
+| 🟡中 | ULCER | ✅ 已探索 | ULCER_{length} | ULCER<5+KDJ有效, PSAR+ULCER+KDJ三重过滤71%盈利 |
+| 🟡中 | CCI | ✅ 已探索 | CCI_{length} | PSAR+ADX+CCI有效但TP1-2死 |
+| 🟡中 | STOCH | ✅ 已探索 | STOCH_K/D_{k}_{d}_{smooth} | 类似KDJ, 50%盈利率, 同类叠加失败 |
+| 🟡中 | STOCHRSI | ✅ 已探索 | STOCHRSI_k/d_{length}_{rsi}_{k}_{d} | BOLL%B+StochRSI达StdA |
+| 🟡中 | STC | ✅ 已弃 | STC_{length}_{fast}_{slow} | R154: STC+KDJ 4/4inv, best wr=46%, 0 StdA+. 确认无效 |
+| 🟡中 | MFI | ✅ 已弃 | MFI_{length} | R154: MFI+KDJ wr=41%, MFI+PSAR wr=36%, 0 StdA+. 确认无效 |
+| 🟡中 | WR | ✅ 已弃 | WR_{length} | R154: WR+PSAR wr=38%, WR+KDJ 6/8inv, 0 StdA+. 确认无效 |
+| 🟡中 | ROC | ✅ 已弃 | ROC_{length} | R154: ROC+KDJ wr=44%, ROC+PSAR wr=45%, 0 StdA+. 确认无效 |
+| 🟡中 | KELTNER | ✅ 已探索 | KELTNER_upper/middle/lower_{length}_{atr} | Keltner+ULCER有效(37.5%) |
+| 🟢低 | DONCHIAN | ✅ 已弃 | DONCHIAN_upper/lower/mid_{length} | 海龟交易法全亏 |
+| 🟢低 | AROON | ✅ 已弃 | AROON_up/down/osc_{length} | 信号爆炸+0盈利 |
+| 🟢低 | ICHIMOKU | ✅ 已弃 | ICHIMOKU_a/b/base/conv/... | 信号爆炸风险高 |
+| 🟢低 | KST | ✅ 已弃 | KST/KST_signal | 全invalid, A股无效 |
+| 🟢低 | MASS | ✅ 已弃 | MASS_{fast}_{slow} | 0盈利 |
+| 🟢低 | TSI | ✅ 已弃 | TSI_{slow}_{fast} | 信号爆炸(>0.02几乎always true) |
+| 🟢低 | VORTEX | ✅ 已弃 | VORTEX_pos/neg_{length} | DeepSeek无法生成 |
+| 🟢低 | WMA | ✅ 已弃 | WMA_{length} | 全invalid |
+| 🟢低 | TRIX | ✅ 已弃 | TRIX_{length} | 6.2%盈利率, 很低 |
+| 🟢低 | DPO | ✅ 已弃 | DPO_{length} | 0%盈利 |
+| 🟢低 | PPO | ✅ 已弃 | PPO_{fast}_{slow}_{signal}/PPO_hist/PPO_signal | 全亏 |
+| 🟢低 | PVO | ✅ 已弃 | PVO_{fast}_{slow}_{signal}/PVO_hist | 全亏 |
+| 🟢低 | AO | ✅ 已弃 | AO_{fast}_{slow} | 0盈利 |
+| 🟢低 | FI | ✅ 已弃 | FI_{length} | 全亏 |
+| 🟢低 | EMV | ✅ 已弃 | EMV_{length}/EMV_ma_{length} | 全亏 |
+| 🟢低 | ADI | ✅ 已弃 | ADI | PVO+ADI全亏 |
+| 🟢低 | CMF | ✅ 已弃 | CMF_{length} | A股几乎永远为负 |
+| 🟢低 | VWAP | ⚠️ 受限 | VWAP | 需field比较, DeepSeek不支持 |
+
+**When all 未探索 indicators are exhausted:**
+- Revisit 浅探索 indicators (STC, MFI, WR, ROC) with new combinations
+- Try **cross-family pairings** not yet tested (e.g., ULTOSC+PSAR, KELTNER+MACD)
+- Try **new parameter configurations** for explored indicators (non-default periods)
+- Try **re-testing 已弃 indicators** with clone-backtest approach (bypasses DeepSeek failures that may have caused original failures)
 
 ### 3b: Plan Generation Rules
 
-**Generate exactly N plans per round** (N from `auto N` argument, default 50). If you cannot generate N, explain why (e.g. all directions exhausted) and generate as many as feasible.
+**Generate exactly N plans per round** (N from `auto N` argument, default 50; in `time` mode, target ~50-75 experiments to produce ~300 strategies). If you cannot generate N, explain why (e.g. all directions exhausted) and generate as many as feasible.
 
 For **DeepSeek experiments**, prepare:
 - `theme`: Descriptive Chinese name (e.g. "KDJ+RSI双确认趋势策略")
@@ -281,12 +376,12 @@ Show the full plan in a table:
 确认执行？你可以调整主题、增减数量、或跳过某个。
 ```
 
-In **auto mode**, skip this step and proceed directly.
+In **auto mode** or **time mode**, skip this step and proceed directly.
 
 ## Step 5: Execute Experiments
 
 **IMPORTANT: Serial Execution Constraint**
-The backend enforces **single-backtest execution** (Semaphore=1). Only one strategy can be backtesting at a time. This protects SQLite from concurrent read/write thrashing and keeps CPU load manageable. When multiple experiments are submitted, strategies will queue and execute one by one. Expect ~3-5 min per strategy backtest, so 10 experiments × 4 strategies = ~40 strategies × 4 min ≈ 2.5 hours total.
+The backend enforces **single-backtest execution** (Semaphore=1). Only one strategy can be backtesting at a time. This protects the database from concurrent write conflicts and keeps CPU load manageable. When multiple experiments are submitted, strategies will queue and execute one by one. Expect ~3-5 min per strategy backtest, so 10 experiments × 4 strategies = ~40 strategies × 4 min ≈ 2.5 hours total.
 
 For each approved topic, create an experiment via API. The POST endpoint returns an SSE stream — the experiment is created synchronously but the stream blocks. Use background curl pattern:
 
@@ -338,6 +433,7 @@ Generate insights — specifically look for:
 - New findings that contradict or extend existing core insights
 - Parameter combinations that work well in specific market regimes
 - Whether this direction is worth further exploration or should be marked "已弃"
+- **New indicator results**: How did the mandatory new indicator experiments perform? Update the Indicator Exploration Tracker status (未探索→浅探索 or 已探索 or 已弃)
 
 ### Problem Detection & Self-Healing
 
@@ -393,7 +489,7 @@ def promote(sid, label):
 # Get all experiment IDs
 exp_ids = [e['id'] for e in api('lab/experiments?page=1&size=100').get('items', [])]
 
-# Standard A: score >= 0.70, ret > 20%, dd < 25%, trades >= 50
+# Standard A: score >= 0.75, ret > 60%, dd < 18%, trades >= 50, win_rate > 60%
 promoted_a = []
 for eid in exp_ids:
     for s in api(f'lab/experiments/{eid}').get('strategies', []):
@@ -402,7 +498,8 @@ for eid in exp_ids:
         ret = s.get('total_return_pct',0) or 0
         dd = abs(s.get('max_drawdown_pct',100) or 100)
         trades = s.get('total_trades',0) or 0
-        if score >= 0.70 and ret > 20 and dd < 25 and trades >= 50:
+        wr = s.get('win_rate',0) or 0
+        if score >= 0.75 and ret > 60 and dd < 18 and trades >= 50 and wr > 60:
             result = promote(s['id'], '[AI]')
             promoted_a.append((s['id'], s['name'], result.get('message','')))
 
@@ -440,10 +537,11 @@ for sid, name, label, msg in promoted_b:
 ```
 
 **Standard A (高评分)** — ALL conditions must be met:
-- `score >= 0.70`
-- `total_return_pct > 20`
-- `max_drawdown_pct < 25` (absolute value)
+- `score >= 0.75`
+- `total_return_pct > 60`
+- `max_drawdown_pct < 18` (absolute value)
 - `total_trades >= 50`
+- `win_rate > 60`
 
 **Standard B (市场阶段冠军)** — ALL conditions must be met:
 - Has highest profit in a specific regime (bull/bear/sideways) across ALL experiments
@@ -508,6 +606,7 @@ Present a concise summary:
 
 **实验**: N 个主题, M 个策略生成, K 个盈利 (X%)
 **最佳策略**: [name] — 收益 +X%, 评分 Y, 回撤 Z%
+**🆕 新指标探索**: [indicator name] — [result summary: X/Y profitable, best score, verdict (有潜力/已弃/需深入)]
 **新洞察**:
 - [bullet points of new findings]
 **Auto-Promote**: N 个策略已添加到策略库
@@ -633,6 +732,70 @@ If conditions say **should stop**, skip the prompt and go directly to Step 10.
 
 **IMPORTANT**: When exploration stops (either by user choice or stop conditions), do NOT end the session yet. Proceed to Step 10.
 
+## Time Mode Loop
+
+In `time` mode, the loop behaves differently from `auto` mode:
+
+### Time Tracking
+
+At the very start of the skill execution, record the start time and parse the duration:
+```python
+import time
+start_time = time.time()
+# Parse "2h" → 7200, "90m" → 5400, "0.5h" → 1800
+duration_str = "2h"  # from argument
+if duration_str.endswith('h'):
+    total_seconds = float(duration_str[:-1]) * 3600
+elif duration_str.endswith('m'):
+    total_seconds = float(duration_str[:-1]) * 60
+else:
+    total_seconds = float(duration_str) * 3600  # default to hours
+```
+
+### Time Check (before each round)
+
+Before starting a new round, check remaining time:
+```
+elapsed = time.time() - start_time
+remaining = total_seconds - elapsed
+remaining_min = remaining / 60
+```
+
+Display the clock:
+```
+⏱️ 已用时: {elapsed_h}h {elapsed_m}m / 总计: {total_h}h | 剩余: {remaining_h}h {remaining_m}m
+```
+
+**Exit condition**: If `remaining_min < 30`, stop and proceed to Step 10. This ensures there's enough time to complete at least a partial round with memory sync.
+
+### Round Transition (time mode)
+
+In `time` mode, do NOT use `AskUserQuestion` between rounds. Instead:
+1. Check remaining time
+2. If remaining >= 30 min → immediately start next round (go to Step 2)
+3. If remaining < 30 min → proceed to Step 10
+
+The standard `auto` mode stop conditions also apply (2 consecutive 0-profit rounds, all directions exhausted, unrecoverable error).
+
+### Graceful Timeout Handling
+
+If a round's backtests are still running when time is about to expire (remaining < 15 min during Step 5 polling):
+1. Stop polling — do NOT wait for all backtests to finish
+2. Create a background `auto_finish` script (per Step 9c) to handle the remaining backtests
+3. Run Steps 6-9 on whatever results are already available
+4. Proceed to Step 10 for the final session summary
+5. The unfinished backtests will be picked up by Step 1d in the next session
+
+### Time Mode in Step 9b
+
+When saving the exploration round to API, set `mode` to `"time"` and include the duration:
+```json
+{
+    "mode": "time",
+    "summary": "... (time mode: 2h, 实际用时: 1h 47m) ..."
+}
+```
+
 ## Step 10: Resolve Problems & Execute Follow-Up Actions
 
 Before the session can end, ALL identified problems and follow-up suggestions must be addressed. This is the most important step — exploration produces insights, but this step produces actual improvements.
@@ -717,12 +880,16 @@ This creates a continuous improvement cycle: each round's problem resolution (St
 1. User explicitly says "停止" when prompted at the Round Transition (between Step 9 and Step 10)
 2. Stop conditions are met (all directions explored, 2 consecutive 0-profit rounds, unrecoverable error)
 
-When the loop does exit (user stops or stop conditions met), output a **final session summary** instead:
+**In `time` mode**, the loop continues until the time limit is reached (remaining < 30 min). No user prompt is shown between rounds. The loop exits automatically when time runs out.
+
+When the loop does exit (user stops, stop conditions met, or time expired), output a **final session summary** instead:
 
 ```
 ## 全自动会话最终报告
 
+**模式**: auto / time Xh
 **总轮数**: N
+**总用时**: Xh Ym (time mode only)
 **累计实验**: M, 累计策略: K
 **累计盈利策略**: X (Y%)
 **累计Auto-Promote**: Z 个新策略

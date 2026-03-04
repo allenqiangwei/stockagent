@@ -35,8 +35,8 @@ from src.backtest.portfolio_engine import PortfolioBacktestEngine, SignalExplosi
 
 logger = logging.getLogger(__name__)
 
-# Limit concurrent backtests to avoid SQLite contention (P14)
-_BACKTEST_SEMAPHORE = threading.Semaphore(1)
+# Limit concurrent backtests for CPU/memory control (PostgreSQL supports concurrent writes)
+_BACKTEST_SEMAPHORE = threading.Semaphore(4)
 
 
 # ── Progress buffer (thread-safe, multi-consumer) ──────────

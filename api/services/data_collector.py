@@ -1,4 +1,4 @@
-"""Data collection service — TuShare (primary) + AkShare (fallback), configurable.
+"""Data collection service — TuShare (primary) + TDX (fallback), configurable.
 
 Provides stock lists and daily OHLCV data with automatic retry and
 fallback between data sources. Primary/fallback order is controlled by
@@ -27,6 +27,7 @@ class DataCollector:
         self.db = db
         self._settings = get_settings()
         self._tushare_api = None
+        self._tdx_collector = None
 
     def _get_tushare_api(self):
         if self._tushare_api is None:
@@ -36,15 +37,21 @@ class DataCollector:
                 self._tushare_api = ts.pro_api(token)
         return self._tushare_api
 
+    def _get_tdx_collector(self):
+        if self._tdx_collector is None:
+            from api.services.tdx_collector import TdxCollector
+            self._tdx_collector = TdxCollector()
+        return self._tdx_collector
+
     # ── Stock list ─────────────────────────────────────────
 
     def sync_stock_list(self) -> int:
         """Fetch A-share stock list and upsert to DB. Returns count."""
         preferred = self._settings.data_sources.stock_list
         if preferred == "tushare":
-            primary_fn, fallback_fn = self._fetch_stock_list_tushare, self._fetch_stock_list_akshare
+            primary_fn, fallback_fn = self._fetch_stock_list_tushare, self._fetch_stock_list_tdx
         else:
-            primary_fn, fallback_fn = self._fetch_stock_list_akshare, self._fetch_stock_list_tushare
+            primary_fn, fallback_fn = self._fetch_stock_list_tdx, self._fetch_stock_list_tushare
 
         df = primary_fn()
         if (df is None or df.empty) and self._settings.data_sources.fallback_enabled:
@@ -101,7 +108,7 @@ class DataCollector:
             ))
 
     def sync_industries(self, force: bool = False) -> dict:
-        """Fetch industry classification from AkShare and update stocks.
+        """Fetch industry classification from TDX and update stocks.
 
         Returns {"updated": N, "skipped": bool} — skipped=True if already synced today.
         """
@@ -109,27 +116,19 @@ class DataCollector:
             logger.info("Industry already synced today, skipping")
             return {"updated": 0, "skipped": True}
         try:
-            import akshare as ak
-            with no_proxy():
-                boards = ak.stock_board_industry_name_em()
-            if boards is None or boards.empty:
-                logger.warning("No industry boards returned")
+            tdx = self._get_tdx_collector()
+            boards = tdx.fetch_industry_boards()
+            if not boards:
+                logger.warning("No industry boards returned from TDX")
                 return {"updated": 0, "skipped": False}
 
-            board_names = boards["板块名称"].tolist()
-            logger.info("Fetching constituents for %d industry boards...", len(board_names))
+            logger.info("Got %d industry boards from TDX", len(boards))
 
+            # Invert: {industry_name: [codes]} → {code: industry_name}
             code_to_industry: dict[str, str] = {}
-            for name in board_names:
-                try:
-                    time.sleep(0.3)
-                    with no_proxy():
-                        cons = ak.stock_board_industry_cons_em(symbol=name)
-                    if cons is not None and not cons.empty:
-                        for code in cons["代码"].tolist():
-                            code_to_industry[str(code)] = name
-                except Exception as e:
-                    logger.debug("Board %s fetch failed: %s", name, e)
+            for industry_name, codes in boards.items():
+                for code in codes:
+                    code_to_industry[str(code)] = industry_name
 
             updated = 0
             for code, industry in code_to_industry.items():
@@ -148,7 +147,7 @@ class DataCollector:
             return {"updated": 0, "skipped": False}
 
     def sync_concepts(self, force: bool = False) -> dict:
-        """Fetch concept boards from AkShare and store stock-concept mappings.
+        """Fetch concept boards from TDX and store stock-concept mappings.
 
         Returns {"updated": N, "skipped": bool}.
         """
@@ -156,43 +155,30 @@ class DataCollector:
             logger.info("Concepts already synced today, skipping")
             return {"updated": 0, "skipped": True}
         try:
-            import akshare as ak
-            with no_proxy():
-                boards = ak.stock_board_concept_name_em()
-            if boards is None or boards.empty:
-                logger.warning("No concept boards returned")
+            tdx = self._get_tdx_collector()
+            boards = tdx.fetch_concept_boards()
+            if not boards:
+                logger.warning("No concept boards returned from TDX")
                 return {"updated": 0, "skipped": False}
 
-            board_names = boards["板块名称"].tolist()
-            logger.info("Fetching constituents for %d concept boards...", len(board_names))
-
-            # Collect all (code, concept) pairs
-            pairs: list[tuple[str, str]] = []
-            for name in board_names:
-                try:
-                    time.sleep(0.3)
-                    with no_proxy():
-                        cons = ak.stock_board_concept_cons_em(symbol=name)
-                    if cons is not None and not cons.empty:
-                        for code in cons["代码"].tolist():
-                            pairs.append((str(code), name))
-                except Exception as e:
-                    logger.debug("Concept board %s fetch failed: %s", name, e)
+            logger.info("Got %d concept boards from TDX", len(boards))
 
             # Replace all concept data (delete old, insert new)
             self.db.query(StockConcept).delete()
             inserted = 0
             seen: set[tuple[str, str]] = set()
-            for code, concept in pairs:
-                if (code, concept) not in seen:
-                    seen.add((code, concept))
-                    self.db.add(StockConcept(stock_code=code, concept_name=concept))
-                    inserted += 1
+            for concept_name, codes in boards.items():
+                for code in codes:
+                    code = str(code)
+                    if (code, concept_name) not in seen:
+                        seen.add((code, concept_name))
+                        self.db.add(StockConcept(stock_code=code, concept_name=concept_name))
+                        inserted += 1
 
             self._update_sync_log("concept", inserted)
             self.db.commit()
             logger.info("Synced %d stock-concept mappings from %d boards",
-                        inserted, len(board_names))
+                        inserted, len(boards))
             return {"updated": inserted, "skipped": False}
         except Exception as e:
             logger.error("sync_concepts failed: %s", e)
@@ -360,9 +346,9 @@ class DataCollector:
         """Try primary data source first, then fallback per config."""
         preferred = self._settings.data_sources.historical_daily
         if preferred == "tushare":
-            primary_fn, fallback_fn = self._fetch_daily_tushare, self._fetch_daily_akshare
+            primary_fn, fallback_fn = self._fetch_daily_tushare, self._fetch_daily_tdx
         else:
-            primary_fn, fallback_fn = self._fetch_daily_akshare, self._fetch_daily_tushare
+            primary_fn, fallback_fn = self._fetch_daily_tdx, self._fetch_daily_tushare
 
         df = primary_fn(stock_code, start_date, end_date)
         if df is not None and not df.empty:
@@ -377,8 +363,6 @@ class DataCollector:
 
     def _cache_daily(self, stock_code: str, df: pd.DataFrame):
         """Upsert daily price data to DB."""
-        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-
         for _, row in df.iterrows():
             try:
                 d = row.get("date", "")
@@ -503,56 +487,22 @@ class DataCollector:
                 result[d] = df
         return result
 
-    # ── AkShare implementations ────────────────────────────
+    # ── TDX implementations ─────────────────────────────────
 
-    def _fetch_stock_list_akshare(self) -> Optional[pd.DataFrame]:
+    def _fetch_stock_list_tdx(self) -> Optional[pd.DataFrame]:
         try:
-            import akshare as ak
-            with no_proxy():
-                df = ak.stock_info_a_code_name()
-            if df is None or df.empty:
-                return None
-            df = df.rename(columns={"code": "code", "name": "name"})
-            df["industry"] = ""
-            df["market"] = df["code"].apply(
-                lambda c: "SH" if str(c).startswith("6") else "SZ"
-            )
-            df["list_date"] = ""
-            return df[["code", "name", "market", "industry", "list_date"]]
+            return self._get_tdx_collector().fetch_stock_list()
         except Exception as e:
-            logger.warning("AkShare stock list failed: %s", e)
+            logger.warning("TDX stock list failed: %s", e)
             return None
 
-    def _fetch_daily_akshare(
+    def _fetch_daily_tdx(
         self, stock_code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
         try:
-            import akshare as ak
-            time.sleep(0.5)
-            with no_proxy():
-                df = ak.stock_zh_a_hist(
-                    symbol=stock_code,
-                    period="daily",
-                    start_date=start_date.replace("-", ""),
-                    end_date=end_date.replace("-", ""),
-                    adjust="qfq",
-                )
-            if df is None or df.empty:
-                return None
-
-            df = df.rename(columns={
-                "日期": "date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "volume",
-                "成交额": "amount",
-            })
-            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-            return df[["date", "open", "high", "low", "close", "volume"]].copy()
+            return self._get_tdx_collector().fetch_daily(stock_code, start_date, end_date)
         except Exception as e:
-            logger.warning("AkShare daily %s failed: %s", stock_code, e)
+            logger.warning("TDX daily %s failed: %s", stock_code, e)
             return None
 
     # ── TuShare implementations ────────────────────────────
@@ -974,9 +924,9 @@ class DataCollector:
         preferred = self._settings.data_sources.index_data
         if preferred == "tushare":
             primary_fn = lambda: self._fetch_index_tushare(index_code, start_date, end_date)
-            fallback_fn = lambda: self._fetch_index_akshare(index_code, info, start_date, end_date)
+            fallback_fn = lambda: self._fetch_index_tdx(index_code, start_date, end_date)
         else:
-            primary_fn = lambda: self._fetch_index_akshare(index_code, info, start_date, end_date)
+            primary_fn = lambda: self._fetch_index_tdx(index_code, start_date, end_date)
             fallback_fn = lambda: self._fetch_index_tushare(index_code, start_date, end_date)
 
         df = primary_fn()
@@ -990,33 +940,21 @@ class DataCollector:
 
         return None
 
-    def _fetch_index_akshare(
-        self, index_code: str, info: dict, start_date: str, end_date: str
+    def _fetch_index_tdx(
+        self, index_code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
-        """Fetch index daily data from AkShare."""
+        """Fetch index daily data from TDX."""
         try:
-            import akshare as ak
-            time.sleep(0.5)
-            with no_proxy():
-                df = ak.stock_zh_index_daily_em(
-                    symbol=info["ak_symbol"],
-                    start_date=start_date.replace("-", ""),
-                    end_date=end_date.replace("-", ""),
+            df = self._get_tdx_collector().fetch_index_daily(index_code, start_date, end_date)
+            if df is not None and not df.empty:
+                logger.info(
+                    "Fetched %s from TDX: %d rows (%s ~ %s)",
+                    index_code, len(df),
+                    df["date"].iloc[0], df["date"].iloc[-1],
                 )
-            if df is None or df.empty:
-                logger.warning("AkShare returned empty data for %s", index_code)
-                return None
-
-            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-            df = df.sort_values("date").reset_index(drop=True)
-            logger.info(
-                "Fetched %s (%s) from AkShare: %d rows (%s ~ %s)",
-                info["name"], index_code, len(df),
-                df["date"].iloc[0], df["date"].iloc[-1],
-            )
-            return df[["date", "open", "high", "low", "close", "volume"]].copy()
+            return df
         except Exception as e:
-            logger.warning("AkShare index fetch for %s failed: %s", index_code, e)
+            logger.warning("TDX index fetch for %s failed: %s", index_code, e)
             return None
 
     def _fetch_index_tushare(

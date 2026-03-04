@@ -566,6 +566,20 @@ export interface BotPortfolioItem {
   pnl: number | null;
   pnl_pct: number | null;
   market_value: number | null;
+  // Exit monitoring
+  strategy_id?: number;
+  strategy_name?: string;
+  exit_config?: {
+    stop_loss_pct: number;
+    take_profit_pct: number;
+    max_hold_days: number;
+  };
+  buy_price?: number;
+  buy_date?: string;
+  hold_days?: number;
+  sl_price?: number;
+  tp_price?: number;
+  days_remaining?: number;
 }
 
 export interface BotTradeItem {
@@ -580,6 +594,7 @@ export interface BotTradeItem {
   report_id: number | null;
   trade_date: string;
   created_at: string;
+  sell_reason?: string;
 }
 
 export interface BotTradeReviewItem {
@@ -610,6 +625,10 @@ export interface BotSummary {
   reviews_count: number;
   win_count: number;
   loss_count: number;
+  sl_count: number;
+  tp_count: number;
+  mhd_count: number;
+  ai_sell_count: number;
 }
 
 export interface AISchedulerStatus {
@@ -655,6 +674,7 @@ export interface BotTradePlanItem {
   status: "pending" | "executed" | "expired";
   thinking: string;
   report_id: number | null;
+  source: "ai" | "stop_loss" | "take_profit" | "max_hold";
   created_at: string;
   executed_at: string | null;
   execution_price: number | null;

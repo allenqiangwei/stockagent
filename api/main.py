@@ -17,7 +17,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from api.models.base import Base, engine
-from api.routers import market, stocks, strategies, signals, backtest, news, config, ai_lab, ai_analyst, news_signals, bot_trading
+from api.routers import market, stocks, strategies, signals, backtest, news, config, ai_lab, ai_analyst, news_signals, bot_trading, beta
 
 # Configure logging
 logging.basicConfig(
@@ -163,21 +163,19 @@ def _recover_orphan_backtests():
             db.commit()
             logger.info("Orphan recovery: reset %d regular strategies to 'failed'", reset_count)
 
-        # Re-submit clone experiments in background threads
-        for clone_id, exp_id in clone_strats:
-            def _rerun(cid=clone_id, eid=exp_id):
+        # Re-submit clone experiments in a SINGLE background thread (sequential)
+        # to avoid spawning hundreds of threads that exhaust the connection pool.
+        if clone_strats:
+            logger.info("Orphan recovery: scheduling %d clone backtests (sequential)", len(clone_strats))
+
+            def _rerun_all(strat_list):
                 from api.models.base import SessionLocal
                 from api.services.ai_lab_engine import AILabEngine, _BACKTEST_SEMAPHORE
 
-                _BACKTEST_SEMAPHORE.acquire()
+                # Load stock data once, reuse for all backtests
                 session = SessionLocal()
                 try:
                     eng = AILabEngine(session)
-                    strat = session.query(ExperimentStrategy).get(cid)
-                    experiment = session.query(Experiment).get(eid)
-                    if not strat or not experiment:
-                        return
-
                     end_date = datetime.now().strftime("%Y-%m-%d")
                     start_date = (datetime.now() - timedelta(days=3 * 365)).strftime("%Y-%m-%d")
 
@@ -189,10 +187,7 @@ def _recover_orphan_backtests():
                             stock_data[code] = df
 
                     if not stock_data:
-                        strat.status = "failed"
-                        strat.error_message = "No stock data"
-                        experiment.status = "failed"
-                        session.commit()
+                        logger.warning("Orphan recovery: no stock data available")
                         return
 
                     from api.services.regime_service import ensure_regimes, get_regime_map, get_regime_summary
@@ -200,37 +195,55 @@ def _recover_orphan_backtests():
                     regime_map = get_regime_map(session, start_date, end_date)
                     summary = get_regime_summary(session, start_date, end_date)
                     index_return_pct = summary.get("total_index_return_pct", 0.0)
-
-                    eng._run_single_backtest_impl(
-                        strat, stock_data, start_date, end_date,
-                        experiment, regime_map, index_return_pct,
-                    )
-                    experiment.status = "done"
-                    session.commit()
-                    logger.info("Orphan recovery: S%d done (score=%.3f, ret=+%.1f%%)",
-                                cid, strat.score or 0, strat.total_return_pct or 0)
-                except Exception as e:
-                    try:
-                        strat = session.query(ExperimentStrategy).get(cid)
-                        exp_obj = session.query(Experiment).get(eid)
-                        if strat:
-                            strat.status = "failed"
-                            strat.error_message = str(e)[:500]
-                        if exp_obj:
-                            exp_obj.status = "failed"
-                        session.commit()
-                    except Exception:
-                        session.rollback()
-                    logger.warning("Orphan recovery: S%d failed: %s", cid, e)
                 finally:
-                    _BACKTEST_SEMAPHORE.release()
                     session.close()
 
-            t = threading.Thread(target=_rerun, daemon=True)
-            t.start()
+                done_count = 0
+                fail_count = 0
+                for cid, eid in strat_list:
+                    _BACKTEST_SEMAPHORE.acquire()
+                    session = SessionLocal()
+                    try:
+                        eng = AILabEngine(session)
+                        strat = session.query(ExperimentStrategy).get(cid)
+                        experiment = session.query(Experiment).get(eid)
+                        if not strat or not experiment:
+                            continue
 
-        if clone_strats:
-            logger.info("Orphan recovery: re-submitted %d clone backtests", len(clone_strats))
+                        eng._run_single_backtest_impl(
+                            strat, stock_data, start_date, end_date,
+                            experiment, regime_map, index_return_pct,
+                        )
+                        experiment.status = "done"
+                        session.commit()
+                        done_count += 1
+                        if done_count % 10 == 0:
+                            logger.info("Orphan recovery progress: %d/%d done",
+                                        done_count, len(strat_list))
+                    except Exception as e:
+                        fail_count += 1
+                        try:
+                            strat = session.query(ExperimentStrategy).get(cid)
+                            exp_obj = session.query(Experiment).get(eid)
+                            if strat:
+                                strat.status = "failed"
+                                strat.error_message = str(e)[:500]
+                            if exp_obj:
+                                exp_obj.status = "failed"
+                            session.commit()
+                        except Exception:
+                            session.rollback()
+                        logger.warning("Orphan recovery: S%d failed: %s", cid, e)
+                    finally:
+                        _BACKTEST_SEMAPHORE.release()
+                        session.close()
+
+                logger.info("Orphan recovery complete: %d done, %d failed out of %d",
+                            done_count, fail_count, len(strat_list))
+
+            t = threading.Thread(target=_rerun_all, args=(clone_strats,),
+                                 daemon=True, name="orphan-recovery")
+            t.start()
 
 
 def _sync_index_data():
@@ -291,6 +304,16 @@ def _run_migrations():
         _add_col_if_missing("strategies", "category", "VARCHAR(20)")
         _add_col_if_missing("strategies", "backtest_summary", "TEXT")
         _add_col_if_missing("strategies", "source_experiment_id", "INTEGER")
+
+        # Bot trading: exit monitoring fields
+        _add_col_if_missing("bot_portfolio", "strategy_id", "INTEGER")
+        _add_col_if_missing("bot_portfolio", "strategy_name", "VARCHAR(100)")
+        _add_col_if_missing("bot_portfolio", "exit_config", "TEXT")
+        _add_col_if_missing("bot_portfolio", "buy_price", "FLOAT")
+        _add_col_if_missing("bot_portfolio", "buy_date", "VARCHAR(10)")
+        _add_col_if_missing("bot_trades", "sell_reason", "VARCHAR(20)")
+        _add_col_if_missing("bot_trade_plans", "source", "VARCHAR(20) DEFAULT 'ai'")
+        _add_col_if_missing("bot_trade_plans", "strategy_id", "INTEGER")
 
         conn.commit()
 
@@ -363,6 +386,7 @@ async def lifespan(app: FastAPI):
     import api.models.ai_analyst  # noqa: F401 — register AI analyst tables
     import api.models.news_agent  # noqa: F401 — register news agent tables
     import api.models.bot_trading  # noqa: F401 — register bot trading tables
+    import api.models.beta_factor  # noqa: F401 — register beta factor tables
     Base.metadata.create_all(bind=engine)
 
     # Run lightweight ALTER TABLE migrations for new nullable columns
@@ -451,6 +475,7 @@ app.include_router(ai_lab.router)
 app.include_router(ai_analyst.router)
 app.include_router(news_signals.router)
 app.include_router(bot_trading.router)
+app.include_router(beta.router)
 
 
 @app.get("/api/health")

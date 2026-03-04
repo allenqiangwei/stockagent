@@ -17,6 +17,17 @@ class BotPortfolioItem(BaseModel):
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
     market_value: Optional[float] = None
+    # Exit monitoring
+    strategy_id: Optional[int] = None
+    strategy_name: Optional[str] = None
+    exit_config: Optional[dict] = None
+    buy_price: Optional[float] = None
+    buy_date: Optional[str] = None
+    # Derived fields (computed at query time)
+    hold_days: Optional[int] = None
+    sl_price: Optional[float] = None
+    tp_price: Optional[float] = None
+    days_remaining: Optional[int] = None
 
 
 class BotTradeItem(BaseModel):
@@ -31,6 +42,7 @@ class BotTradeItem(BaseModel):
     report_id: Optional[int] = None
     trade_date: str = ""
     created_at: str = ""
+    sell_reason: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -67,6 +79,7 @@ class BotTradePlanItem(BaseModel):
     status: str = "pending"
     thinking: str = ""
     report_id: Optional[int] = None
+    source: str = "ai"  # ai|stop_loss|take_profit|max_hold
     created_at: str = ""
     executed_at: Optional[str] = None
     execution_price: Optional[float] = None
@@ -89,6 +102,10 @@ class BotSummary(BaseModel):
     reviews_count: int = 0
     win_count: int = 0
     loss_count: int = 0
+    sl_count: int = 0
+    tp_count: int = 0
+    mhd_count: int = 0
+    ai_sell_count: int = 0
 
 
 class BotStockTimeline(BaseModel):

@@ -24,8 +24,13 @@ logger = get_logger(__name__)
 CACHE_DIR = Path(__file__).parent.parent.parent / "data" / "news_cache"
 CACHE_FILE = CACHE_DIR / "latest_news.json"
 
-# 数据库路径
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "stockagent.db"
+def _get_db_url() -> str:
+    """Get database URL from config (PostgreSQL or SQLite fallback)."""
+    try:
+        from api.config import get_settings
+        return get_settings().database.url
+    except Exception:
+        return str(Path(__file__).parent.parent.parent / "data" / "stockagent.db")
 
 
 class NewsService:
@@ -56,8 +61,7 @@ class NewsService:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
         # 初始化数据库
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        self.db = Database(str(DB_PATH))
+        self.db = Database(_get_db_url())
         self.db.init_tables()
 
     def start(self):

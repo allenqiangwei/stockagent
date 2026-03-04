@@ -70,6 +70,7 @@ class StrategyUpdate(BaseModel):
     rank_config: Optional[dict] = None
     portfolio_config: Optional[dict] = None
     category: Optional[str] = None
+    backtest_summary: Optional[dict] = None
 
 
 class StrategyClone(BaseModel):

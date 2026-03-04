@@ -19,6 +19,31 @@ from src.indicators.indicator_calculator import (
 )
 
 
+# ── 涨跌停工具函数 ──
+
+def get_price_limit_pct(stock_code: str) -> float:
+    """根据股票代码返回涨跌停幅度百分比。
+
+    主板(0xx/6xx): ±10%, 创业板(300/301): ±20%,
+    科创板(688): ±20%, 北交所(8xx/4xx): ±30%
+    """
+    if stock_code.startswith(('300', '301')):
+        return 20.0
+    if stock_code.startswith('688'):
+        return 20.0
+    if stock_code.startswith(('8', '4')):
+        return 30.0
+    return 10.0
+
+
+def calc_limit_prices(stock_code: str, prev_close: float) -> tuple:
+    """计算涨停价和跌停价。返回 (limit_up, limit_down)。"""
+    pct = get_price_limit_pct(stock_code)
+    limit_up = round(prev_close * (1 + pct / 100), 2)
+    limit_down = round(prev_close * (1 - pct / 100), 2)
+    return limit_up, limit_down
+
+
 @dataclass
 class Trade:
     """单笔交易记录"""
@@ -64,8 +89,9 @@ class BacktestEngine:
         result = engine.run_single(strategy_dict, df, "000001")
     """
 
-    def __init__(self, capital_per_trade: float = 10000.0):
+    def __init__(self, capital_per_trade: float = 10000.0, slippage_pct: float = 0.1):
         self.capital_per_trade = capital_per_trade
+        self.slippage_pct = slippage_pct
 
     def run_single(
         self,
@@ -113,94 +139,164 @@ class BacktestEngine:
         else:
             dates = [str(i) for i in range(len(df_full))]
 
-        # 逐日模拟
+        # ── T+1 逐日模拟 ──
+        # 信号在 Day T 生成，Day T+1 以开盘价执行。
+        # SL/TP 日内触发但跌停时转 pending。买入日不可卖出（T+1 结算）。
+        # hold_days 语义: 买入日=0, 完整持有一天后=1。
         trades: List[Trade] = []
         current_trade: Optional[Trade] = None
         equity = self.capital_per_trade
         equity_curve = []
+        pending_buy = False
+        pending_sell = False
+        pending_sell_reason: Optional[str] = None
+        slippage = self.slippage_pct
+        just_bought = False  # T+1: 买入日标记，当天禁止卖出
 
         for i in range(1, len(df_full)):
             row = df_full.iloc[i]
+            open_p = float(row["open"])
             close = float(row["close"])
+            low = float(row.get("low", close))
+            high = float(row.get("high", close))
             current_date = dates[i]
 
-            # DataFrame 切片：截止到当天（evaluate_conditions 取 iloc[-1]）
-            df_slice = df_full.iloc[: i + 1]
+            # 上一日收盘价 → 计算涨跌停价
+            prev_close = float(df_full.iloc[i - 1]["close"])
+            limit_up, limit_down = calc_limit_prices(stock_code, prev_close)
 
-            if current_trade is None:
-                # ── 无持仓：检查买入条件（AND 模式） ──
-                if buy_conditions:
-                    triggered, _ = evaluate_conditions(
-                        buy_conditions, df_slice, mode="AND"
+            # ── Step 1: 执行昨日 pending_sell (开盘价) ──
+            if pending_sell and current_trade is not None:
+                if open_p >= limit_down:  # Fix#4: >= 允许跌停价成交
+                    sell_price = max(open_p * (1 - slippage / 100), limit_down)
+                    current_trade.hold_days += 1  # Fix#3: pending执行日计入
+                    current_trade.sell_date = current_date
+                    current_trade.sell_price = sell_price
+                    current_trade.sell_reason = pending_sell_reason
+                    current_trade.pnl_pct = (
+                        (sell_price - current_trade.buy_price)
+                        / current_trade.buy_price * 100
                     )
-                    if triggered:
-                        current_trade = Trade(
-                            stock_code=stock_code,
-                            strategy_name=strategy_name,
-                            buy_date=current_date,
-                            buy_price=close,
-                        )
-            else:
-                # ── 有持仓：按优先级检查卖出 ──
-                current_trade.hold_days += 1
-                low = float(row.get("low", close))
-                high = float(row.get("high", close))
-                sell_reason = None
-                exec_price = close  # default: sell at close
+                    trades.append(current_trade)
+                    current_trade = None
+                    pending_sell = False
+                    pending_sell_reason = None
+                else:
+                    # 跌停无法卖出，下一个交易日重试
+                    current_trade.hold_days += 1
 
-                # 1) 止损 — 用日内最低价判断
+            # ── Step 2: 执行昨日 pending_buy (开盘价) ──
+            if pending_buy and current_trade is None:
+                if open_p <= limit_up:  # Fix#4: <= 允许涨停价成交
+                    buy_price = min(open_p * (1 + slippage / 100), limit_up)
+                    current_trade = Trade(
+                        stock_code=stock_code,
+                        strategy_name=strategy_name,
+                        buy_date=current_date,
+                        buy_price=buy_price,
+                    )
+                    just_bought = True  # Fix#1: 买入日标记
+                # 无论是否成交，信号过期
+                pending_buy = False
+
+            # ── Step 3: 持仓检查（买入日跳过，T+1 结算） ──
+            if current_trade is not None and not pending_sell and not just_bought:
+                current_trade.hold_days += 1  # Fix#2: 先 +1 再检查，hold_days=1 表示已持有1天
+                sell_reason = None
+                exec_price = None
+
+                # 3a) 止损 — 日内触发，跳空处理，跌停则 pending
                 if stop_loss_pct is not None:
                     loss_threshold = current_trade.buy_price * (1 + stop_loss_pct / 100)
-                    if low <= loss_threshold:
+                    if open_p <= loss_threshold:
+                        # 跳空低开
+                        sl_price = max(open_p * (1 - slippage / 100), limit_down)
+                        if open_p >= limit_down:  # Fix#6: 跌停检查
+                            sell_reason = "stop_loss"
+                            exec_price = sl_price
+                        else:
+                            # 跌停无法成交，转 pending
+                            pending_sell = True
+                            pending_sell_reason = "stop_loss"
+                    elif low <= loss_threshold:
+                        # 日内触发
+                        sl_price = max(loss_threshold * (1 - slippage / 100), limit_down)
                         sell_reason = "stop_loss"
-                        exec_price = min(loss_threshold, close)
+                        exec_price = sl_price
 
-                # 2) 止盈 — 用日内最高价判断
-                if sell_reason is None and take_profit_pct is not None:
+                # 3b) 止盈 — 日内触发，跳空处理
+                if sell_reason is None and not pending_sell and take_profit_pct is not None:
                     profit_threshold = current_trade.buy_price * (1 + take_profit_pct / 100)
-                    if high >= profit_threshold:
+                    if open_p >= profit_threshold:
+                        # 跳空高开
                         sell_reason = "take_profit"
-                        exec_price = max(profit_threshold, close)
+                        exec_price = max(open_p * (1 - slippage / 100), limit_down)  # Fix#5: 不低于跌停
+                    elif high >= profit_threshold:
+                        # 日内触发
+                        sell_reason = "take_profit"
+                        exec_price = max(profit_threshold * (1 - slippage / 100), limit_down)  # Fix#5
 
-                # 3) 最长持有天数
-                if sell_reason is None and max_hold_days is not None:
-                    if current_trade.hold_days >= max_hold_days:
-                        sell_reason = "max_hold"
-
-                # 4) 卖出条件（OR 模式：任一满足即卖出）
-                if sell_reason is None and sell_conditions:
-                    triggered, _ = evaluate_conditions(
-                        sell_conditions, df_slice, mode="OR"
-                    )
-                    if triggered:
-                        sell_reason = "strategy_exit"
-
-                if sell_reason:
+                # SL/TP 执行
+                if sell_reason and exec_price is not None:
                     current_trade.sell_date = current_date
                     current_trade.sell_price = exec_price
                     current_trade.sell_reason = sell_reason
                     current_trade.pnl_pct = (
-                        (exec_price - current_trade.buy_price) / current_trade.buy_price * 100
+                        (exec_price - current_trade.buy_price)
+                        / current_trade.buy_price * 100
                     )
-                    equity += self.capital_per_trade * (current_trade.pnl_pct / 100)
                     trades.append(current_trade)
                     current_trade = None
+                elif not pending_sell:
+                    # 3c) 最长持有天数 → pending sell
+                    if max_hold_days is not None and current_trade.hold_days >= max_hold_days:
+                        pending_sell = True
+                        pending_sell_reason = "max_hold"
 
-            equity_curve.append({"date": current_date, "equity": round(equity, 2)})
+                    # 3d) 策略卖出条件 → pending sell (Fix#7: 统一用 pending)
+                    if not pending_sell and sell_conditions:
+                        df_slice = df_full.iloc[: i + 1]
+                        triggered, _ = evaluate_conditions(
+                            sell_conditions, df_slice, mode="OR"
+                        )
+                        if triggered:
+                            pending_sell = True
+                            pending_sell_reason = "strategy_exit"
 
-        # 回测结束后未平仓 → 以最后一天收盘价强制平仓
+            # 重置买入日标记
+            just_bought = False
+
+            # ── Step 4: 买入信号 → pending buy ──
+            if current_trade is None and not pending_buy and buy_conditions:
+                df_slice = df_full.iloc[: i + 1]
+                triggered, _ = evaluate_conditions(
+                    buy_conditions, df_slice, mode="AND"
+                )
+                if triggered:
+                    pending_buy = True
+
+            # ── Fix#8: Equity 包含浮动盈亏 ──
+            if current_trade is not None:
+                unrealized_pnl = (close - current_trade.buy_price) / current_trade.buy_price
+                cur_equity = self.capital_per_trade * (1 + unrealized_pnl)
+            else:
+                cur_equity = equity
+            equity_curve.append({"date": current_date, "equity": round(cur_equity, 2)})
+
+        # ── 回测结束处理 ──
+        # pending_buy → 丢弃（没有下一天执行）
+        # pending_sell 或持仓 → 以最后一天收盘价平仓
         if current_trade is not None:
             last_close = float(df_full.iloc[-1]["close"])
             last_date = dates[-1]
             current_trade.sell_date = last_date
             current_trade.sell_price = last_close
-            current_trade.sell_reason = "end_of_backtest"
+            current_trade.sell_reason = pending_sell_reason or "end_of_backtest"
             current_trade.pnl_pct = (
                 (last_close - current_trade.buy_price) / current_trade.buy_price * 100
             )
-            equity += self.capital_per_trade * (current_trade.pnl_pct / 100)
+            equity = self.capital_per_trade * (1 + current_trade.pnl_pct / 100)
             trades.append(current_trade)
-            # 更新最后一天的 equity
             if equity_curve:
                 equity_curve[-1]["equity"] = round(equity, 2)
 

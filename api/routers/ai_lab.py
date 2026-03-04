@@ -12,7 +12,7 @@ from api.models.ai_lab import StrategyTemplate, Experiment, ExperimentStrategy, 
 from api.schemas.ai_lab import (
     TemplateCreate, TemplateUpdate, TemplateResponse,
     ExperimentCreate, ExperimentResponse, ExperimentListItem,
-    CloneBacktestRequest, ComboExperimentCreate,
+    CloneBacktestRequest, BatchCloneBacktestRequest, ComboExperimentCreate,
     ExplorationRoundCreate, ExplorationRoundResponse,
 )
 
@@ -171,6 +171,18 @@ def get_experiment(experiment_id: int, db: Session = Depends(get_db)):
     }
 
 
+@router.put("/experiments/{experiment_id}")
+def update_experiment(experiment_id: int, data: dict, db: Session = Depends(get_db)):
+    """Update experiment status (used by standalone processing scripts)."""
+    exp = db.query(Experiment).get(experiment_id)
+    if not exp:
+        raise HTTPException(404, "Experiment not found")
+    if "status" in data:
+        exp.status = data["status"]
+    db.commit()
+    return {"message": "Updated", "experiment_id": experiment_id}
+
+
 @router.delete("/experiments/{experiment_id}")
 def delete_experiment(experiment_id: int, db: Session = Depends(get_db)):
     """Delete an experiment and all related data (strategies + backtest runs)."""
@@ -282,6 +294,46 @@ _LABEL_CATEGORY_MAP = {
     "[AI-熊市]": "熊市",
     "[AI-震荡]": "震荡",
 }
+
+
+@router.put("/strategies/{strategy_id}")
+def update_experiment_strategy(
+    strategy_id: int,
+    data: dict,
+    db: Session = Depends(get_db),
+):
+    """Update an experiment strategy's status and metrics (used by standalone processing scripts)."""
+    exp_strat = db.query(ExperimentStrategy).get(strategy_id)
+    if not exp_strat:
+        raise HTTPException(404, "Experiment strategy not found")
+
+    allowed = {
+        "status", "score", "total_return_pct", "max_drawdown_pct",
+        "total_trades", "win_rate", "sharpe_ratio", "avg_hold_days",
+        "avg_pnl_pct", "regime_stats", "error_message", "profit_loss_ratio",
+    }
+    for key, val in data.items():
+        if key in allowed:
+            setattr(exp_strat, key, val)
+
+    # If promoted, also update the formal strategy's backtest_summary
+    if exp_strat.promoted and exp_strat.promoted_strategy_id:
+        from api.models.strategy import Strategy
+        formal = db.query(Strategy).get(exp_strat.promoted_strategy_id)
+        if formal:
+            formal.backtest_summary = {
+                "score": exp_strat.score,
+                "total_return_pct": exp_strat.total_return_pct,
+                "max_drawdown_pct": exp_strat.max_drawdown_pct,
+                "win_rate": exp_strat.win_rate,
+                "total_trades": exp_strat.total_trades,
+                "avg_hold_days": exp_strat.avg_hold_days,
+                "avg_pnl_pct": exp_strat.avg_pnl_pct,
+                "regime_stats": exp_strat.regime_stats,
+            }
+
+    db.commit()
+    return {"message": "Updated", "strategy_id": strategy_id}
 
 
 @router.post("/strategies/{strategy_id}/promote")
@@ -541,6 +593,238 @@ def clone_and_backtest(
         "strategy_id": cloned.id,
         "name": cloned.name,
         "exit_config": exit_config,
+    }
+
+
+# ── Batch Clone & Backtest ────────────────────────
+
+@router.post("/strategies/{strategy_id}/batch-clone-backtest")
+def batch_clone_and_backtest(
+    strategy_id: int,
+    req: BatchCloneBacktestRequest,
+    db: Session = Depends(get_db),
+):
+    """Batch clone a strategy with N different exit configs and backtest all at once.
+
+    Loads stock data + computes indicators + vectorizes signals ONCE,
+    then runs N backtests using the optimized portfolio engine.
+    10-50x faster than N individual clone-backtest calls.
+    """
+    import copy
+    import threading
+    from datetime import datetime, timedelta
+
+    source = db.query(ExperimentStrategy).get(strategy_id)
+    if not source:
+        raise HTTPException(404, "Source experiment strategy not found")
+    if source.status != "done":
+        raise HTTPException(400, f"Source strategy status is '{source.status}', must be 'done'")
+
+    if not req.exit_configs:
+        raise HTTPException(400, "exit_configs list is empty")
+
+    n = len(req.exit_configs)
+
+    # Create one experiment for the entire batch
+    exp = Experiment(
+        theme=f"[批量调参] {source.name} ×{n}",
+        source_type="batch-clone",
+        source_text=f"批量克隆自 ExperimentStrategy ID{source.id} ({source.name}), {n} 组 exit_config",
+        status="backtesting",
+        strategy_count=n,
+    )
+    db.add(exp)
+    db.flush()
+
+    # Create all cloned strategies
+    cloned_ids = []
+    for cfg in req.exit_configs:
+        suffix = cfg.get("name_suffix", "调参")
+        exit_config = copy.deepcopy(source.exit_config or {})
+        if cfg.get("exit_config"):
+            exit_config.update(cfg["exit_config"])
+        # Normalize stop_loss_pct
+        if "stop_loss_pct" in exit_config and exit_config["stop_loss_pct"] is not None:
+            exit_config["stop_loss_pct"] = -abs(exit_config["stop_loss_pct"])
+
+        cloned = ExperimentStrategy(
+            experiment_id=exp.id,
+            name=f"{source.name}_{suffix}",
+            description=f"批量克隆自 {source.name}, exit_config={json.dumps(exit_config)}",
+            buy_conditions=copy.deepcopy(source.buy_conditions),
+            sell_conditions=copy.deepcopy(source.sell_conditions),
+            exit_config=exit_config,
+            status="pending",
+        )
+        db.add(cloned)
+        db.flush()
+        cloned_ids.append(cloned.id)
+
+    db.commit()
+    exp_id = exp.id
+
+    # Run batch backtest in background thread
+    def _run_batch():
+        from api.models.base import SessionLocal
+        from api.services.ai_lab_engine import AILabEngine, _BACKTEST_SEMAPHORE, _compute_score
+        from src.backtest.portfolio_engine import PortfolioBacktestEngine
+        from src.backtest.vectorized_signals import vectorize_conditions
+
+        _BACKTEST_SEMAPHORE.acquire()
+        session = SessionLocal()
+        try:
+            engine = AILabEngine(session)
+            experiment = session.query(Experiment).get(exp_id)
+
+            # ── Load data ONCE ──
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            start_date = (datetime.now() - timedelta(days=3 * 365)).strftime("%Y-%m-%d")
+            stock_codes = engine.collector.get_stocks_with_data(min_rows=60)
+            stock_data = {}
+            for code in stock_codes:
+                df = engine.collector.get_daily_df(code, start_date, end_date, local_only=True)
+                if df is not None and not df.empty and len(df) >= 60:
+                    stock_data[code] = df
+
+            if not stock_data:
+                for sid in cloned_ids:
+                    s = session.query(ExperimentStrategy).get(sid)
+                    if s:
+                        s.status = "failed"
+                        s.error_message = "No stock data available"
+                experiment.status = "failed"
+                session.commit()
+                return
+
+            # Get regime map
+            from api.services.regime_service import ensure_regimes, get_regime_map, get_regime_summary
+            ensure_regimes(session, start_date, end_date)
+            regime_map = get_regime_map(session, start_date, end_date)
+            summary = get_regime_summary(session, start_date, end_date)
+            index_return_pct = summary.get("total_index_return_pct", 0.0)
+
+            # ── Prepare data ONCE for all cloned strategies ──
+            from src.backtest.portfolio_engine import PortfolioBacktestEngine, SignalExplosionError, BacktestTimeoutError
+
+            pe = PortfolioBacktestEngine(
+                initial_capital=req.initial_capital,
+                max_positions=req.max_positions,
+                max_position_pct=req.max_position_pct,
+            )
+
+            # Build strategy dict from source for prepare_data
+            source_strat = session.query(ExperimentStrategy).get(strategy_id)
+            strategy_dict = {
+                "buy_conditions": source_strat.buy_conditions or [],
+                "sell_conditions": source_strat.sell_conditions or [],
+            }
+
+            import time as _time
+            t0 = _time.time()
+            precomputed = pe.prepare_data(strategy_dict, stock_data)
+            prep_time = _time.time() - t0
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "Batch prepare_data: %d stocks, %.1fs", len(stock_data), prep_time
+            )
+
+            if not precomputed["prepared"]:
+                for sid in cloned_ids:
+                    s = session.query(ExperimentStrategy).get(sid)
+                    if s:
+                        s.status = "failed"
+                        s.error_message = "No prepared data after indicator computation"
+                experiment.status = "failed"
+                session.commit()
+                return
+
+            # ── Run Phase 3 for each exit_config using shared data ──
+            for i, sid in enumerate(cloned_ids):
+                strat = session.query(ExperimentStrategy).get(sid)
+                if not strat:
+                    continue
+                try:
+                    strat.status = "backtesting"
+                    session.commit()
+
+                    exit_cfg = strat.exit_config or {}
+                    cancel_event = threading.Event()
+                    timer = threading.Timer(300, cancel_event.set)
+                    timer.daemon = True
+                    timer.start()
+
+                    try:
+                        result = pe.run_with_prepared(
+                            strategy_name=strat.name,
+                            exit_config=exit_cfg,
+                            precomputed=precomputed,
+                            regime_map=regime_map,
+                            cancel_event=cancel_event,
+                        )
+                    except (SignalExplosionError, BacktestTimeoutError) as e:
+                        strat.status = "invalid"
+                        strat.error_message = str(e)[:500]
+                        strat.score = 0.0
+                        session.commit()
+                        continue
+                    finally:
+                        timer.cancel()
+
+                    # Score the result
+                    strat.total_trades = result.total_trades
+                    strat.win_rate = result.win_rate
+                    strat.total_return_pct = result.total_return_pct
+                    strat.max_drawdown_pct = result.max_drawdown_pct
+                    strat.avg_hold_days = result.avg_hold_days
+                    strat.avg_pnl_pct = result.avg_pnl_pct
+                    strat.regime_stats = result.regime_stats if result.regime_stats else None
+
+                    if result.total_trades == 0:
+                        strat.score = 0.0
+                        strat.status = "invalid"
+                        strat.error_message = "零交易"
+                    else:
+                        from api.config import get_settings
+                        lab_cfg = get_settings().ai_lab
+                        weights = {
+                            "weight_return": lab_cfg.weight_return,
+                            "weight_drawdown": lab_cfg.weight_drawdown,
+                            "weight_sharpe": lab_cfg.weight_sharpe,
+                            "weight_plr": lab_cfg.weight_plr,
+                        }
+                        strat.score = round(_compute_score(result, weights), 4)
+                        strat.status = "done"
+
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    strat.status = "failed"
+                    strat.error_message = str(e)[:500]
+                session.commit()
+
+            experiment.status = "done"
+            session.commit()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                exp_obj = session.query(Experiment).get(exp_id)
+                if exp_obj:
+                    exp_obj.status = "failed"
+                session.commit()
+            except Exception:
+                session.rollback()
+        finally:
+            _BACKTEST_SEMAPHORE.release()
+            session.close()
+
+    threading.Thread(target=_run_batch, daemon=True).start()
+
+    return {
+        "message": f"Batch clone created: {n} strategies, backtest started",
+        "experiment_id": exp.id,
+        "strategy_ids": cloned_ids,
+        "count": n,
     }
 
 

@@ -107,29 +107,14 @@ def create_collector_manager(config) -> CollectorManager:
         配置好的CollectorManager
     """
     from src.data_collector.tushare_collector import TuShareCollector
-    from src.data_collector.akshare_collector import AkShareCollector
 
-    # 创建主数据源
-    primary_source = config.get("collector.primary_source", "tushare")
+    # 创建主数据源 (TuShare only — TDX fallback handled in api/services/data_collector.py)
+    token = config.get("tushare.token")
+    if not token:
+        raise ValueError("TuShare token未配置")
+    primary = TuShareCollector(
+        token=token,
+        request_interval=config.get("collector.request_interval", 0.3),
+    )
 
-    if primary_source == "tushare":
-        token = config.get("tushare.token")
-        if not token:
-            raise ValueError("TuShare token未配置")
-        primary = TuShareCollector(
-            token=token,
-            request_interval=config.get("collector.request_interval", 0.3),
-        )
-    else:
-        primary = AkShareCollector()
-
-    # 创建备用数据源
-    fallbacks = []
-    fallback_sources = config.get("collector.fallback_sources", [])
-
-    for source in fallback_sources:
-        if source == "akshare" and primary_source != "akshare":
-            fallbacks.append(AkShareCollector())
-        # baostock暂不实现，可后续添加
-
-    return CollectorManager(primary=primary, fallbacks=fallbacks)
+    return CollectorManager(primary=primary, fallbacks=[])

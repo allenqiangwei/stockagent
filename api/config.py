@@ -15,7 +15,7 @@ class DataSourceConfig(BaseModel):
     tushare_token: str = ""
     fallback_enabled: bool = True
     request_interval: float = 0.3
-    # Per-category data source preference: "tushare" | "akshare"
+    # Per-category data source preference: "tushare" | "tdx"
     realtime_quotes: str = "tushare"
     historical_daily: str = "tushare"
     index_data: str = "tushare"
@@ -62,13 +62,15 @@ def get_settings() -> Settings:
         with open(config_path, "r", encoding="utf-8") as f:
             yaml_data = yaml.safe_load(f) or {}
 
-    # Database path
-    db_path = yaml_data.get("storage", {}).get(
-        "database_path", "data/stockagent.db"
-    )
-    abs_db_path = (_PROJECT_ROOT / db_path).resolve()
-    abs_db_path.parent.mkdir(parents=True, exist_ok=True)
-    db_url = f"sqlite:///{abs_db_path}"
+    # Database URL: prefer database_url (PostgreSQL), fallback to database_path (SQLite)
+    db_url = yaml_data.get("storage", {}).get("database_url", "")
+    if not db_url:
+        db_path = yaml_data.get("storage", {}).get(
+            "database_path", "data/stockagent.db"
+        )
+        abs_db_path = (_PROJECT_ROOT / db_path).resolve()
+        abs_db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_url = f"sqlite:///{abs_db_path}"
 
     # TuShare token (yaml → env override)
     ts_token = (

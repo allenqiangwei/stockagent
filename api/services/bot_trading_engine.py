@@ -1,13 +1,18 @@
-"""Bot Trading Engine — executes simulated trades from AI report recommendations."""
+"""Bot Trading Engine — executes simulated trades from AI report recommendations.
 
+Includes mechanical exit monitoring (SL/TP/MHD) consistent with the backtest engine.
+"""
+
+import json as _json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, date as _date
 
 from sqlalchemy.orm import Session
 
 from api.models.bot_trading import BotPortfolio, BotTrade, BotTradeReview, BotTradePlan
 from api.models.stock import DailyPrice
+from src.backtest.engine import calc_limit_prices
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +58,140 @@ def _get_prev_close(db: Session, stock_code: str, report_date: str) -> float | N
         .first()
     )
     return round(row.close, 2) if row and row.close else None
+
+
+def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:
+    """Check all holdings for SL/TP/MHD exit conditions, matching backtest engine logic.
+
+    Execution order: SL > TP > MHD (same as backtest).
+    SL/TP: same-day execution (simulates stop/limit orders).
+    MHD: creates pending sell plan for next trading day.
+    """
+    holdings = db.query(BotPortfolio).all()
+    results = []
+
+    for h in holdings:
+        if not h.exit_config or h.quantity <= 0:
+            continue
+
+        ec = h.exit_config
+        if isinstance(ec, str):
+            try:
+                ec = _json.loads(ec)
+            except (_json.JSONDecodeError, ValueError):
+                continue
+        sl_pct = ec.get("stop_loss_pct", 0)
+        tp_pct = ec.get("take_profit_pct", 0)
+        mhd = ec.get("max_hold_days", 0)
+        ref_price = h.buy_price or h.avg_cost
+
+        # Get today's OHLCV
+        ohlcv = db.query(DailyPrice).filter(
+            DailyPrice.stock_code == h.stock_code,
+            DailyPrice.trade_date == trade_date,
+        ).first()
+        if not ohlcv:
+            continue
+
+        open_p = float(ohlcv.open)
+        high = float(ohlcv.high)
+        low = float(ohlcv.low)
+
+        # Previous close for limit prices
+        prev_row = (
+            db.query(DailyPrice)
+            .filter(DailyPrice.stock_code == h.stock_code, DailyPrice.trade_date < trade_date)
+            .order_by(DailyPrice.trade_date.desc())
+            .first()
+        )
+        if not prev_row:
+            continue
+        limit_up, limit_down = calc_limit_prices(h.stock_code, float(prev_row.close))
+
+        # T+1: cannot sell stocks bought today
+        bought_today = db.query(BotTrade).filter(
+            BotTrade.stock_code == h.stock_code,
+            BotTrade.action == "buy",
+            BotTrade.trade_date == trade_date,
+        ).first()
+        if bought_today:
+            continue
+
+        # ── SL check ──
+        if sl_pct and sl_pct < 0:
+            sl_threshold = round(ref_price * (1 + sl_pct / 100), 2)
+            if open_p <= sl_threshold:
+                sell_price = max(open_p, limit_down)
+                if sell_price > limit_down or open_p > limit_down:
+                    result = _execute_sell(
+                        db, h.stock_code, h.stock_name, sell_price, 100.0,
+                        f"止损触发(跳空): 阈值¥{sl_threshold}, 开盘¥{open_p}",
+                        None, trade_date, sell_reason="stop_loss",
+                    )
+                    if result:
+                        results.append(result)
+                    continue
+            elif low <= sl_threshold:
+                sell_price = max(sl_threshold, limit_down)
+                result = _execute_sell(
+                    db, h.stock_code, h.stock_name, sell_price, 100.0,
+                    f"止损触发: 阈值¥{sl_threshold}, 日低¥{low}",
+                    None, trade_date, sell_reason="stop_loss",
+                )
+                if result:
+                    results.append(result)
+                continue
+
+        # ── TP check ──
+        if tp_pct and tp_pct > 0:
+            tp_threshold = round(ref_price * (1 + tp_pct / 100), 2)
+            if open_p >= tp_threshold:
+                sell_price = min(open_p, limit_up)
+                result = _execute_sell(
+                    db, h.stock_code, h.stock_name, sell_price, 100.0,
+                    f"止盈触发(跳空): 阈值¥{tp_threshold}, 开盘¥{open_p}",
+                    None, trade_date, sell_reason="take_profit",
+                )
+                if result:
+                    results.append(result)
+                continue
+            elif high >= tp_threshold:
+                sell_price = min(tp_threshold, limit_up)
+                result = _execute_sell(
+                    db, h.stock_code, h.stock_name, sell_price, 100.0,
+                    f"止盈触发: 阈值¥{tp_threshold}, 日高¥{high}",
+                    None, trade_date, sell_reason="take_profit",
+                )
+                if result:
+                    results.append(result)
+                continue
+
+        # ── MHD check ──
+        if mhd and mhd > 0 and h.buy_date:
+            try:
+                buy_d = _date.fromisoformat(h.buy_date)
+                today_d = _date.fromisoformat(trade_date)
+                hold_days = (today_d - buy_d).days
+            except ValueError:
+                continue
+            if hold_days >= mhd:
+                next_td = _get_next_trading_day(db, trade_date)
+                if next_td:
+                    _upsert_plan(
+                        db, h.stock_code, h.stock_name, "sell",
+                        float(ohlcv.close), h.quantity, 100.0, next_td,
+                        f"最长持有{mhd}天到期(已持有{hold_days}天)",
+                        None, source="max_hold",
+                    )
+                    results.append({
+                        "action": "max_hold_plan", "stock_code": h.stock_code,
+                        "hold_days": hold_days, "plan_date": next_td,
+                    })
+
+    if results:
+        db.commit()
+        logger.info("Exit monitor: %d actions for %s", len(results), trade_date)
+    return results
 
 
 def create_trade_plans(db: Session, report_id: int, report_date: str, recommendations: list[dict]) -> list[dict]:
@@ -120,7 +259,8 @@ def create_trade_plans(db: Session, report_id: int, report_date: str, recommenda
 
 def _upsert_plan(db: Session, code: str, name: str, direction: str,
                  price: float, quantity: int, sell_pct: float,
-                 plan_date: str, thinking: str, report_id: int) -> dict:
+                 plan_date: str, thinking: str, report_id: int | None,
+                 *, source: str = "ai", strategy_id: int | None = None) -> dict:
     """Insert or update a pending trade plan. One pending plan per stock+direction."""
     existing = (
         db.query(BotTradePlan)
@@ -140,7 +280,10 @@ def _upsert_plan(db: Session, code: str, name: str, direction: str,
         existing.thinking = thinking
         existing.report_id = report_id
         existing.stock_name = name
-        logger.info("Plan UPDATED: %s %s %s @ ¥%.2f for %s", direction.upper(), code, name, price, plan_date)
+        existing.source = source
+        if strategy_id is not None:
+            existing.strategy_id = strategy_id
+        logger.info("Plan UPDATED: %s %s %s @ ¥%.2f for %s [%s]", direction.upper(), code, name, price, plan_date, source)
         return {"action": "plan_updated", "direction": direction, "stock_code": code,
                 "plan_price": price, "quantity": quantity, "plan_date": plan_date}
     else:
@@ -149,9 +292,10 @@ def _upsert_plan(db: Session, code: str, name: str, direction: str,
             plan_price=price, quantity=quantity, sell_pct=sell_pct,
             plan_date=plan_date, status="pending",
             thinking=thinking, report_id=report_id,
+            source=source, strategy_id=strategy_id,
         )
         db.add(plan)
-        logger.info("Plan CREATED: %s %s %s @ ¥%.2f for %s", direction.upper(), code, name, price, plan_date)
+        logger.info("Plan CREATED: %s %s %s @ ¥%.2f for %s [%s]", direction.upper(), code, name, price, plan_date, source)
         return {"action": "plan_created", "direction": direction, "stock_code": code,
                 "plan_price": price, "quantity": quantity, "plan_date": plan_date}
 
@@ -211,6 +355,7 @@ def execute_pending_plans(db: Session, trade_date: str) -> list[dict]:
 
         high = float(ohlcv.high)
         low = float(ohlcv.low)
+        open_price = float(ohlcv.open)
 
         if plan.direction == "buy":
             triggered = low <= plan.plan_price
@@ -218,10 +363,24 @@ def execute_pending_plans(db: Session, trade_date: str) -> list[dict]:
             triggered = high >= plan.plan_price
 
         if triggered:
+            # Limit-order fill price: buy fills at min(limit, open), sell at max(limit, open)
             if plan.direction == "buy":
+                exec_price = min(plan.plan_price, open_price)
+            else:
+                exec_price = max(plan.plan_price, open_price)
+
+            if plan.direction == "buy":
+                # Resolve exit_config from strategy if available
+                buy_exit_config = None
+                if plan.strategy_id:
+                    from api.models.strategy import Strategy
+                    strat = db.query(Strategy).filter(Strategy.id == plan.strategy_id).first()
+                    if strat and strat.exit_config:
+                        buy_exit_config = strat.exit_config
                 result = _execute_buy(
-                    db, plan.stock_code, plan.stock_name, plan.plan_price,
+                    db, plan.stock_code, plan.stock_name, exec_price,
                     plan.thinking, plan.report_id, trade_date,
+                    strategy_id=plan.strategy_id, exit_config=buy_exit_config,
                 )
             else:
                 # Re-check holding quantity (may have changed since plan creation)
@@ -233,17 +392,19 @@ def execute_pending_plans(db: Session, trade_date: str) -> list[dict]:
                 actual_sell_pct = plan.sell_pct
                 if plan.quantity > holding.quantity:
                     actual_sell_pct = 100.0  # Sell whatever is left
+                sell_reason = plan.source if plan.source != "ai" else "ai_recommend"
                 result = _execute_sell(
-                    db, plan.stock_code, plan.stock_name, plan.plan_price,
+                    db, plan.stock_code, plan.stock_name, exec_price,
                     actual_sell_pct, plan.thinking, plan.report_id, trade_date,
+                    sell_reason=sell_reason,
                 )
 
             if result:
                 plan.status = "executed"
                 plan.executed_at = datetime.now()
-                plan.execution_price = plan.plan_price
+                plan.execution_price = exec_price
                 executed.append(result)
-                logger.info("Plan EXECUTED: %s %s %s @ ¥%.2f", plan.direction, plan.stock_code, plan.stock_name, plan.plan_price)
+                logger.info("Plan EXECUTED: %s %s %s @ ¥%.2f (plan=%.2f, open=%.2f)", plan.direction, plan.stock_code, plan.stock_name, exec_price, plan.plan_price, open_price)
             else:
                 plan.status = "expired"
                 logger.info("Plan EXPIRED (exec failed): %s %s %s", plan.direction, plan.stock_code, plan.stock_name)
@@ -257,7 +418,9 @@ def execute_pending_plans(db: Session, trade_date: str) -> list[dict]:
     return executed
 
 
-def _execute_buy(db: Session, code: str, name: str, price: float | None, reason: str, report_id: int, trade_date: str) -> dict | None:
+def _execute_buy(db: Session, code: str, name: str, price: float | None, reason: str,
+                 report_id: int | None, trade_date: str,
+                 *, strategy_id: int | None = None, exit_config: dict | None = None) -> dict | None:
     """Buy ~¥100,000 worth of stock."""
     if not price or price <= 0:
         logger.warning("Bot buy skipped: no valid target_price for %s", code)
@@ -279,10 +442,24 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
 
     amount = quantity * price
 
+    # Resolve strategy name if strategy_id provided
+    strat_name = None
+    if strategy_id:
+        from api.models.strategy import Strategy
+        strat = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+        if strat:
+            strat_name = strat.name
+            if not exit_config and strat.exit_config:
+                exit_config = strat.exit_config
+
+    # Default exit_config if none provided
+    if not exit_config:
+        exit_config = {"stop_loss_pct": -10, "take_profit_pct": 15, "max_hold_days": 15}
+
     # Update or create portfolio entry
     holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == code).first()
     if holding:
-        # Average up: recalculate avg_cost
+        # Average up: recalculate avg_cost (don't overwrite exit_config from first buy)
         total_cost = holding.avg_cost * holding.quantity + amount
         holding.quantity += quantity
         holding.avg_cost = total_cost / holding.quantity
@@ -295,6 +472,11 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
             avg_cost=price,
             total_invested=amount,
             first_buy_date=trade_date,
+            strategy_id=strategy_id,
+            strategy_name=strat_name,
+            exit_config=exit_config,
+            buy_price=price,
+            buy_date=trade_date,
         )
         db.add(holding)
 
@@ -312,11 +494,13 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
     )
     db.add(trade)
 
-    logger.info("Bot BUY: %s %s × %d @ ¥%.2f = ¥%.0f", code, name, quantity, price, amount)
+    logger.info("Bot BUY: %s %s × %d @ ¥%.2f = ¥%.0f (strategy=%s)", code, name, quantity, price, amount, strat_name or "none")
     return {"action": "buy", "stock_code": code, "quantity": quantity, "price": price, "amount": amount}
 
 
-def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_pct: float, reason: str, report_id: int, trade_date: str) -> dict | None:
+def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_pct: float,
+                  reason: str, report_id: int | None, trade_date: str,
+                  *, sell_reason: str | None = None) -> dict | None:
     """Sell a percentage of holdings. sell_pct=100 means full exit."""
     holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == code).first()
     if not holding or holding.quantity <= 0:
@@ -356,6 +540,7 @@ def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_p
         thinking=reason,
         report_id=report_id,
         trade_date=trade_date,
+        sell_reason=sell_reason or "ai_recommend",
     )
     db.add(trade)
 
@@ -363,10 +548,9 @@ def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_p
     holding.quantity -= sell_qty
     fully_exited = holding.quantity <= 0
 
-    logger.info("Bot %s: %s %s × %d @ ¥%.2f = ¥%.0f", action.upper(), code, name, sell_qty, price, amount)
+    logger.info("Bot %s: %s %s × %d @ ¥%.2f = ¥%.0f [%s]", action.upper(), code, name, sell_qty, price, amount, sell_reason or "ai")
 
     if fully_exited:
-        # Trigger review (sync for now, async later)
         _create_review(db, code, name, trade_date)
         db.delete(holding)
 
@@ -453,4 +637,12 @@ def _create_review(db: Session, code: str, name: str, last_sell_date: str):
         trades=trades_snapshot,
     )
     db.add(review)
+    db.flush()  # Ensure review.id is available for beta review
     logger.info("Bot review created: %s %s, PnL=¥%.2f (%.1f%%)", code, name, pnl, pnl_pct)
+
+    # Create structured beta factor review (non-blocking)
+    try:
+        from api.services.beta_engine import create_beta_review
+        create_beta_review(db, review)
+    except Exception as e:
+        logger.warning("Beta review creation failed for %s: %s", code, e)

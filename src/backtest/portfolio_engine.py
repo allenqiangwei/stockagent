@@ -7,7 +7,9 @@ when buy signals exceed available slots.
 
 import math
 import logging
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any
 
@@ -16,7 +18,8 @@ import pandas as pd
 
 from src.signals.rule_engine import evaluate_conditions, collect_indicator_params
 from src.indicators.indicator_calculator import IndicatorCalculator, IndicatorConfig
-from src.backtest.engine import Trade
+from src.backtest.engine import Trade, calc_limit_prices
+from src.backtest.vectorized_signals import vectorize_conditions
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +98,13 @@ class PortfolioBacktestEngine:
         max_positions: int = 10,
         position_sizing: str = "equal_weight",
         max_position_pct: float = 30.0,
+        slippage_pct: float = 0.1,
     ):
         self.initial_capital = initial_capital
         self.max_positions = max_positions
         self.position_sizing = position_sizing
         self.max_position_pct = max_position_pct  # max single stock weight %
+        self.slippage_pct = slippage_pct
 
     def run(
         self,
@@ -181,13 +186,11 @@ class PortfolioBacktestEngine:
         prepared: Dict[str, pd.DataFrame] = {}
         total_stocks = len(stock_data)
 
-        for idx, (code, df) in enumerate(stock_data.items(), 1):
-            if progress_callback:
-                progress_callback(idx, total_stocks, f"计算指标: {code}")
-
+        # Parallel indicator computation (pandas releases GIL)
+        def _compute_one(args):
+            code, df = args
             if df is None or df.empty or len(df) < 2:
-                continue
-
+                return code, None
             indicators = calculator.calculate_all(df)
             df_full = pd.concat(
                 [df.reset_index(drop=True), indicators.reset_index(drop=True)],
@@ -195,16 +198,16 @@ class PortfolioBacktestEngine:
             )
             if "date" in df_full.columns:
                 df_full["date"] = pd.to_datetime(df_full["date"]).dt.strftime("%Y-%m-%d")
-            # Debug: log extended indicator columns for first stock
-            if idx == 1 and config.extended:
-                ext_cols = [c for c in df_full.columns if any(
-                    c.startswith(g.upper()) for g in config.extended
-                )]
-                logger.info(
-                    "Portfolio debug: stock=%s, extended_config=%s, ext_cols=%s, total_cols=%d",
-                    code, config.extended, ext_cols, len(df_full.columns),
-                )
-            prepared[code] = df_full
+            return code, df_full
+
+        n_workers = min(8, os.cpu_count() or 4)
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            results = pool.map(_compute_one, stock_data.items())
+            for idx, (code, df_full) in enumerate(results, 1):
+                if progress_callback and idx % 100 == 0:
+                    progress_callback(idx, total_stocks, f"计算指标: {code}")
+                if df_full is not None:
+                    prepared[code] = df_full
 
         if not prepared:
             return PortfolioBacktestResult(
@@ -238,19 +241,68 @@ class PortfolioBacktestEngine:
                 max_positions=self.max_positions,
             )
 
-        # ── Phase 3: Day-by-day simulation ──
+        # ── Phase 2b: Pre-compute vectorized buy/sell signals ──
+        # For non-combo strategies, replace per-row evaluate_conditions with
+        # one-shot vectorized computation. Combo strategies still use per-row.
+        buy_signal_map: Dict[str, np.ndarray] = {}
+        sell_signal_map: Dict[str, np.ndarray] = {}
+
+        if not is_combo:
+            def _vectorize_buy(args):
+                code, df_full = args
+                return code, vectorize_conditions(buy_conditions, df_full, mode="AND")
+
+            def _vectorize_sell(args):
+                code, df_full = args
+                if sell_conditions:
+                    return code, vectorize_conditions(sell_conditions, df_full, mode="OR")
+                return code, np.zeros(len(df_full), dtype=bool)
+
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                buy_signal_map = dict(pool.map(_vectorize_buy, prepared.items()))
+                sell_signal_map = dict(pool.map(_vectorize_sell, prepared.items()))
+
+            # T+1 信号偏移: signal[T] 的意图在 T+1 执行
+            for code in buy_signal_map:
+                arr = buy_signal_map[code]
+                shifted = np.zeros_like(arr)
+                shifted[1:] = arr[:-1]
+                buy_signal_map[code] = shifted
+
+            for code in sell_signal_map:
+                arr = sell_signal_map[code]
+                shifted = np.zeros_like(arr)
+                shifted[1:] = arr[:-1]
+                sell_signal_map[code] = shifted
+
+            logger.info(
+                "Vectorized signals (T+1 shifted): %d stocks, buy_signals=%d total, sell_signals=%d total",
+                len(buy_signal_map),
+                sum(v.sum() for v in buy_signal_map.values()),
+                sum(v.sum() for v in sell_signal_map.values()),
+            )
+
+        # ── Phase 3: Day-by-day simulation (T+1 execution model) ──
+        # 信号已偏移1天: signal[T+1] = original[T]，以 T+1 开盘价执行。
+        # SL/TP 为挂单，日内触发立即执行。Max hold → pending sell。
         cash = self.initial_capital
         positions: Dict[str, Position] = {}  # stock_code → Position
         trades: List[Trade] = []
         equity_curve: List[dict] = []
         held_codes: set[str] = set()
-        # Signal explosion detection: track candidate counts in early days
+        slippage = self.slippage_pct
+        # Max hold pending sells (code → reason), retried on limit-down
+        pending_max_hold_sells: Dict[str, str] = {}
+        # Combo pending (not vectorized)
+        pending_combo_buys: set[str] = set()
+        pending_combo_sells: Dict[str, str] = {}
+        # Signal explosion detection
         _early_candidate_counts: List[int] = []
-        _recent_candidate_counts: List[int] = []  # rolling window for periodic checks
+        _recent_candidate_counts: List[int] = []
         _EXPLOSION_CHECK_DAYS = 10
-        _EXPLOSION_THRESHOLD = 500  # avg candidates/day (early check)
-        _PERIODIC_CHECK_INTERVAL = 50  # re-check every N days
-        _PERIODIC_THRESHOLD = 300  # avg candidates/day (periodic check)
+        _EXPLOSION_THRESHOLD = 500
+        _PERIODIC_CHECK_INTERVAL = 50
+        _PERIODIC_THRESHOLD = 300
 
         for day_idx, current_date in enumerate(sorted_dates):
             # ── Timeout check ──
@@ -266,52 +318,78 @@ class PortfolioBacktestEngine:
                     f"模拟交易: {current_date} ({day_idx}/{len(sorted_dates)})",
                 )
 
-            # ── 3a: Check sells for existing positions ──
-            codes_to_sell: List[tuple[str, str]] = []  # (code, reason)
+            # ── 3a: Execute pending sells + check SL/TP + check signals ──
+            codes_to_sell: List[tuple] = []  # (code, reason, price_override)
 
             for code, pos in list(positions.items()):
                 if code not in stock_date_idx or current_date not in stock_date_idx[code]:
-                    # No data today (halted / missing) — still count the day
                     pos.hold_days += 1
                     continue
 
                 row_idx = stock_date_idx[code][current_date]
                 df_stock = prepared[code]
                 row = df_stock.iloc[row_idx]
+                open_p = float(row.get("open", row["close"]))
                 close = float(row["close"])
                 low = float(row.get("low", close))
                 high = float(row.get("high", close))
                 pos.hold_days += 1
 
+                # Calculate limit prices from previous close
+                prev_close_val = close  # fallback
+                if row_idx > 0:
+                    prev_close_val = float(df_stock.iloc[row_idx - 1]["close"])
+                limit_up, limit_down = calc_limit_prices(code, prev_close_val)
+
                 sell_reason = None
-                sell_price_override = None  # use threshold price for SL/TP
+                sell_price_override = None
 
-                # 1) Stop loss — use intraday low
-                if stop_loss_pct is not None:
+                # ── Priority 0: Execute pending sell at open ──
+                if code in pending_max_hold_sells:
+                    if open_p >= limit_down:  # Fix#4: >= 允许跌停价成交
+                        sell_reason = pending_max_hold_sells.pop(code)
+                        sell_price_override = max(open_p * (1 - slippage / 100), limit_down)
+                    else:
+                        # 跌停，下一天重试
+                        continue
+                elif code in pending_combo_sells:
+                    if open_p >= limit_down:  # Fix#4
+                        sell_reason = pending_combo_sells.pop(code)
+                        sell_price_override = max(open_p * (1 - slippage / 100), limit_down)
+                    else:
+                        continue
+
+                # ── Priority 1: Stop loss — intraday, gap-aware ──
+                if sell_reason is None and stop_loss_pct is not None:
                     loss_threshold = pos.buy_price * (1 + stop_loss_pct / 100)
-                    if low <= loss_threshold:
+                    if open_p <= loss_threshold:
+                        # 跳空低开触发止损
+                        if open_p >= limit_down:  # Fix#6: 跌停检查
+                            sell_reason = "stop_loss"
+                            sell_price_override = max(open_p * (1 - slippage / 100), limit_down)
+                        else:
+                            # 跌停无法成交，转 pending 下一天重试
+                            pending_max_hold_sells[code] = "stop_loss"
+                    elif low <= loss_threshold:
+                        # 日内触发止损
                         sell_reason = "stop_loss"
-                        # Sell at threshold price (simulating stop order)
-                        sell_price_override = min(loss_threshold, close)
+                        sell_price_override = max(loss_threshold * (1 - slippage / 100), limit_down)
 
-                # 2) Take profit — use intraday high
-                if sell_reason is None and take_profit_pct is not None:
+                # ── Priority 2: Take profit — intraday, gap-aware ──
+                if sell_reason is None and take_profit_pct is not None and code not in pending_max_hold_sells:
                     profit_threshold = pos.buy_price * (1 + take_profit_pct / 100)
-                    if high >= profit_threshold:
+                    if open_p >= profit_threshold:
                         sell_reason = "take_profit"
-                        # Sell at threshold price (simulating limit order)
-                        sell_price_override = max(profit_threshold, close)
+                        sell_price_override = max(open_p * (1 - slippage / 100), limit_down)  # Fix#5: 卖出不低于跌停
+                    elif high >= profit_threshold:
+                        sell_reason = "take_profit"
+                        sell_price_override = max(profit_threshold * (1 - slippage / 100), limit_down)  # Fix#5
 
-                # 3) Max hold days
-                if sell_reason is None and max_hold_days is not None:
-                    if pos.hold_days >= max_hold_days:
-                        sell_reason = "max_hold"
-
-                # 4) Strategy sell conditions
-                if sell_reason is None:
-                    df_slice = df_stock.iloc[: row_idx + 1]
+                # ── Priority 3: Strategy exit (shifted signal) → sell at open ──
+                if sell_reason is None and code not in pending_max_hold_sells:
                     if is_combo and member_strategies:
-                        # Combo sell: evaluate each member's sell conditions (short-circuit P18)
+                        # Combo sell: evaluate → pending for next day
+                        df_slice = df_stock.iloc[: row_idx + 1]
                         sell_votes = 0
                         for m in member_strategies:
                             m_sell = m.get("sell_conditions", [])
@@ -319,19 +397,35 @@ class PortfolioBacktestEngine:
                                 triggered, _ = evaluate_conditions(m_sell, df_slice, mode="OR")
                                 if triggered:
                                     sell_votes += 1
-                            # Short-circuit: stop early when outcome is determined
                             if combo_sell_mode == "any" and sell_votes > 0:
                                 break
                             if combo_sell_mode == "majority" and sell_votes > len(member_strategies) / 2:
                                 break
-                        if combo_sell_mode == "any" and sell_votes > 0:
-                            sell_reason = "strategy_exit"
-                        elif combo_sell_mode == "majority" and sell_votes > len(member_strategies) / 2:
-                            sell_reason = "strategy_exit"
+                        combo_sell_triggered = (
+                            (combo_sell_mode == "any" and sell_votes > 0)
+                            or (combo_sell_mode == "majority" and sell_votes > len(member_strategies) / 2)
+                        )
+                        if combo_sell_triggered:
+                            pending_combo_sells[code] = "strategy_exit"
                     elif sell_conditions:
-                        triggered, _ = evaluate_conditions(sell_conditions, df_slice, mode="OR")
-                        if triggered:
-                            sell_reason = "strategy_exit"
+                        # Vectorized sell signal (already shifted T+1) → sell at open
+                        sell_vec = sell_signal_map.get(code)
+                        if sell_vec is not None and row_idx < len(sell_vec) and sell_vec[row_idx]:
+                            if open_p >= limit_down:  # Fix#4
+                                sell_reason = "strategy_exit"
+                                sell_price_override = max(open_p * (1 - slippage / 100), limit_down)
+                            else:
+                                pending_max_hold_sells[code] = "strategy_exit"  # Fix#7: 跌停重试
+                        elif sell_vec is None:
+                            df_slice = df_stock.iloc[: row_idx + 1]
+                            triggered, _ = evaluate_conditions(sell_conditions, df_slice, mode="OR")
+                            if triggered:
+                                pending_combo_sells[code] = "strategy_exit"
+
+                # ── Priority 4: Max hold days → pending sell for next day ──
+                if sell_reason is None and code not in pending_max_hold_sells:
+                    if max_hold_days is not None and pos.hold_days >= max_hold_days:
+                        pending_max_hold_sells[code] = "max_hold"
 
                 if sell_reason:
                     codes_to_sell.append((code, sell_reason, sell_price_override))
@@ -359,11 +453,19 @@ class PortfolioBacktestEngine:
                     regime=regime_map.get(pos.buy_date, "") if regime_map else "",
                 ))
 
+            # Clean up pending sells for positions that were sold
+            for code in list(pending_max_hold_sells):
+                if code not in positions:
+                    pending_max_hold_sells.pop(code, None)
+            for code in list(pending_combo_sells):
+                if code not in positions:
+                    pending_combo_sells.pop(code, None)
+
             # ── 3b: Scan for buy signals on non-held stocks ──
             open_slots = self.max_positions - len(positions)
             has_buy_logic = buy_conditions if not is_combo else member_strategies
             if open_slots > 0 and has_buy_logic:
-                candidates: List[tuple[str, float]] = []  # (code, close_price)
+                candidates: List[tuple[str, float]] = []  # (code, buy_price)
 
                 for code, df_stock in prepared.items():
                     if code in held_codes:
@@ -373,39 +475,59 @@ class PortfolioBacktestEngine:
 
                     row_idx = stock_date_idx[code][current_date]
                     if row_idx < 1:
-                        continue  # Need at least 1 prior day
-
-                    df_slice = df_stock.iloc[: row_idx + 1]
+                        continue
 
                     if is_combo and member_strategies:
-                        # Combo buy: vote across member strategies (short-circuit P18)
-                        buy_votes = 0
-                        weighted_score = 0.0
-                        for m in member_strategies:
-                            m_buy = m.get("buy_conditions", [])
-                            if m_buy:
-                                triggered, _ = evaluate_conditions(m_buy, df_slice, mode="AND")
-                                if triggered:
-                                    buy_votes += 1
-                                    weighted_score += m.get("weight", 1.0)
-                            # Short-circuit once threshold met
-                            if combo_weight_mode == "equal" and buy_votes >= combo_vote_threshold:
-                                break
-                            if combo_weight_mode != "equal" and weighted_score >= combo_score_threshold:
-                                break
-
-                        if combo_weight_mode == "equal":
-                            buy_signal = buy_votes >= combo_vote_threshold
-                        else:  # score_weighted
-                            buy_signal = weighted_score >= combo_score_threshold
+                        # Combo: check if pending buy from yesterday
+                        if code in pending_combo_buys:
+                            pending_combo_buys.discard(code)
+                            open_p = float(df_stock.iloc[row_idx].get("open", df_stock.iloc[row_idx]["close"]))
+                            prev_c = float(df_stock.iloc[row_idx - 1]["close"])
+                            lu, _ = calc_limit_prices(code, prev_c)
+                            if open_p <= lu:  # Fix#4: <= 允许涨停价成交
+                                buy_price = min(open_p * (1 + slippage / 100), lu)
+                                if buy_price > 0:
+                                    candidates.append((code, buy_price))
+                        else:
+                            # Evaluate combo buy conditions → set pending for next day
+                            df_slice = df_stock.iloc[: row_idx + 1]
+                            buy_votes = 0
+                            weighted_score = 0.0
+                            for m in member_strategies:
+                                m_buy = m.get("buy_conditions", [])
+                                if m_buy:
+                                    triggered, _ = evaluate_conditions(m_buy, df_slice, mode="AND")
+                                    if triggered:
+                                        buy_votes += 1
+                                        weighted_score += m.get("weight", 1.0)
+                                if combo_weight_mode == "equal" and buy_votes >= combo_vote_threshold:
+                                    break
+                                if combo_weight_mode != "equal" and weighted_score >= combo_score_threshold:
+                                    break
+                            if combo_weight_mode == "equal":
+                                combo_buy = buy_votes >= combo_vote_threshold
+                            else:
+                                combo_buy = weighted_score >= combo_score_threshold
+                            if combo_buy:
+                                pending_combo_buys.add(code)
                     else:
-                        triggered, _ = evaluate_conditions(buy_conditions, df_slice, mode="AND")
-                        buy_signal = triggered
+                        # Vectorized buy signal (already shifted T+1) → buy at open
+                        buy_vec = buy_signal_map.get(code)
+                        if buy_vec is not None and row_idx < len(buy_vec):
+                            buy_signal = bool(buy_vec[row_idx])
+                        else:
+                            df_slice = df_stock.iloc[: row_idx + 1]
+                            triggered, _ = evaluate_conditions(buy_conditions, df_slice, mode="AND")
+                            buy_signal = triggered
 
-                    if buy_signal:
-                        close = float(df_stock.iloc[row_idx]["close"])
-                        if close > 0:
-                            candidates.append((code, close))
+                        if buy_signal:
+                            open_p = float(df_stock.iloc[row_idx].get("open", df_stock.iloc[row_idx]["close"]))
+                            prev_c = float(df_stock.iloc[row_idx - 1]["close"])
+                            limit_up, _ = calc_limit_prices(code, prev_c)
+                            if open_p <= limit_up:  # Fix#4: <= 允许涨停价成交
+                                buy_price = min(open_p * (1 + slippage / 100), limit_up)
+                                if buy_price > 0:
+                                    candidates.append((code, buy_price))
 
                 # ── Signal explosion early-abort ──
                 if day_idx < _EXPLOSION_CHECK_DAYS:
@@ -438,7 +560,7 @@ class PortfolioBacktestEngine:
                         stock_date_idx, daily_basic_data, rank_config,
                     )
 
-                # ── 3d: Buy top-N to fill slots ──
+                # ── 3d: Buy top-N to fill slots (at open price) ──
                 portfolio_equity = cash + sum(
                     pos.shares * (
                         float(prepared[c].iloc[stock_date_idx[c][current_date]]["close"])
@@ -448,27 +570,25 @@ class PortfolioBacktestEngine:
                     for c, pos in positions.items()
                 )
 
-                for code, close in candidates[:open_slots]:
-                    # Position size = equity / max_positions, capped by max_position_pct
+                for code, buy_price in candidates[:open_slots]:
                     target_value = portfolio_equity / self.max_positions
                     max_value = portfolio_equity * self.max_position_pct / 100
                     target_value = min(target_value, max_value)
-                    shares = math.floor(target_value / close)
+                    shares = math.floor(target_value / buy_price)
                     if shares <= 0:
                         continue
-                    cost = shares * close
+                    cost = shares * buy_price
                     if cost > cash:
-                        # Try with remaining cash
-                        shares = math.floor(cash / close)
+                        shares = math.floor(cash / buy_price)
                         if shares <= 0:
                             continue
-                        cost = shares * close
+                        cost = shares * buy_price
 
                     cash -= cost
                     positions[code] = Position(
                         stock_code=code,
                         buy_date=current_date,
-                        buy_price=close,
+                        buy_price=buy_price,
                         shares=shares,
                         cost_basis=cost,
                     )
@@ -484,7 +604,6 @@ class PortfolioBacktestEngine:
                     row_idx = stock_date_idx[code][current_date]
                     price = float(prepared[code].iloc[row_idx]["close"])
                 else:
-                    # No data today (halted/suspended) — use buy price as fallback
                     price = pos.buy_price
                 position_value += pos.shares * price
 
@@ -533,6 +652,383 @@ class PortfolioBacktestEngine:
             start_date=sorted_dates[0],
             end_date=sorted_dates[-1],
             regime_map=regime_map,
+        )
+
+    def prepare_data(
+        self,
+        strategy: Dict[str, Any],
+        stock_data: Dict[str, pd.DataFrame],
+        progress_callback=None,
+    ) -> Dict[str, Any]:
+        """Phase 1+2: Compute indicators and build date index (reusable for batch).
+
+        Returns a dict with prepared DataFrames, date indices, and vectorized signals
+        that can be passed to run_with_prepared() multiple times with different exit configs.
+        """
+        buy_conditions = strategy.get("buy_conditions", [])
+        sell_conditions = strategy.get("sell_conditions", [])
+
+        all_rules = buy_conditions + sell_conditions
+        collected_params = collect_indicator_params(all_rules)
+        config = IndicatorConfig.from_collected_params(collected_params)
+        calculator = IndicatorCalculator(config)
+
+        # Phase 1: Parallel indicator computation
+        prepared: Dict[str, pd.DataFrame] = {}
+        total_stocks = len(stock_data)
+
+        def _compute_one(args):
+            code, df = args
+            if df is None or df.empty or len(df) < 2:
+                return code, None
+            indicators = calculator.calculate_all(df)
+            df_full = pd.concat(
+                [df.reset_index(drop=True), indicators.reset_index(drop=True)],
+                axis=1,
+            )
+            if "date" in df_full.columns:
+                df_full["date"] = pd.to_datetime(df_full["date"]).dt.strftime("%Y-%m-%d")
+            return code, df_full
+
+        n_workers = min(8, os.cpu_count() or 4)
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            results = pool.map(_compute_one, stock_data.items())
+            for idx, (code, df_full) in enumerate(results, 1):
+                if progress_callback and idx % 100 == 0:
+                    progress_callback(idx, total_stocks, f"计算指标: {code}")
+                if df_full is not None:
+                    prepared[code] = df_full
+
+        if not prepared:
+            return {"prepared": {}, "sorted_dates": [], "stock_date_idx": {},
+                    "buy_signal_map": {}, "sell_signal_map": {}}
+
+        # Phase 2: Build date index
+        all_dates: set[str] = set()
+        stock_date_idx: Dict[str, Dict[str, int]] = {}
+        for code, df in prepared.items():
+            dates = df["date"].tolist() if "date" in df.columns else []
+            idx_map = {}
+            for i, d in enumerate(dates):
+                idx_map[d] = i
+                all_dates.add(d)
+            stock_date_idx[code] = idx_map
+
+        sorted_dates = sorted(all_dates)
+
+        # Phase 2b: Vectorized signals
+        buy_signal_map: Dict[str, np.ndarray] = {}
+        sell_signal_map: Dict[str, np.ndarray] = {}
+
+        def _vectorize_buy(args):
+            code, df_full = args
+            return code, vectorize_conditions(buy_conditions, df_full, mode="AND")
+
+        def _vectorize_sell(args):
+            code, df_full = args
+            if sell_conditions:
+                return code, vectorize_conditions(sell_conditions, df_full, mode="OR")
+            return code, np.zeros(len(df_full), dtype=bool)
+
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            buy_signal_map = dict(pool.map(_vectorize_buy, prepared.items()))
+            sell_signal_map = dict(pool.map(_vectorize_sell, prepared.items()))
+
+        # T+1 信号偏移: signal[T] 的意图在 T+1 执行
+        for code in buy_signal_map:
+            arr = buy_signal_map[code]
+            shifted = np.zeros_like(arr)
+            shifted[1:] = arr[:-1]
+            buy_signal_map[code] = shifted
+
+        for code in sell_signal_map:
+            arr = sell_signal_map[code]
+            shifted = np.zeros_like(arr)
+            shifted[1:] = arr[:-1]
+            sell_signal_map[code] = shifted
+
+        return {
+            "prepared": prepared,
+            "sorted_dates": sorted_dates,
+            "stock_date_idx": stock_date_idx,
+            "buy_signal_map": buy_signal_map,
+            "sell_signal_map": sell_signal_map,
+        }
+
+    def run_with_prepared(
+        self,
+        strategy_name: str,
+        exit_config: Dict[str, Any],
+        precomputed: Dict[str, Any],
+        regime_map: Optional[Dict[str, str]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> "PortfolioBacktestResult":
+        """Run Phase 3-5 using pre-computed data from prepare_data().
+
+        This is the fast path for batch clone-backtest: data loading and
+        indicator computation are done once, and only the trade simulation
+        is repeated for each exit config.
+        """
+        prepared = precomputed["prepared"]
+        sorted_dates = precomputed["sorted_dates"]
+        stock_date_idx = precomputed["stock_date_idx"]
+        buy_signal_map = precomputed["buy_signal_map"]
+        sell_signal_map = precomputed["sell_signal_map"]
+
+        if not prepared or len(sorted_dates) < 2:
+            return PortfolioBacktestResult(
+                strategy_name=strategy_name,
+                start_date=sorted_dates[0] if sorted_dates else "",
+                end_date=sorted_dates[-1] if sorted_dates else "",
+                initial_capital=self.initial_capital,
+                max_positions=self.max_positions,
+            )
+
+        stop_loss_pct = exit_config.get("stop_loss_pct")
+        take_profit_pct = exit_config.get("take_profit_pct")
+        max_hold_days = exit_config.get("max_hold_days")
+
+        # Phase 3: Day-by-day simulation (T+1 execution model)
+        # Signals already shifted in prepare_data(): signal[T+1] = original[T]
+        # SL/TP are intraday standing orders (gap-aware). Max hold → pending sell.
+        cash = self.initial_capital
+        positions: Dict[str, Position] = {}
+        trades: List[Trade] = []
+        equity_curve: List[dict] = []
+        held_codes: set[str] = set()
+        slippage = self.slippage_pct
+        pending_max_hold_sells: Dict[str, str] = {}
+        _early_candidate_counts: List[int] = []
+        _recent_candidate_counts: List[int] = []
+        _EXPLOSION_CHECK_DAYS = 10
+        _EXPLOSION_THRESHOLD = 500
+        _PERIODIC_CHECK_INTERVAL = 50
+        _PERIODIC_THRESHOLD = 300
+
+        for day_idx, current_date in enumerate(sorted_dates):
+            if cancel_event is not None and cancel_event.is_set():
+                raise BacktestTimeoutError(
+                    f"回测超时: 在第{day_idx}天/{len(sorted_dates)}天被取消"
+                )
+
+            # ── 3a: Sell logic ──
+            codes_to_sell: List[tuple] = []
+            for code, pos in list(positions.items()):
+                if code not in stock_date_idx or current_date not in stock_date_idx[code]:
+                    pos.hold_days += 1
+                    continue
+
+                row_idx = stock_date_idx[code][current_date]
+                df_stock = prepared[code]
+                row = df_stock.iloc[row_idx]
+                open_p = float(row.get("open", row["close"]))
+                close = float(row["close"])
+                low = float(row.get("low", close))
+                high = float(row.get("high", close))
+                pos.hold_days += 1
+
+                prev_close_val = close
+                if row_idx > 0:
+                    prev_close_val = float(df_stock.iloc[row_idx - 1]["close"])
+                limit_up, limit_down = calc_limit_prices(code, prev_close_val)
+
+                sell_reason = None
+                sell_price_override = None
+
+                # Priority 0: Execute pending sell at open
+                if code in pending_max_hold_sells:
+                    if open_p >= limit_down:  # Fix#4: >= 允许跌停价成交
+                        sell_reason = pending_max_hold_sells.pop(code)
+                        sell_price_override = max(open_p * (1 - slippage / 100), limit_down)
+                    else:
+                        continue  # 跌停，下一天重试
+
+                # Priority 1: Stop loss — intraday, gap-aware
+                if sell_reason is None and stop_loss_pct is not None:
+                    loss_threshold = pos.buy_price * (1 + stop_loss_pct / 100)
+                    if open_p <= loss_threshold:
+                        if open_p >= limit_down:  # Fix#6: 跌停检查
+                            sell_reason = "stop_loss"
+                            sell_price_override = max(open_p * (1 - slippage / 100), limit_down)
+                        else:
+                            pending_max_hold_sells[code] = "stop_loss"
+                    elif low <= loss_threshold:
+                        sell_reason = "stop_loss"
+                        sell_price_override = max(loss_threshold * (1 - slippage / 100), limit_down)
+
+                # Priority 2: Take profit — intraday, gap-aware
+                if sell_reason is None and take_profit_pct is not None and code not in pending_max_hold_sells:
+                    profit_threshold = pos.buy_price * (1 + take_profit_pct / 100)
+                    if open_p >= profit_threshold:
+                        sell_reason = "take_profit"
+                        sell_price_override = max(open_p * (1 - slippage / 100), limit_down)  # Fix#5
+                    elif high >= profit_threshold:
+                        sell_reason = "take_profit"
+                        sell_price_override = max(profit_threshold * (1 - slippage / 100), limit_down)  # Fix#5
+
+                # Priority 3: Strategy exit (shifted signal) → sell at open
+                if sell_reason is None and code not in pending_max_hold_sells:
+                    sell_vec = sell_signal_map.get(code)
+                    if sell_vec is not None and row_idx < len(sell_vec) and sell_vec[row_idx]:
+                        if open_p >= limit_down:  # Fix#4
+                            sell_reason = "strategy_exit"
+                            sell_price_override = max(open_p * (1 - slippage / 100), limit_down)
+                        else:
+                            pending_max_hold_sells[code] = "strategy_exit"  # Fix#7: 跌停重试
+
+                # Priority 4: Max hold → pending sell for next day
+                if sell_reason is None and code not in pending_max_hold_sells:
+                    if max_hold_days is not None and pos.hold_days >= max_hold_days:
+                        pending_max_hold_sells[code] = "max_hold"
+
+                if sell_reason:
+                    codes_to_sell.append((code, sell_reason, sell_price_override))
+
+            # Execute sells
+            for code, reason, price_override in codes_to_sell:
+                pos = positions.pop(code)
+                held_codes.discard(code)
+                row_idx = stock_date_idx[code][current_date]
+                close = float(prepared[code].iloc[row_idx]["close"])
+                exec_price = price_override if price_override is not None else close
+                pnl_pct = (exec_price - pos.buy_price) / pos.buy_price * 100
+                cash += pos.shares * exec_price
+                trades.append(Trade(
+                    stock_code=code,
+                    strategy_name=strategy_name,
+                    buy_date=pos.buy_date,
+                    buy_price=pos.buy_price,
+                    sell_date=current_date,
+                    sell_price=exec_price,
+                    sell_reason=reason,
+                    pnl_pct=round(pnl_pct, 4),
+                    hold_days=pos.hold_days,
+                    regime=regime_map.get(pos.buy_date, "") if regime_map else "",
+                ))
+
+            # Clean up pending sells for positions that were sold
+            for code in list(pending_max_hold_sells):
+                if code not in positions:
+                    pending_max_hold_sells.pop(code, None)
+
+            # ── 3b: Scan for buys (shifted signals → buy at open) ──
+            open_slots = self.max_positions - len(positions)
+            if open_slots > 0 and buy_signal_map:
+                candidates: List[tuple[str, float]] = []
+                for code in prepared:
+                    if code in held_codes:
+                        continue
+                    if current_date not in stock_date_idx.get(code, {}):
+                        continue
+                    row_idx = stock_date_idx[code][current_date]
+                    if row_idx < 1:
+                        continue
+                    buy_vec = buy_signal_map.get(code)
+                    if buy_vec is not None and row_idx < len(buy_vec) and buy_vec[row_idx]:
+                        df_stock = prepared[code]
+                        open_p = float(df_stock.iloc[row_idx].get("open", df_stock.iloc[row_idx]["close"]))
+                        prev_c = float(df_stock.iloc[row_idx - 1]["close"])
+                        limit_up, _ = calc_limit_prices(code, prev_c)
+                        if open_p <= limit_up:  # Fix#4: <= 允许涨停价成交
+                            buy_price = min(open_p * (1 + slippage / 100), limit_up)
+                            if buy_price > 0:
+                                candidates.append((code, buy_price))
+
+                # Signal explosion detection
+                if day_idx < _EXPLOSION_CHECK_DAYS:
+                    _early_candidate_counts.append(len(candidates))
+                    if day_idx == _EXPLOSION_CHECK_DAYS - 1:
+                        avg_cands = sum(_early_candidate_counts) / len(_early_candidate_counts)
+                        if avg_cands > _EXPLOSION_THRESHOLD:
+                            raise SignalExplosionError(
+                                f"信号爆炸: 前{_EXPLOSION_CHECK_DAYS}天平均{avg_cands:.0f}个买入信号/天"
+                            )
+                if day_idx >= _EXPLOSION_CHECK_DAYS:
+                    _recent_candidate_counts.append(len(candidates))
+                    if len(_recent_candidate_counts) >= _PERIODIC_CHECK_INTERVAL:
+                        avg_recent = sum(_recent_candidate_counts) / len(_recent_candidate_counts)
+                        if avg_recent > _PERIODIC_THRESHOLD:
+                            raise SignalExplosionError(
+                                f"信号爆炸(周期检测): 平均{avg_recent:.0f}个买入信号/天"
+                            )
+                        _recent_candidate_counts.clear()
+
+                # Rank + buy
+                if len(candidates) > open_slots:
+                    candidates = self._rank_candidates(
+                        candidates, current_date, prepared,
+                        stock_date_idx, None, None,
+                    )
+
+                portfolio_equity = cash + sum(
+                    pos.shares * (
+                        float(prepared[c].iloc[stock_date_idx[c][current_date]]["close"])
+                        if current_date in stock_date_idx.get(c, {})
+                        else pos.buy_price
+                    )
+                    for c, pos in positions.items()
+                )
+                for code, buy_price in candidates[:open_slots]:
+                    target_value = portfolio_equity / self.max_positions
+                    max_value = portfolio_equity * self.max_position_pct / 100
+                    target_value = min(target_value, max_value)
+                    shares = math.floor(target_value / buy_price)
+                    if shares <= 0:
+                        continue
+                    cost = shares * buy_price
+                    if cost > cash:
+                        shares = math.floor(cash / buy_price)
+                        if shares <= 0:
+                            continue
+                        cost = shares * buy_price
+                    cash -= cost
+                    positions[code] = Position(
+                        stock_code=code, buy_date=current_date,
+                        buy_price=buy_price, shares=shares, cost_basis=cost,
+                    )
+                    held_codes.add(code)
+                    open_slots -= 1
+                    if open_slots <= 0:
+                        break
+
+            # ── 3e: Record equity ──
+            position_value = sum(
+                pos.shares * (
+                    float(prepared[c].iloc[stock_date_idx[c][current_date]]["close"])
+                    if current_date in stock_date_idx.get(c, {})
+                    else pos.buy_price
+                )
+                for c, pos in positions.items()
+            )
+            equity_curve.append({"date": current_date, "equity": round(cash + position_value, 2)})
+
+        # Phase 4: Force-close remaining
+        last_date = sorted_dates[-1]
+        for code, pos in list(positions.items()):
+            if last_date in stock_date_idx.get(code, {}):
+                row_idx = stock_date_idx[code][last_date]
+                close = float(prepared[code].iloc[row_idx]["close"])
+            else:
+                close = float(prepared[code].iloc[-1]["close"])
+            pnl_pct = (close - pos.buy_price) / pos.buy_price * 100
+            cash += pos.shares * close
+            trades.append(Trade(
+                stock_code=code, strategy_name=strategy_name,
+                buy_date=pos.buy_date, buy_price=pos.buy_price,
+                sell_date=last_date, sell_price=close,
+                sell_reason="end_of_backtest", pnl_pct=round(pnl_pct, 4),
+                hold_days=pos.hold_days,
+                regime=regime_map.get(pos.buy_date, "") if regime_map else "",
+            ))
+        positions.clear()
+        held_codes.clear()
+        if equity_curve:
+            equity_curve[-1]["equity"] = round(cash, 2)
+
+        return self._build_result(
+            strategy_name=strategy_name, trades=trades,
+            equity_curve=equity_curve, start_date=sorted_dates[0],
+            end_date=sorted_dates[-1], regime_map=regime_map,
         )
 
     def _rank_candidates(

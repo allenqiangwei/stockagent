@@ -111,10 +111,11 @@ def delete_strategy(strategy_id: int, db: Session = Depends(get_db)):
 
 @router.post("/cleanup")
 def cleanup_strategies(
-    min_score: float = Query(0.70, description="Minimum score to keep"),
-    min_return_pct: float = Query(20.0, description="Minimum return % to keep"),
-    max_drawdown_pct: float = Query(25.0, description="Maximum drawdown % to keep"),
+    min_score: float = Query(0.75, description="Minimum score to keep"),
+    min_return_pct: float = Query(60.0, description="Minimum return % to keep"),
+    max_drawdown_pct: float = Query(18.0, description="Maximum drawdown % to keep"),
     min_trades: int = Query(50, description="Minimum trades to keep"),
+    min_win_rate: float = Query(60.0, description="Minimum win rate % to keep"),
     dry_run: bool = Query(False, description="If true, only count without deleting"),
     db: Session = Depends(get_db),
 ):
@@ -130,8 +131,9 @@ def cleanup_strategies(
         ret = bs.get("total_return_pct", 0) or 0
         dd = abs(bs.get("max_drawdown_pct", 0) or 0)
         trades = bs.get("total_trades", 0) or 0
+        win_rate = bs.get("win_rate", 0) or 0
         # Keep if meets ALL criteria; delete if fails ANY
-        if score < min_score or ret <= min_return_pct or dd >= max_drawdown_pct or trades < min_trades:
+        if score < min_score or ret <= min_return_pct or dd >= max_drawdown_pct or trades < min_trades or win_rate <= min_win_rate:
             to_delete.append(s)
 
     if dry_run:

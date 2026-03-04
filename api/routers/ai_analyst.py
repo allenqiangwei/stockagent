@@ -44,6 +44,25 @@ def get_scheduler_status():
     }
 
 
+@router.post("/sync-data")
+def trigger_data_sync(
+    trade_date: Optional[str] = Query(None, description="YYYY-MM-DD, defaults to today"),
+):
+    """Manually trigger data sync (daily prices + trade plan execution)."""
+    import threading
+    from api.services.signal_scheduler import get_signal_scheduler
+
+    sched = get_signal_scheduler()
+    if sched._is_refreshing:
+        raise HTTPException(409, "数据同步正在进行中")
+
+    target = trade_date or date.today().isoformat()
+    threading.Thread(
+        target=sched._do_refresh, args=(target,), daemon=True
+    ).start()
+    return {"message": f"数据同步已启动: {target}"}
+
+
 # ── Reports ──────────────────────────────────────
 
 @router.get("/reports", response_model=list[AIReportListItem])
@@ -124,6 +143,14 @@ def save_report(body: AIReportSaveRequest, db: Session = Depends(get_db)):
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("Trade plan creation failed: %s", e)
+
+        # Capture beta factor snapshots for all recommended stocks
+        try:
+            from api.services.beta_engine import capture_beta_snapshots
+            capture_beta_snapshots(db, report.id, body.report_date, body.recommendations)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Beta snapshot capture failed: %s", e)
 
     return {
         "id": report.id,
@@ -215,7 +242,26 @@ def trigger_analysis(
     _logger = logging.getLogger(__name__)
     target_date = report_date or date.today().isoformat()
 
-    # Step 1: AI strategy selection + signal generation
+    # Step 1: Execute pending trade plans first (before lengthy AI analysis)
+    executed_plans = []
+    try:
+        from api.services.bot_trading_engine import execute_pending_plans
+        executed_plans = execute_pending_plans(db, target_date) or []
+        if executed_plans:
+            _logger.info("Executed %d trade plans for %s", len(executed_plans), target_date)
+    except Exception as e:
+        _logger.warning("Trade plan execution failed: %s", e)
+
+    # Step 1b: Monitor exit conditions (SL/TP/MHD) — runs before AI analysis
+    try:
+        from api.services.bot_trading_engine import monitor_exit_conditions
+        exit_results = monitor_exit_conditions(db, target_date)
+        if exit_results:
+            _logger.info("Exit monitor: %d actions for %s", len(exit_results), target_date)
+    except Exception as e:
+        _logger.warning("Exit monitoring failed: %s", e)
+
+    # Step 2: AI strategy selection + signal generation
     selected_ids = None
     try:
         summaries = build_family_summary(db)
@@ -260,10 +306,23 @@ def trigger_analysis(
     db.commit()
     db.refresh(report)
 
+    # Step 3: Create trade plans from recommendations
+    trade_plans_result = []
+    if result.get("recommendations"):
+        from api.services.bot_trading_engine import create_trade_plans
+        try:
+            trade_plans_result = create_trade_plans(
+                db, report.id, target_date, result["recommendations"]
+            )
+        except Exception as e:
+            _logger.warning("Trade plan creation failed: %s", e)
+
     return {
         "id": report.id,
         "report_date": report.report_date,
         "summary": report.summary,
+        "trade_plans_created": len(trade_plans_result),
+        "trade_plans_executed": len(executed_plans),
     }
 
 

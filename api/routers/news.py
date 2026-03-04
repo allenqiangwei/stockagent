@@ -1,4 +1,6 @@
-"""News router — cached latest news, DB statistics, and related news."""
+"""News router — cached latest news, DB statistics, archive query, and related news."""
+
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
@@ -46,6 +48,78 @@ def get_news_stats():
     return {
         "total_archived": total,
         **stats,
+    }
+
+
+@router.get("/archive")
+def get_news_archive(
+    start_date: Optional[str] = Query(None, description="Start date inclusive (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date inclusive (YYYY-MM-DD)"),
+    source: Optional[str] = Query(None, description="Filter by source: cls, eastmoney, sina"),
+    keyword: Optional[str] = Query(None, description="Search keyword in title/content"),
+    limit: int = Query(500, ge=1, le=2000, description="Max results (default 500)"),
+    db: Session = Depends(get_db),
+):
+    """Query historical news from the database with flexible date range.
+
+    Used by the AI analyst to retrieve raw news for analysis.
+    The AI decides the time range based on market context.
+    Returns total_count (unaffected by limit) so AI knows the full scope.
+    """
+    conditions = []
+    params: dict = {}
+
+    if start_date:
+        conditions.append("fetch_date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        conditions.append("fetch_date <= :end_date")
+        params["end_date"] = end_date
+    if source:
+        conditions.append("source = :source")
+        params["source"] = source
+    if keyword:
+        conditions.append("(title LIKE :kw OR content LIKE :kw)")
+        params["kw"] = f"%{keyword}%"
+
+    where = " AND ".join(conditions) if conditions else "1=1"
+
+    # Get total count first (unaffected by limit)
+    total_row = db.execute(
+        text(f"SELECT COUNT(*) FROM news_archive WHERE {where}"),
+        params,
+    ).scalar()
+
+    params["lim"] = limit
+
+    rows = db.execute(
+        text(
+            f"SELECT title, source, sentiment_score, keywords, url, "
+            f"publish_time, content, fetch_date "
+            f"FROM news_archive WHERE {where} "
+            f"ORDER BY fetch_date DESC, publish_time DESC LIMIT :lim"
+        ),
+        params,
+    ).fetchall()
+
+    return {
+        "total_count": total_row or 0,
+        "returned": len(rows),
+        "start_date": start_date,
+        "end_date": end_date,
+        "news": [
+            {
+                "title": r.title,
+                "source": r.source,
+                "sentiment_score": r.sentiment_score,
+                "keywords": r.keywords or "",
+                "url": r.url or "",
+                "publish_time": r.publish_time or "",
+                "content": (r.content or "")[:200],
+                "fetch_date": r.fetch_date or "",
+            }
+            for r in rows
+        ],
     }
 
 

@@ -129,11 +129,11 @@ def compute_weekly_regimes(
             "week_start": current_monday,
             "week_end": current_friday,
             "regime": regime.regime,
-            "confidence": round(regime.confidence, 4),
-            "trend_strength": round(regime.trend_strength, 4),
-            "volatility": round(regime.volatility, 4),
-            "breadth": round(regime.breadth, 4),
-            "index_return_pct": round(index_return, 4),
+            "confidence": float(round(regime.confidence, 4)),
+            "trend_strength": float(round(regime.trend_strength, 4)),
+            "volatility": float(round(regime.volatility, 4)),
+            "breadth": float(round(regime.breadth, 4)),
+            "index_return_pct": float(round(index_return, 4)),
         })
 
         current_monday += timedelta(days=7)
