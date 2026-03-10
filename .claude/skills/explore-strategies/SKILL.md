@@ -38,6 +38,37 @@ Read `docs/lab-experiment-analysis.md`. Extract:
 - **最佳策略**: Current top strategies and their characteristics
 - **Auto-Promote 记录**: What has already been promoted
 - **已知问题**: Known rule engine limitations and workarounds
+- **下一步建议**: Previous session's prioritized suggestions for what to explore next (HIGH PRIORITY — these are the most informed recommendations from the prior session's analysis)
+
+Also query the latest exploration round's `next_suggestions` from the API to cross-check:
+
+```bash
+NO_PROXY=localhost,127.0.0.1 python3 -c "
+import subprocess, json
+
+def api(path):
+    r = subprocess.run(['curl','-s',f'http://127.0.0.1:8050/api/{path}'],
+                       capture_output=True, text=True, env={'NO_PROXY':'localhost,127.0.0.1','PATH':'/usr/bin:/bin'})
+    return json.loads(r.stdout)
+
+rounds = api('lab/exploration-rounds')
+items = rounds.get('items', rounds) if isinstance(rounds, dict) else rounds
+if items:
+    latest = max(items, key=lambda r: r.get('round_number', 0))
+    print(f'最新轮次: R{latest[\"round_number\"]}')
+    suggestions = latest.get('next_suggestions', [])
+    if suggestions:
+        print('上轮建议:')
+        for i, s in enumerate(suggestions, 1):
+            print(f'  {i}. {s}')
+    else:
+        print('上轮无建议')
+else:
+    print('无历史轮次')
+"
+```
+
+**Use both sources** (the `## 下一步建议` section in the doc AND the API `next_suggestions`) to inform Step 3's direction allocation. The doc section is the canonical source; the API field is a backup.
 
 ### 1b: Verify Previous Experiments are Correctly Promoted
 
@@ -75,7 +106,7 @@ for exp_summary in all_exps:
         dd = abs(s.get('max_drawdown_pct',100) or 100)
         trades = s.get('total_trades',0) or 0
         wr = s.get('win_rate',0) or 0
-        if score >= 0.75 and ret > 60 and dd < 18 and trades >= 50 and wr > 60:
+        if score >= 0.80 and ret > 60 and dd < 18 and trades >= 50 and wr > 60:
             result = promote(s['id'], '[AI]')
             msg = result.get('message','')
             if msg != 'Already promoted':
@@ -284,7 +315,7 @@ Available experiment categories (use any subset, allocate any amount including 0
 | Priority | Indicator | Status | Columns | Notes |
 |----------|-----------|--------|---------|-------|
 | 🔴高 | **KAMA** | ✅ 深度探索 | KAMA_{length} | R31-R32探索, KAMA突破88个T+1存活, KAMA终极震荡全军覆没(0/65, 前视偏差), 保守版F/G各14个存活 |
-| 🔴高 | **NVI** | ✅ 浅探索 | NVI | R32探索, 仅1/11达StdA+(score 0.760, T+1存活), 机构追踪理论合理但效果有限 |
+| 🔴高 | **NVI** | ✅ 已弃 | NVI | R32+R383探索, 79%invalid(19/24), 0 StdA+, best=0.6972. NVI不适合A股短线策略 |
 | 🔴高 | **VPT** | ✅ 已弃 | VPT | R32探索, 0/21 StdA+, OBV改进版在A股同样失效 |
 | 🟡中 | BOLL | ✅ 深度探索 | BOLL_upper/middle/lower/pctb | BOLL+KDJ有效, BOLL%B+StochRSI达StdA |
 | 🟡中 | PSAR | ✅ 深度探索 | PSAR_{af}_{max_af} | 最强趋势指标, T+1 top=0.816, 91.3%存活(313/343) |
@@ -489,7 +520,7 @@ def promote(sid, label):
 # Get all experiment IDs
 exp_ids = [e['id'] for e in api('lab/experiments?page=1&size=100').get('items', [])]
 
-# Standard A: score >= 0.75, ret > 60%, dd < 18%, trades >= 50, win_rate > 60%
+# Standard A: score >= 0.80, ret > 60%, dd < 18%, trades >= 50, win_rate > 60%
 promoted_a = []
 for eid in exp_ids:
     for s in api(f'lab/experiments/{eid}').get('strategies', []):
@@ -499,7 +530,7 @@ for eid in exp_ids:
         dd = abs(s.get('max_drawdown_pct',100) or 100)
         trades = s.get('total_trades',0) or 0
         wr = s.get('win_rate',0) or 0
-        if score >= 0.75 and ret > 60 and dd < 18 and trades >= 50 and wr > 60:
+        if score >= 0.80 and ret > 60 and dd < 18 and trades >= 50 and wr > 60:
             result = promote(s['id'], '[AI]')
             promoted_a.append((s['id'], s['name'], result.get('message','')))
 
@@ -537,7 +568,7 @@ for sid, name, label, msg in promoted_b:
 ```
 
 **Standard A (高评分)** — ALL conditions must be met:
-- `score >= 0.75`
+- `score >= 0.80`
 - `total_return_pct > 60`
 - `max_drawdown_pct < 18` (absolute value)
 - `total_trades >= 50`
@@ -548,6 +579,36 @@ for sid, name, label, msg in promoted_b:
 - That regime's profit > 0 (from `regime_stats`)
 - `total_return_pct > 0`
 - That regime's `total_pnl > 100` (skip negligible profits like 26元 on 10万)
+
+## Step 7b: Strategy Pool Rebalance
+
+After promoting new strategies, rebalance the pool to archive redundant strategies (same buy/sell conditions, only exit params differ). Each signal fingerprint family keeps max 15 active members.
+
+```bash
+NO_PROXY=localhost,127.0.0.1 python3 -c "
+import subprocess, json
+
+def api_post(path, params=''):
+    url = f'http://127.0.0.1:8050/api/{path}'
+    if params: url += f'?{params}'
+    r = subprocess.run(['curl','-s','-X','POST',url],
+                       capture_output=True, text=True, env={'NO_PROXY':'localhost,127.0.0.1','PATH':'/usr/bin:/bin'})
+    return json.loads(r.stdout)
+
+# Dry-run first to see impact
+dry = api_post('strategies/pool/rebalance', 'max_per_family=15&dry_run=true')
+print(f'Dry-run: {dry.get(\"families_count\",0)} families, would archive {dry.get(\"archived_count\",0)}, active={dry.get(\"active_strategies\",0)}')
+
+# Execute rebalance
+result = api_post('strategies/pool/rebalance', 'max_per_family=15')
+print(f'Rebalance: {result.get(\"families_count\",0)} families, archived {result.get(\"archived_count\",0)}, active={result.get(\"active_strategies\",0)}')
+"
+```
+
+Output summary:
+```
+策略池 Rebalance: X 家族, 归档 Y 个冗余策略, 当前活跃 Z 个
+```
 
 ## Step 8: Update Memory
 
@@ -562,6 +623,7 @@ Edit `docs/lab-experiment-analysis.md`:
 5. **最佳策略 Top 15**: Update if any new strategy ranks higher
 6. **全阶段盈利策略**: Add if a new strategy profits in all regimes
 7. **各市场阶段最优**: Update top 3 per regime if improved
+8. **下一步建议**: REPLACE (not append) the `## 下一步建议` section with this round's prioritized suggestions. Keep 4-8 actionable items ranked by expected impact. This section is read by Step 1a at the start of the next session.
 
 **Cleanup rules:**
 - File must stay under 500 lines
