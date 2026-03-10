@@ -56,6 +56,7 @@ class StrategyCreate(BaseModel):
     rank_config: Optional[dict] = None
     portfolio_config: Optional[dict] = None
     category: Optional[str] = None
+    backtest_summary: Optional[dict] = None
 
 
 class StrategyUpdate(BaseModel):
@@ -98,5 +99,47 @@ class StrategyResponse(BaseModel):
     category: Optional[str] = None
     backtest_summary: Optional[dict] = None
     source_experiment_id: Optional[int] = None
+    signal_fingerprint: Optional[str] = None
+    family_rank: Optional[int] = None
+    family_role: Optional[str] = None
+    archived_at: Optional[str] = None
 
     model_config = {"from_attributes": True}
+
+
+class FamilySummary(BaseModel):
+    fingerprint: str
+    representative_name: str
+    active_count: int
+    archived_count: int
+    champion_score: float
+    champion_id: int
+    avg_score: float
+    regime_coverage: list[str]
+    exit_param_range: dict
+
+
+class RegimeCoverage(BaseModel):
+    families: int
+    strategies: int
+
+
+class PoolStatus(BaseModel):
+    total_strategies: int
+    active_strategies: int
+    archived_strategies: int
+    family_count: int
+    families_summary: list[FamilySummary]
+    regime_coverage: dict[str, RegimeCoverage]
+    last_rebalance_at: Optional[str] = None
+    signal_eval_reduction: str
+
+
+class RebalanceResult(BaseModel):
+    dry_run: bool
+    families_count: int
+    archived_count: int
+    activated_count: int
+    active_strategies: int
+    total_strategies: int
+    details: list[dict]
