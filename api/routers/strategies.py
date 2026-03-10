@@ -1,6 +1,7 @@
 """Strategies CRUD router."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from api.models.base import get_db
@@ -35,6 +36,159 @@ def list_strategies(
     rows = q.order_by(Strategy.id).all()
     return [StrategyResponse.model_validate(r) for r in rows]
 
+
+# --- Pool management & family routes (MUST come before /{strategy_id}) ---
+
+class _RebalanceRequest(BaseModel):
+    dry_run: bool = False
+    max_per_family: int = 15
+
+
+@router.post("/pool/rebalance")
+def rebalance_pool(
+    body: _RebalanceRequest = _RebalanceRequest(),
+    db: Session = Depends(get_db),
+):
+    """Rebalance strategy pool: archive redundant strategies, keep top-N per family."""
+    from api.services.strategy_pool import StrategyPoolManager
+    mgr = StrategyPoolManager(db)
+    return mgr.rebalance(max_per_family=body.max_per_family, dry_run=body.dry_run)
+
+
+@router.get("/pool/status")
+def pool_status(db: Session = Depends(get_db)):
+    """Return comprehensive strategy pool status."""
+    from api.services.strategy_pool import StrategyPoolManager
+    mgr = StrategyPoolManager(db)
+    return mgr.get_pool_status()
+
+
+@router.get("/families")
+def list_families(db: Session = Depends(get_db)):
+    """List strategy families grouped by signal fingerprint."""
+    from api.services.strategy_pool import StrategyPoolManager
+    mgr = StrategyPoolManager(db)
+    status = mgr.get_pool_status()
+    return status["families_summary"]
+
+
+@router.get("/families/{fingerprint}")
+def get_family(fingerprint: str, db: Session = Depends(get_db)):
+    """Get all strategies in a specific signal family (including archived)."""
+    strategies = (
+        db.query(Strategy)
+        .filter(Strategy.signal_fingerprint == fingerprint)
+        .order_by(Strategy.family_rank.nullslast(), Strategy.id)
+        .all()
+    )
+    if not strategies:
+        raise HTTPException(404, "Family not found")
+    return [StrategyResponse.model_validate(s) for s in strategies]
+
+
+@router.post("/cleanup")
+def cleanup_strategies(
+    min_score: float = Query(0.80, description="Minimum score to keep"),
+    min_return_pct: float = Query(60.0, description="Minimum return % to keep"),
+    max_drawdown_pct: float = Query(18.0, description="Maximum drawdown % to keep"),
+    min_trades: int = Query(50, description="Minimum trades to keep"),
+    min_win_rate: float = Query(60.0, description="Minimum win rate % to keep"),
+    dry_run: bool = Query(False, description="If true, only count without deleting"),
+    db: Session = Depends(get_db),
+):
+    """Delete promoted strategies below quality threshold and reset lab flags."""
+    from api.models.ai_lab import ExperimentStrategy
+
+    # Find strategies to delete: those with backtest_summary below threshold
+    all_strats = db.query(Strategy).all()
+    to_delete = []
+    for s in all_strats:
+        bs = s.backtest_summary or {}
+        score = bs.get("score", 0) or 0
+        ret = bs.get("total_return_pct", 0) or 0
+        dd = abs(bs.get("max_drawdown_pct", 0) or 0)
+        trades = bs.get("total_trades", 0) or 0
+        win_rate = bs.get("win_rate", 0) or 0
+        # Keep if meets ALL criteria; delete if fails ANY
+        if score < min_score or ret <= min_return_pct or dd >= max_drawdown_pct or trades < min_trades or win_rate <= min_win_rate:
+            to_delete.append(s)
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "would_delete": len(to_delete),
+            "would_keep": len(all_strats) - len(to_delete),
+        }
+
+    # Delete and reset lab flags
+    deleted_ids = []
+    for s in to_delete:
+        # Unlink backtest runs
+        db.query(BacktestRun).filter(BacktestRun.strategy_id == s.id).update(
+            {"strategy_id": None}
+        )
+        # Reset lab experiment strategy promoted flags
+        db.query(ExperimentStrategy).filter(
+            ExperimentStrategy.promoted_strategy_id == s.id
+        ).update({"promoted": False, "promoted_strategy_id": None})
+        deleted_ids.append(s.id)
+        db.delete(s)
+
+    db.commit()
+    return {
+        "deleted": len(deleted_ids),
+        "kept": len(all_strats) - len(deleted_ids),
+    }
+
+
+@router.post("/combo", response_model=StrategyResponse, status_code=201)
+def create_combo_strategy(req: ComboCreate, db: Session = Depends(get_db)):
+    """Create a combo (ensemble) strategy that votes across member strategies."""
+    # Validate: all member strategies exist and are enabled
+    members = (
+        db.query(Strategy)
+        .filter(Strategy.id.in_(req.combo_config.member_ids))
+        .all()
+    )
+    found_ids = {m.id for m in members}
+    missing = set(req.combo_config.member_ids) - found_ids
+    if missing:
+        raise HTTPException(404, f"成员策略不存在: {sorted(missing)}")
+
+    disabled = [m.name for m in members if not m.enabled]
+    if disabled:
+        raise HTTPException(400, f"成员策略未启用: {disabled}")
+
+    # vote_threshold must not exceed member count
+    if req.combo_config.vote_threshold > len(req.combo_config.member_ids):
+        raise HTTPException(
+            400,
+            f"投票门槛({req.combo_config.vote_threshold})不能超过成员数({len(req.combo_config.member_ids)})",
+        )
+
+    existing = db.query(Strategy).filter(Strategy.name == req.name).first()
+    if existing:
+        raise HTTPException(409, f"Strategy '{req.name}' already exists")
+
+    s = Strategy(
+        name=req.name,
+        description=req.description,
+        rules=[],
+        buy_conditions=[],   # combo strategies have no direct conditions
+        sell_conditions=[],
+        exit_config=req.exit_config.model_dump(),
+        weight=0.5,
+        enabled=True,
+        category="combo",
+        portfolio_config=req.combo_config.model_dump(),
+    )
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    return StrategyResponse.model_validate(s)
+
+
+# --- Parameterized routes (/{strategy_id} catch-all MUST come after specific paths) ---
 
 @router.get("/{strategy_id}", response_model=StrategyResponse)
 def get_strategy(strategy_id: int, db: Session = Depends(get_db)):
@@ -110,104 +264,6 @@ def delete_strategy(strategy_id: int, db: Session = Depends(get_db)):
     return {"deleted": strategy_id}
 
 
-@router.post("/cleanup")
-def cleanup_strategies(
-    min_score: float = Query(0.80, description="Minimum score to keep"),
-    min_return_pct: float = Query(60.0, description="Minimum return % to keep"),
-    max_drawdown_pct: float = Query(18.0, description="Maximum drawdown % to keep"),
-    min_trades: int = Query(50, description="Minimum trades to keep"),
-    min_win_rate: float = Query(60.0, description="Minimum win rate % to keep"),
-    dry_run: bool = Query(False, description="If true, only count without deleting"),
-    db: Session = Depends(get_db),
-):
-    """Delete promoted strategies below quality threshold and reset lab flags."""
-    from api.models.ai_lab import ExperimentStrategy
-
-    # Find strategies to delete: those with backtest_summary below threshold
-    all_strats = db.query(Strategy).all()
-    to_delete = []
-    for s in all_strats:
-        bs = s.backtest_summary or {}
-        score = bs.get("score", 0) or 0
-        ret = bs.get("total_return_pct", 0) or 0
-        dd = abs(bs.get("max_drawdown_pct", 0) or 0)
-        trades = bs.get("total_trades", 0) or 0
-        win_rate = bs.get("win_rate", 0) or 0
-        # Keep if meets ALL criteria; delete if fails ANY
-        if score < min_score or ret <= min_return_pct or dd >= max_drawdown_pct or trades < min_trades or win_rate <= min_win_rate:
-            to_delete.append(s)
-
-    if dry_run:
-        return {
-            "dry_run": True,
-            "would_delete": len(to_delete),
-            "would_keep": len(all_strats) - len(to_delete),
-        }
-
-    # Delete and reset lab flags
-    deleted_ids = []
-    for s in to_delete:
-        # Unlink backtest runs
-        db.query(BacktestRun).filter(BacktestRun.strategy_id == s.id).update(
-            {"strategy_id": None}
-        )
-        # Reset lab experiment strategy promoted flags
-        db.query(ExperimentStrategy).filter(
-            ExperimentStrategy.promoted_strategy_id == s.id
-        ).update({"promoted": False, "promoted_strategy_id": None})
-        deleted_ids.append(s.id)
-        db.delete(s)
-
-    db.commit()
-    return {
-        "deleted": len(deleted_ids),
-        "kept": len(all_strats) - len(deleted_ids),
-    }
-
-
-@router.post("/pool/rebalance")
-def rebalance_pool(
-    max_per_family: int = Query(15, description="Max active strategies per signal family"),
-    dry_run: bool = Query(False, description="If true, report changes without executing"),
-    db: Session = Depends(get_db),
-):
-    """Rebalance strategy pool: archive redundant strategies, keep top-N per family."""
-    from api.services.strategy_pool import StrategyPoolManager
-    mgr = StrategyPoolManager(db)
-    return mgr.rebalance(max_per_family=max_per_family, dry_run=dry_run)
-
-
-@router.get("/pool/status")
-def pool_status(db: Session = Depends(get_db)):
-    """Return comprehensive strategy pool status."""
-    from api.services.strategy_pool import StrategyPoolManager
-    mgr = StrategyPoolManager(db)
-    return mgr.get_pool_status()
-
-
-@router.get("/families")
-def list_families(db: Session = Depends(get_db)):
-    """List strategy families grouped by signal fingerprint."""
-    from api.services.strategy_pool import StrategyPoolManager
-    mgr = StrategyPoolManager(db)
-    status = mgr.get_pool_status()
-    return status["families_summary"]
-
-
-@router.get("/families/{fingerprint}")
-def get_family(fingerprint: str, db: Session = Depends(get_db)):
-    """Get all strategies in a specific signal family (including archived)."""
-    strategies = (
-        db.query(Strategy)
-        .filter(Strategy.signal_fingerprint == fingerprint)
-        .order_by(Strategy.family_rank.nullslast(), Strategy.id)
-        .all()
-    )
-    if not strategies:
-        raise HTTPException(404, "Family not found")
-    return [StrategyResponse.model_validate(s) for s in strategies]
-
-
 @router.post("/{strategy_id}/unarchive")
 def unarchive_strategy(strategy_id: int, db: Session = Depends(get_db)):
     """Restore an archived strategy to active status."""
@@ -221,53 +277,6 @@ def unarchive_strategy(strategy_id: int, db: Session = Depends(get_db)):
     s.family_role = "active"
     db.commit()
     return {"message": "Strategy unarchived", "id": strategy_id}
-
-
-@router.post("/combo", response_model=StrategyResponse, status_code=201)
-def create_combo_strategy(req: ComboCreate, db: Session = Depends(get_db)):
-    """Create a combo (ensemble) strategy that votes across member strategies."""
-    # Validate: all member strategies exist and are enabled
-    members = (
-        db.query(Strategy)
-        .filter(Strategy.id.in_(req.combo_config.member_ids))
-        .all()
-    )
-    found_ids = {m.id for m in members}
-    missing = set(req.combo_config.member_ids) - found_ids
-    if missing:
-        raise HTTPException(404, f"成员策略不存在: {sorted(missing)}")
-
-    disabled = [m.name for m in members if not m.enabled]
-    if disabled:
-        raise HTTPException(400, f"成员策略未启用: {disabled}")
-
-    # vote_threshold must not exceed member count
-    if req.combo_config.vote_threshold > len(req.combo_config.member_ids):
-        raise HTTPException(
-            400,
-            f"投票门槛({req.combo_config.vote_threshold})不能超过成员数({len(req.combo_config.member_ids)})",
-        )
-
-    existing = db.query(Strategy).filter(Strategy.name == req.name).first()
-    if existing:
-        raise HTTPException(409, f"Strategy '{req.name}' already exists")
-
-    s = Strategy(
-        name=req.name,
-        description=req.description,
-        rules=[],
-        buy_conditions=[],   # combo strategies have no direct conditions
-        sell_conditions=[],
-        exit_config=req.exit_config.model_dump(),
-        weight=0.5,
-        enabled=True,
-        category="combo",
-        portfolio_config=req.combo_config.model_dump(),
-    )
-    db.add(s)
-    db.commit()
-    db.refresh(s)
-    return StrategyResponse.model_validate(s)
 
 
 @router.post("/{strategy_id}/clone", response_model=StrategyResponse, status_code=201)

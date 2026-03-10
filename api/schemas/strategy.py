@@ -1,5 +1,6 @@
 """Strategy-related Pydantic schemas."""
 
+from datetime import datetime
 from typing import Optional, Literal
 from pydantic import BaseModel, field_validator
 
@@ -102,7 +103,7 @@ class StrategyResponse(BaseModel):
     signal_fingerprint: Optional[str] = None
     family_rank: Optional[int] = None
     family_role: Optional[str] = None
-    archived_at: Optional[str] = None
+    archived_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 

@@ -73,7 +73,10 @@ class SignalEngine:
         if stock_codes is None:
             stock_codes = self.collector.get_sample_stock_codes(20)
 
-        query = self.db.query(Strategy).filter(Strategy.enabled.is_(True))
+        query = self.db.query(Strategy).filter(
+            Strategy.enabled.is_(True),
+            Strategy.archived_at.is_(None),
+        )
         if strategy_ids:
             query = query.filter(Strategy.id.in_(strategy_ids))
         strategies = query.all()
