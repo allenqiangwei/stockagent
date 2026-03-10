@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections import defaultdict
 from typing import Optional, Generator
 
 import pandas as pd
@@ -128,7 +129,10 @@ class SignalEngine:
             yield self._sse_event({"type": "error", "message": "没有可用的股票数据"})
             return
 
-        query = self.db.query(Strategy).filter(Strategy.enabled.is_(True))
+        query = self.db.query(Strategy).filter(
+            Strategy.enabled.is_(True),
+            Strategy.archived_at.is_(None),
+        )
         if strategy_ids:
             query = query.filter(Strategy.id.in_(strategy_ids))
         strategies = query.all()
@@ -253,90 +257,100 @@ class SignalEngine:
         # Pre-load member strategies for combo strategies (cache by strat id)
         combo_members_cache: dict[int, list[Strategy]] = {}
 
+        # Group regular strategies by fingerprint for batch evaluation
+        fp_groups: dict[str, list[Strategy]] = defaultdict(list)
+        combo_strats: list[Strategy] = []
+
         for strat in strategies:
             pf_config = strat.portfolio_config or {}
-            is_combo = pf_config.get("type") == "combo"
-
-            if is_combo:
-                # ── Combo strategy: vote across members ──
-                member_ids = pf_config.get("member_ids", [])
-                if strat.id not in combo_members_cache:
-                    combo_members_cache[strat.id] = (
-                        self.db.query(Strategy)
-                        .filter(Strategy.id.in_(member_ids))
-                        .all()
-                    )
-                members = combo_members_cache[strat.id]
-                vote_threshold = pf_config.get("vote_threshold", 2)
-                sell_mode = pf_config.get("sell_mode", "any")
-
-                # Collect all member indicators for unified computation
-                all_member_conds = []
-                for m in members:
-                    all_member_conds.extend(m.buy_conditions or [])
-                    all_member_conds.extend(m.sell_conditions or [])
-                if not all_member_conds:
-                    continue
-
-                collected = collect_indicator_params(all_member_conds)
-                config = IndicatorConfig.from_collected_params(collected)
-                full_df = self.indicator_engine.compute(df, config=config)
-
-                # Count buy votes
-                buy_votes = 0
-                voting_members: list[str] = []
-                for m in members:
-                    m_buy = m.buy_conditions or []
-                    if m_buy:
-                        triggered, _ = evaluate_conditions(m_buy, full_df, mode="AND")
-                        if triggered:
-                            buy_votes += 1
-                            voting_members.append(m.name)
-
-                if buy_votes >= vote_threshold:
-                    buy_triggered = True
-                    buy_strategies.append(f"{strat.name}({buy_votes}/{len(members)}票)")
-
-                # Count sell votes (only for held stocks)
-                if is_held:
-                    sell_votes = 0
-                    for m in members:
-                        m_sell = m.sell_conditions or []
-                        if m_sell:
-                            triggered, _ = evaluate_conditions(m_sell, full_df, mode="OR")
-                            if triggered:
-                                sell_votes += 1
-
-                    if sell_mode == "any" and sell_votes > 0:
-                        sell_triggered = True
-                        sell_strategies.append(strat.name)
-                    elif sell_mode == "majority" and sell_votes > len(members) / 2:
-                        sell_triggered = True
-                        sell_strategies.append(strat.name)
+            if pf_config.get("type") == "combo":
+                combo_strats.append(strat)
+            elif strat.signal_fingerprint:
+                fp_groups[strat.signal_fingerprint].append(strat)
             else:
-                # ── Regular strategy ──
-                buy_conds = strat.buy_conditions or []
-                sell_conds = strat.sell_conditions or []
+                fp_groups[f"_solo_{strat.id}"].append(strat)
 
-                all_conds = buy_conds + sell_conds
-                if not all_conds:
-                    continue
+        # ── Evaluate fingerprint groups (one eval per group) ──
+        for fp, group in fp_groups.items():
+            representative = group[0]
+            buy_conds = representative.buy_conditions or []
+            sell_conds = representative.sell_conditions or []
+            all_conds = buy_conds + sell_conds
+            if not all_conds:
+                continue
 
-                collected = collect_indicator_params(all_conds)
-                config = IndicatorConfig.from_collected_params(collected)
-                full_df = self.indicator_engine.compute(df, config=config)
+            collected = collect_indicator_params(all_conds)
+            config = IndicatorConfig.from_collected_params(collected)
+            full_df = self.indicator_engine.compute(df, config=config)
 
-                if buy_conds:
-                    triggered, _ = evaluate_conditions(buy_conds, full_df, mode="AND")
+            if buy_conds:
+                triggered, _ = evaluate_conditions(buy_conds, full_df, mode="AND")
+                if triggered:
+                    buy_triggered = True
+                    for s in group:
+                        buy_strategies.append(s.name)
+
+            if is_held and sell_conds:
+                triggered, _ = evaluate_conditions(sell_conds, full_df, mode="OR")
+                if triggered:
+                    sell_triggered = True
+                    for s in group:
+                        sell_strategies.append(s.name)
+
+        # ── Evaluate combo strategies (unchanged) ──
+        for strat in combo_strats:
+            pf_config = strat.portfolio_config or {}
+            member_ids = pf_config.get("member_ids", [])
+            if strat.id not in combo_members_cache:
+                combo_members_cache[strat.id] = (
+                    self.db.query(Strategy)
+                    .filter(Strategy.id.in_(member_ids))
+                    .all()
+                )
+            members = combo_members_cache[strat.id]
+            vote_threshold = pf_config.get("vote_threshold", 2)
+            sell_mode = pf_config.get("sell_mode", "any")
+
+            all_member_conds = []
+            for m in members:
+                all_member_conds.extend(m.buy_conditions or [])
+                all_member_conds.extend(m.sell_conditions or [])
+            if not all_member_conds:
+                continue
+
+            collected = collect_indicator_params(all_member_conds)
+            config = IndicatorConfig.from_collected_params(collected)
+            full_df = self.indicator_engine.compute(df, config=config)
+
+            buy_votes = 0
+            voting_members: list[str] = []
+            for m in members:
+                m_buy = m.buy_conditions or []
+                if m_buy:
+                    triggered, _ = evaluate_conditions(m_buy, full_df, mode="AND")
                     if triggered:
-                        buy_triggered = True
-                        buy_strategies.append(strat.name)
+                        buy_votes += 1
+                        voting_members.append(m.name)
 
-                if is_held and sell_conds:
-                    triggered, _ = evaluate_conditions(sell_conds, full_df, mode="OR")
-                    if triggered:
-                        sell_triggered = True
-                        sell_strategies.append(strat.name)
+            if buy_votes >= vote_threshold:
+                buy_triggered = True
+                buy_strategies.append(f"{strat.name}({buy_votes}/{len(members)}票)")
+
+            if is_held:
+                sell_votes = 0
+                for m in members:
+                    m_sell = m.sell_conditions or []
+                    if m_sell:
+                        triggered, _ = evaluate_conditions(m_sell, full_df, mode="OR")
+                        if triggered:
+                            sell_votes += 1
+
+                if sell_mode == "any" and sell_votes > 0:
+                    sell_triggered = True
+                    sell_strategies.append(strat.name)
+                elif sell_mode == "majority" and sell_votes > len(members) / 2:
+                    sell_triggered = True
+                    sell_strategies.append(strat.name)
 
         # Determine action — sell takes priority for held stocks
         if sell_triggered:
