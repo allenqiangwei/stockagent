@@ -25,4 +25,9 @@ class Strategy(Base):
     category: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
     backtest_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
     source_experiment_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # ── Strategy Pool fields ──
+    signal_fingerprint: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, default=None)
+    family_rank: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    family_role: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
