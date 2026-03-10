@@ -98,6 +98,10 @@ class SignalEngine:
                     results.append(signal)
             except Exception as e:
                 logger.warning("Signal gen failed for %s: %s", code, e)
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
 
         for sig in results:
             self._save_signal(sig, trade_date)
@@ -171,6 +175,10 @@ class SignalEngine:
                     })
             except Exception as e:
                 logger.warning("Signal gen failed for %s: %s", code, e)
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
 
             yield self._sse_event({
                 "type": "progress",
@@ -432,11 +440,11 @@ class SignalEngine:
 
         volume_price = min(30.0, vol_ratio_score + ma_score)
 
-        total = round(oversold + consensus + volume_price, 1)
+        total = float(round(oversold + consensus + volume_price, 1))
         breakdown = {
-            "oversold": round(oversold, 1),
-            "consensus": round(consensus, 1),
-            "volume_price": round(volume_price, 1),
+            "oversold": float(round(oversold, 1)),
+            "consensus": float(round(consensus, 1)),
+            "volume_price": float(round(volume_price, 1)),
         }
         return total, breakdown
 
@@ -455,13 +463,13 @@ class SignalEngine:
         reasons_json = json.dumps(sig.get("reasons", []), ensure_ascii=False)
         action = sig.get("action", "hold")
         action_label = {"buy": "买入", "sell": "卖出"}.get(action, "持有")
-        alpha = sig.get("alpha_score", 0.0)
+        alpha = float(sig.get("alpha_score", 0.0) or 0.0)
         breakdown = sig.get("score_breakdown") or {}
 
         if existing:
             existing.final_score = alpha
-            existing.swing_score = breakdown.get("oversold", 0.0)
-            existing.trend_score = breakdown.get("volume_price", 0.0)
+            existing.swing_score = float(breakdown.get("oversold", 0.0))
+            existing.trend_score = float(breakdown.get("volume_price", 0.0))
             existing.signal_level = {"buy": 4, "sell": 2}.get(action, 3)
             existing.signal_level_name = action_label
             existing.reasons = reasons_json
@@ -471,8 +479,8 @@ class SignalEngine:
                 stock_code=sig["stock_code"],
                 trade_date=trade_date,
                 final_score=alpha,
-                swing_score=breakdown.get("oversold", 0.0),
-                trend_score=breakdown.get("volume_price", 0.0),
+                swing_score=float(breakdown.get("oversold", 0.0)),
+                trend_score=float(breakdown.get("volume_price", 0.0)),
                 signal_level={"buy": 4, "sell": 2}.get(action, 3),
                 signal_level_name=action_label,
                 reasons=reasons_json,

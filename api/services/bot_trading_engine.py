@@ -639,20 +639,13 @@ def _create_review(db: Session, code: str, name: str, last_sell_date: str,
         trades=trades_snapshot,
     )
     db.add(review)
-    db.flush()  # Ensure review.id is available for beta review
+    db.flush()
     logger.info("Bot review created: %s %s, PnL=¥%.2f (%.1f%%)", code, name, pnl, pnl_pct)
 
-    # Create structured beta factor review (non-blocking)
-    try:
-        from api.services.beta_engine import create_beta_review
-        beta_review = create_beta_review(db, review)
-
-        # Aggregate trajectory features from daily tracks
-        if beta_review and holding_id:
-            try:
-                from api.services.beta_trajectory import aggregate_trajectory
-                aggregate_trajectory(db, beta_review.id, holding_id, code)
-            except Exception as te:
-                logger.warning("Beta trajectory aggregation failed for %s: %s", code, te)
-    except Exception as e:
-        logger.warning("Beta review creation failed for %s: %s", code, e)
+    # Aggregate trajectory features from daily tracks (for Beta ML training)
+    if holding_id:
+        try:
+            from api.services.beta_trajectory import aggregate_trajectory
+            aggregate_trajectory(db, review.id, holding_id, code)
+        except Exception as e:
+            logger.warning("Beta trajectory aggregation failed for %s: %s", code, e)

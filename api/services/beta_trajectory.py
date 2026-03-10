@@ -10,24 +10,42 @@ logger = logging.getLogger(__name__)
 
 
 def aggregate_trajectory(db: Session, review_id: int, holding_id: int, stock_code: str) -> bool:
-    """Compute trajectory features from daily tracks and update the beta review.
+    """Compute trajectory features from daily tracks and store in BetaReview.
 
+    Creates a BetaReview record (if not exists) with is_profitable label,
+    then populates trajectory features from BetaDailyTrack records.
     Called after _create_review() in bot_trading_engine.py.
-    Returns True if trajectory was successfully aggregated.
     """
-    beta_review = db.query(BetaReview).filter(BetaReview.review_id == review_id).first()
-    if not beta_review:
-        logger.warning("No BetaReview for review_id=%d, skipping trajectory", review_id)
+    from api.models.bot_trading import BotTradeReview
+
+    # Get the trade review for PnL data
+    trade_review = db.query(BotTradeReview).filter(BotTradeReview.id == review_id).first()
+    if not trade_review:
+        logger.warning("No BotTradeReview id=%d, skipping trajectory", review_id)
         return False
 
+    # Find or create BetaReview
+    beta_review = db.query(BetaReview).filter(BetaReview.review_id == review_id).first()
+    if not beta_review:
+        beta_review = BetaReview(
+            review_id=review_id,
+            stock_code=stock_code,
+            pnl_pct=trade_review.pnl_pct,
+            holding_days=trade_review.holding_days,
+            exit_reason="auto",
+        )
+        db.add(beta_review)
+        db.flush()
+
+    beta_review.is_profitable = trade_review.pnl_pct > 0
+
+    # Get daily tracks for this holding
     tracks = (
         db.query(BetaDailyTrack)
         .filter(BetaDailyTrack.holding_id == holding_id)
         .order_by(BetaDailyTrack.track_date.asc())
         .all()
     )
-
-    beta_review.is_profitable = beta_review.pnl_pct > 0
 
     if not tracks:
         db.commit()
@@ -62,8 +80,8 @@ def aggregate_trajectory(db: Session, review_id: int, holding_id: int, stock_cod
 
     db.commit()
     logger.info(
-        "Trajectory aggregated for review_id=%d: gain=%.2f%%, loss=%.2f%%, profitable=%s",
-        review_id, beta_review.max_unrealized_gain or 0,
+        "Trajectory aggregated for %s: gain=%.2f%%, loss=%.2f%%, profitable=%s",
+        stock_code, beta_review.max_unrealized_gain or 0,
         beta_review.max_unrealized_loss or 0, beta_review.is_profitable,
     )
     return True

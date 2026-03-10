@@ -236,17 +236,7 @@ class SignalScheduler:
                     except Exception as e:
                         logger.error("Signal generation failed (non-fatal): %s", e)
 
-                    # Step 5: Aggregate beta insights (after reviews are created)
-                    jm.update_progress(job_id, 82, "Beta聚合")
-                    try:
-                        from api.services.beta_engine import aggregate_beta_insights
-                        n = aggregate_beta_insights(db)
-                        if n:
-                            logger.info("Beta insight aggregation: %d insights updated", n)
-                    except Exception as e:
-                        logger.warning("Beta aggregation failed (non-fatal): %s", e)
-
-                    # Step 5b: Track daily holdings for Beta Overlay
+                    # Step 5: Track daily holdings for Beta Overlay
                     jm.update_progress(job_id, 85, "Beta每日追踪")
                     try:
                         from api.services.beta_tracker import track_daily_holdings
