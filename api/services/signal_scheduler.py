@@ -219,6 +219,22 @@ class SignalScheduler:
                         except Exception:
                             pass
 
+                    # Step 3b: Strategy pool health check
+                    self._sync_step = "策略池检查"
+                    jm.update_progress(job_id, 75, "策略池健康检查")
+                    try:
+                        from api.services.strategy_pool import StrategyPoolManager
+                        pool_mgr = StrategyPoolManager(db)
+                        health = pool_mgr.daily_health_check()
+                        logger.info(
+                            "Pool health: %d active, %d families, %d oversized",
+                            health["active_strategies"],
+                            health["family_count"],
+                            health["oversized_families"],
+                        )
+                    except Exception as e:
+                        logger.warning("Pool health check failed (non-fatal): %s", e)
+
                     # Step 4: Generate trading signals (full market scan)
                     self._sync_step = "生成交易信号"
                     jm.update_progress(job_id, 80, "生成交易信号")
