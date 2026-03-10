@@ -96,6 +96,10 @@ class BotTradePlan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     execution_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Beta overlay scores
+    alpha_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    beta_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    combined_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         Index("ix_trade_plan_code_dir_status", "stock_code", "direction", "status"),

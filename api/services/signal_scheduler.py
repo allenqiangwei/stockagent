@@ -150,6 +150,12 @@ class SignalScheduler:
         self._sync_done = 0
         self._sync_step = "检查交易日"
 
+        # Create a job for tracking
+        from api.services.job_manager import get_job_manager
+        jm = get_job_manager()
+        job_id = jm.create("data_sync", f"Daily sync {trade_date}", triggered_by="scheduler")
+        jm.start(job_id)
+
         try:
             db = SessionLocal()
             try:
@@ -169,6 +175,7 @@ class SignalScheduler:
                 if is_trading_day:
                     # Step 0b: Data integrity check
                     self._sync_step = "数据完整性检查"
+                    jm.update_progress(job_id, 10, "数据完整性检查")
                     try:
                         if not collector:
                             from api.services.data_collector import DataCollector
@@ -179,10 +186,12 @@ class SignalScheduler:
 
                     # Step 1: Sync daily prices (batch: 1 API call for entire market)
                     self._sync_step = "批量同步日线数据"
+                    jm.update_progress(job_id, 25, "批量同步日线数据")
                     self._sync_daily_prices(db, trade_date)
 
                     # Step 2: Execute pending trade plans (needs today's OHLCV)
                     self._sync_step = "执行交易计划"
+                    jm.update_progress(job_id, 50, "执行交易计划")
                     try:
                         from api.services.bot_trading_engine import execute_pending_plans
                         plan_results = execute_pending_plans(db, trade_date)
@@ -197,6 +206,7 @@ class SignalScheduler:
 
                     # Step 3: Monitor exit conditions (SL/TP/MHD)
                     self._sync_step = "监控退出条件"
+                    jm.update_progress(job_id, 70, "监控退出条件")
                     try:
                         from api.services.bot_trading_engine import monitor_exit_conditions
                         exit_results = monitor_exit_conditions(db, trade_date)
@@ -209,7 +219,25 @@ class SignalScheduler:
                         except Exception:
                             pass
 
-                    # Step 4: Aggregate beta insights (after reviews are created)
+                    # Step 4: Generate trading signals (full market scan)
+                    self._sync_step = "生成交易信号"
+                    jm.update_progress(job_id, 80, "生成交易信号")
+                    try:
+                        from api.services.signal_engine import SignalEngine
+                        engine = SignalEngine(db)
+                        # Consume the streaming generator to run full scan
+                        generated = 0
+                        for event_str in engine.generate_signals_stream(trade_date):
+                            if '"type": "done"' in event_str:
+                                import json
+                                payload = json.loads(event_str.replace("data: ", "").strip())
+                                generated = payload.get("total_generated", 0)
+                        logger.info("Signal generation done for %s: %d signals", trade_date, generated)
+                    except Exception as e:
+                        logger.error("Signal generation failed (non-fatal): %s", e)
+
+                    # Step 5: Aggregate beta insights (after reviews are created)
+                    jm.update_progress(job_id, 82, "Beta聚合")
                     try:
                         from api.services.beta_engine import aggregate_beta_insights
                         n = aggregate_beta_insights(db)
@@ -218,15 +246,49 @@ class SignalScheduler:
                     except Exception as e:
                         logger.warning("Beta aggregation failed (non-fatal): %s", e)
 
+                    # Step 5b: Track daily holdings for Beta Overlay
+                    jm.update_progress(job_id, 85, "Beta每日追踪")
+                    try:
+                        from api.services.beta_tracker import track_daily_holdings
+                        tracked = track_daily_holdings(db, trade_date)
+                        if tracked:
+                            logger.info("Beta daily tracking: %d holdings tracked", tracked)
+                    except Exception as e:
+                        logger.warning("Beta daily tracking failed (non-fatal): %s", e)
+
+                    # Step 5c: Retrain Beta ML model (daily rolling)
+                    jm.update_progress(job_id, 88, "Beta ML训练")
+                    try:
+                        from api.services.beta_ml import train_model
+                        train_result = train_model(db)
+                        logger.info("Beta ML training: %s", train_result.get("status", "unknown"))
+                    except Exception as e:
+                        logger.warning("Beta ML training failed (non-fatal): %s", e)
+
+                    # Step 5d: Score signals and create Beta-ranked plans
+                    jm.update_progress(job_id, 92, "Beta评分+计划")
+                    try:
+                        from api.services.beta_scorer import score_and_create_plans
+                        from datetime import timedelta as _td
+                        plan_date = (datetime.strptime(trade_date, "%Y-%m-%d") + _td(days=1)).strftime("%Y-%m-%d")
+                        plans = score_and_create_plans(db, trade_date, plan_date)
+                        if plans:
+                            logger.info("Beta scorer: %d plans created for %s", len(plans), plan_date)
+                    except Exception as e:
+                        logger.warning("Beta scoring failed (non-fatal): %s", e)
+
                     logger.info("Daily data sync completed for %s", trade_date)
+                    jm.succeed(job_id, f"Sync completed for {trade_date}")
                 else:
                     logger.info("Skipped data sync & plans (non-trading day)")
+                    jm.succeed(job_id, "Non-trading day, skipped")
 
                 self._last_run_date = trade_date
             finally:
                 db.close()
         except Exception as e:
             logger.error("Scheduled data sync failed: %s", e)
+            jm.fail(job_id, str(e)[:500])
         finally:
             self._is_refreshing = False
             self._sync_step = ""

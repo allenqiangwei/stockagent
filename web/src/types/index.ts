@@ -674,7 +674,7 @@ export interface BotTradePlanItem {
   status: "pending" | "executed" | "expired";
   thinking: string;
   report_id: number | null;
-  source: "ai" | "stop_loss" | "take_profit" | "max_hold";
+  source: "ai" | "stop_loss" | "take_profit" | "max_hold" | "beta";
   created_at: string;
   executed_at: string | null;
   execution_price: number | null;
@@ -682,4 +682,37 @@ export interface BotTradePlanItem {
   today_change_pct: number | null;
   today_high: number | null;
   today_low: number | null;
+  alpha_score: number | null;
+  beta_score: number | null;
+  combined_score: number | null;
+}
+
+// ── Beta ML Model ───────────────────────────────
+export interface BetaModelStatus {
+  has_model: boolean;
+  phase: "cold" | "warm" | "mature";
+  training_samples: number;
+  version?: string;
+  model_type?: string;
+  auc_score?: number;
+  accuracy?: number;
+  training_window?: string;
+  feature_importance?: Record<string, number>;
+  created_at?: string;
+  available_reviews?: number;
+  message?: string;
+}
+
+export interface BetaRankedPlan {
+  id: number;
+  stock_code: string;
+  stock_name: string;
+  plan_price: number;
+  quantity: number;
+  alpha_score: number | null;
+  beta_score: number | null;
+  combined_score: number | null;
+  status: string;
+  thinking: string;
+  source: string;
 }

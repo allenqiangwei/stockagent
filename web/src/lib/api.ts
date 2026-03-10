@@ -1,7 +1,21 @@
 const BASE = "/api";
 
+function authHeaders(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const key = localStorage.getItem("stockagent_api_key");
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init);
+  const headers = { ...authHeaders(), ...init?.headers };
+  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  if (res.status === 401 && typeof window !== "undefined") {
+    // Redirect to login on auth failure (skip if already on /login)
+    if (!window.location.pathname.startsWith("/login")) {
+      window.location.href = "/login";
+    }
+    throw new Error("Unauthorized");
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`API ${res.status}: ${text}`);
@@ -147,7 +161,7 @@ export const signals = {
       codes ?? null
     ),
   generateStream: (date = "") =>
-    fetch(`${BASE}/signals/generate-stream?date=${date}`, { method: "POST" }),
+    fetch(`${BASE}/signals/generate-stream?date=${date}`, { method: "POST", headers: authHeaders() }),
 };
 
 // ── News ─────────────────────────────────────────
@@ -192,7 +206,7 @@ export const lab = {
   }) =>
     fetch(`${BASE}/lab/experiments`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(data),
     }),
   promoteStrategy: (id: number) =>
@@ -230,7 +244,7 @@ export const backtest = {
   }) => {
     return fetch(`${BASE}/backtest/run`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(data),
     });
   },
@@ -252,6 +266,14 @@ export const ai = {
     post<{ message: string }>(`/ai/sync-data${date ? `?trade_date=${date}` : ""}`, {}),
   betaAggregate: () =>
     post<{ insights_updated: number }>("/beta/insights/aggregate", {}),
+  betaModelStatus: () =>
+    request<import("@/types").BetaModelStatus>("/beta/model/status"),
+  betaTrainModel: (force = false) =>
+    post<Record<string, unknown>>(`/beta/model/train?force=${force}`, {}),
+  betaRankedPlans: (planDate?: string, limit = 10) =>
+    request<import("@/types").BetaRankedPlan[]>(
+      `/beta/plans/ranked?plan_date=${planDate || ""}&limit=${limit}`
+    ),
   triggerAnalysis: (date?: string) =>
     post<AnalysisTriggerResponse>("/ai/analyze", { date: date || null }),
   analysisProgress: (jobId: string) =>

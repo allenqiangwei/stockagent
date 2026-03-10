@@ -55,6 +55,9 @@ def capture_beta_snapshots(
             stock_sent = _get_stock_sentiment(db, code)
             events = _get_active_events(db, code, stock.industry if stock else "", report_date)
 
+            # Compute ML feature columns
+            ml_features = _compute_ml_features(db, code, report_date, valuation)
+
             snap = BetaSnapshot(
                 stock_code=code,
                 stock_name=rec.get("stock_name", stock.name if stock else ""),
@@ -77,6 +80,16 @@ def capture_beta_snapshots(
                 action=rec.get("action", ""),
                 alpha_score=rec.get("alpha_score"),
                 ai_reasoning=rec.get("reason", "")[:500],
+                # ML feature columns
+                strategy_family=rec.get("strategy_family"),
+                final_score=rec.get("alpha_score"),
+                entry_price=ml_features.get("entry_price"),
+                day_of_week=ml_features.get("day_of_week"),
+                stock_return_5d=ml_features.get("stock_return_5d"),
+                stock_volatility_20d=ml_features.get("stock_volatility_20d"),
+                volume_ratio_5d=ml_features.get("volume_ratio_5d"),
+                index_return_5d=ml_features.get("index_return_5d"),
+                index_return_20d=ml_features.get("index_return_20d"),
             )
             db.add(snap)
             db.flush()
@@ -488,6 +501,66 @@ def _get_active_events(db: Session, code: str, industry: str, report_date: str) 
                 "summary": (e.summary or "")[:200],
             })
     return relevant[:5]
+
+
+def _compute_ml_features(db: Session, code: str, report_date: str, valuation) -> dict:
+    """Compute ML feature columns for a beta snapshot."""
+    from src.data_storage.database import DailyPrice, IndexDaily
+    import numpy as np
+
+    features: dict = {"day_of_week": datetime.now().weekday()}
+
+    try:
+        # Get recent stock prices (most recent 21 trading days)
+        prices = (
+            db.query(DailyPrice)
+            .filter(DailyPrice.stock_code == code, DailyPrice.trade_date <= report_date)
+            .order_by(DailyPrice.trade_date.desc())
+            .limit(21)
+            .all()
+        )
+
+        if prices:
+            features["entry_price"] = prices[0].close
+
+            if len(prices) >= 6:
+                ret_5d = (prices[0].close - prices[5].close) / prices[5].close * 100
+                features["stock_return_5d"] = round(ret_5d, 4)
+
+                avg_vol_5 = sum(p.volume for p in prices[:5]) / 5
+                prev_avg = sum(p.volume for p in prices[1:6]) / 5
+                features["volume_ratio_5d"] = round(avg_vol_5 / prev_avg, 4) if prev_avg > 0 else None
+
+            if len(prices) >= 21:
+                returns = [
+                    (prices[i].close - prices[i + 1].close) / prices[i + 1].close
+                    for i in range(20)
+                    if prices[i + 1].close > 0
+                ]
+                if returns:
+                    features["stock_volatility_20d"] = round(float(np.std(returns)) * 100, 4)
+
+        # Get index returns (上证指数 000001)
+        idx_prices = (
+            db.query(IndexDaily)
+            .filter(IndexDaily.index_code == "000001", IndexDaily.trade_date <= report_date)
+            .order_by(IndexDaily.trade_date.desc())
+            .limit(21)
+            .all()
+        )
+
+        if idx_prices and len(idx_prices) >= 6:
+            idx_ret_5d = (idx_prices[0].close - idx_prices[5].close) / idx_prices[5].close * 100
+            features["index_return_5d"] = round(idx_ret_5d, 4)
+
+        if idx_prices and len(idx_prices) >= 21:
+            idx_ret_20d = (idx_prices[0].close - idx_prices[20].close) / idx_prices[20].close * 100
+            features["index_return_20d"] = round(idx_ret_20d, 4)
+
+    except Exception as e:
+        logger.warning("ML feature computation failed for %s: %s", code, e)
+
+    return features
 
 
 def _upsert_insight(db: Session, insight_type: str, dimension: str, reviews: list[BetaReview]):

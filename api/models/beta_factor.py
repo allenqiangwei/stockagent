@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Integer, String, Float, Text, DateTime, Index
+from sqlalchemy import Boolean, Integer, String, Float, Text, DateTime, Index, LargeBinary
 from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +48,17 @@ class BetaSnapshot(Base):
     alpha_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ai_reasoning: Mapped[str] = mapped_column(Text, default="")
 
+    # ML features (Beta Overlay)
+    strategy_family: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    final_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    day_of_week: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    stock_return_5d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stock_volatility_20d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume_ratio_5d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    index_return_5d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    index_return_20d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     __table_args__ = (
@@ -80,6 +91,17 @@ class BetaReview(Base):
     key_lesson: Mapped[str] = mapped_column(String(500), default="")
     entry_snapshot_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # Trajectory aggregates (filled after position close)
+    max_unrealized_gain: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_unrealized_loss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    regime_changed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    volume_trend_slope: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    price_path_volatility: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sector_heat_delta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    news_events_during_hold: Mapped[int] = mapped_column(Integer, default=0)
+    index_return_during_hold: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    is_profitable: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -105,3 +127,50 @@ class BetaInsight(Base):
     __table_args__ = (
         Index("ix_beta_insight_type_dim", "insight_type", "dimension"),
     )
+
+
+class BetaDailyTrack(Base):
+    """Daily tracking record for each active bot holding."""
+    __tablename__ = "beta_daily_tracks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    holding_id: Mapped[int] = mapped_column(Integer, index=True)
+    stock_code: Mapped[str] = mapped_column(String(6), index=True)
+    track_date: Mapped[str] = mapped_column(String(10))
+
+    close_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    daily_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    cumulative_pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    volume_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    regime_code: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    sector_heat_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    index_close: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    news_event_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        Index("ix_beta_track_holding_date", "holding_id", "track_date", unique=True),
+    )
+
+
+class BetaModelState(Base):
+    """Persisted XGBoost/scorecard model state with versioning."""
+    __tablename__ = "beta_model_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    model_type: Mapped[str] = mapped_column(String(20), default="scorecard")
+    model_blob: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    feature_names: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    feature_importance: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    training_samples: Mapped[int] = mapped_column(Integer, default=0)
+    auc_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    accuracy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    training_window_start: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    training_window_end: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    hyperparams: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

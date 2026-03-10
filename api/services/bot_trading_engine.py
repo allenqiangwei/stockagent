@@ -551,7 +551,8 @@ def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_p
     logger.info("Bot %s: %s %s × %d @ ¥%.2f = ¥%.0f [%s]", action.upper(), code, name, sell_qty, price, amount, sell_reason or "ai")
 
     if fully_exited:
-        _create_review(db, code, name, trade_date)
+        db.flush()  # Ensure the sell trade is visible to _create_review's query
+        _create_review(db, code, name, trade_date, holding_id=holding.id)
         db.delete(holding)
 
     return {"action": action, "stock_code": code, "quantity": sell_qty, "price": price, "amount": amount, "fully_exited": fully_exited}
@@ -580,7 +581,8 @@ def _execute_hold(db: Session, code: str, name: str, price: float | None, reason
     return {"action": "hold", "stock_code": code}
 
 
-def _create_review(db: Session, code: str, name: str, last_sell_date: str):
+def _create_review(db: Session, code: str, name: str, last_sell_date: str,
+                   *, holding_id: int | None = None):
     """Create a trade review record after fully exiting a position."""
     trades = (
         db.query(BotTrade)
@@ -643,6 +645,14 @@ def _create_review(db: Session, code: str, name: str, last_sell_date: str):
     # Create structured beta factor review (non-blocking)
     try:
         from api.services.beta_engine import create_beta_review
-        create_beta_review(db, review)
+        beta_review = create_beta_review(db, review)
+
+        # Aggregate trajectory features from daily tracks
+        if beta_review and holding_id:
+            try:
+                from api.services.beta_trajectory import aggregate_trajectory
+                aggregate_trajectory(db, beta_review.id, holding_id, code)
+            except Exception as te:
+                logger.warning("Beta trajectory aggregation failed for %s: %s", code, te)
     except Exception as e:
         logger.warning("Beta review creation failed for %s: %s", code, e)
