@@ -64,6 +64,7 @@ def create_strategy(req: StrategyCreate, db: Session = Depends(get_db)):
         rank_config=req.rank_config,
         portfolio_config=req.portfolio_config,
         category=req.category,
+        backtest_summary=req.backtest_summary,
     )
     db.add(s)
     db.commit()
@@ -111,7 +112,7 @@ def delete_strategy(strategy_id: int, db: Session = Depends(get_db)):
 
 @router.post("/cleanup")
 def cleanup_strategies(
-    min_score: float = Query(0.75, description="Minimum score to keep"),
+    min_score: float = Query(0.80, description="Minimum score to keep"),
     min_return_pct: float = Query(60.0, description="Minimum return % to keep"),
     max_drawdown_pct: float = Query(18.0, description="Maximum drawdown % to keep"),
     min_trades: int = Query(50, description="Minimum trades to keep"),
@@ -162,6 +163,64 @@ def cleanup_strategies(
         "deleted": len(deleted_ids),
         "kept": len(all_strats) - len(deleted_ids),
     }
+
+
+@router.post("/pool/rebalance")
+def rebalance_pool(
+    max_per_family: int = Query(15, description="Max active strategies per signal family"),
+    dry_run: bool = Query(False, description="If true, report changes without executing"),
+    db: Session = Depends(get_db),
+):
+    """Rebalance strategy pool: archive redundant strategies, keep top-N per family."""
+    from api.services.strategy_pool import StrategyPoolManager
+    mgr = StrategyPoolManager(db)
+    return mgr.rebalance(max_per_family=max_per_family, dry_run=dry_run)
+
+
+@router.get("/pool/status")
+def pool_status(db: Session = Depends(get_db)):
+    """Return comprehensive strategy pool status."""
+    from api.services.strategy_pool import StrategyPoolManager
+    mgr = StrategyPoolManager(db)
+    return mgr.get_pool_status()
+
+
+@router.get("/families")
+def list_families(db: Session = Depends(get_db)):
+    """List strategy families grouped by signal fingerprint."""
+    from api.services.strategy_pool import StrategyPoolManager
+    mgr = StrategyPoolManager(db)
+    status = mgr.get_pool_status()
+    return status["families_summary"]
+
+
+@router.get("/families/{fingerprint}")
+def get_family(fingerprint: str, db: Session = Depends(get_db)):
+    """Get all strategies in a specific signal family (including archived)."""
+    strategies = (
+        db.query(Strategy)
+        .filter(Strategy.signal_fingerprint == fingerprint)
+        .order_by(Strategy.family_rank.nullslast(), Strategy.id)
+        .all()
+    )
+    if not strategies:
+        raise HTTPException(404, "Family not found")
+    return [StrategyResponse.model_validate(s) for s in strategies]
+
+
+@router.post("/{strategy_id}/unarchive")
+def unarchive_strategy(strategy_id: int, db: Session = Depends(get_db)):
+    """Restore an archived strategy to active status."""
+    s = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+    if not s:
+        raise HTTPException(404, "Strategy not found")
+    if s.archived_at is None:
+        return {"message": "Strategy is already active", "id": strategy_id}
+    s.archived_at = None
+    s.enabled = True
+    s.family_role = "active"
+    db.commit()
+    return {"message": "Strategy unarchived", "id": strategy_id}
 
 
 @router.post("/combo", response_model=StrategyResponse, status_code=201)
