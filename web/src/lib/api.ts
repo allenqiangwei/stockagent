@@ -82,6 +82,9 @@ import type {
   BotSummary,
   BotStockTimeline,
   BotTradePlanItem,
+  PoolStatus,
+  RebalanceResult,
+  FamilySummary,
 } from "@/types";
 
 export const market = {
@@ -143,14 +146,14 @@ export const strategies = {
   indicatorGroups: () =>
     request<IndicatorGroupsResponse>("/strategies/indicator-groups"),
   poolStatus: () =>
-    request<import("@/types").PoolStatus>("/strategies/pool/status"),
+    request<PoolStatus>("/strategies/pool/status"),
   rebalance: (dryRun = false, maxPerFamily = 15) =>
-    post<import("@/types").RebalanceResult>("/strategies/pool/rebalance", {
+    post<RebalanceResult>("/strategies/pool/rebalance", {
       dry_run: dryRun,
       max_per_family: maxPerFamily,
     }),
   families: () =>
-    request<import("@/types").FamilySummary[]>("/strategies/families"),
+    request<FamilySummary[]>("/strategies/families"),
   unarchive: (id: number) =>
     post<{ message: string }>(`/strategies/${id}/unarchive`, {}),
 };

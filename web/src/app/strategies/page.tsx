@@ -150,11 +150,14 @@ export default function StrategiesPage() {
   // Pool status
   const { data: poolStatus } = usePoolStatus();
   const rebalanceMut = useMutation({
-    mutationFn: ({ dryRun, maxPerFamily }: { dryRun?: boolean; maxPerFamily?: number } = {}) =>
+    mutationFn: ({ dryRun, maxPerFamily }: { dryRun?: boolean; maxPerFamily?: number }) =>
       strategiesApi.rebalance(dryRun, maxPerFamily),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["strategies"] });
       qc.invalidateQueries({ queryKey: ["strategies", "pool-status"] });
+    },
+    onError: (err: Error) => {
+      alert(`再平衡失败: ${err.message}`);
     },
   });
 
@@ -198,9 +201,13 @@ export default function StrategiesPage() {
   }
 
   async function handleUnarchive(id: number) {
-    await strategiesApi.unarchive(id);
-    qc.invalidateQueries({ queryKey: ["strategies"] });
-    qc.invalidateQueries({ queryKey: ["strategies", "pool-status"] });
+    try {
+      await strategiesApi.unarchive(id);
+      qc.invalidateQueries({ queryKey: ["strategies"] });
+      qc.invalidateQueries({ queryKey: ["strategies", "pool-status"] });
+    } catch {
+      alert("取消归档失败");
+    }
   }
 
   const bs = selectedStrategy?.backtest_summary;
@@ -259,7 +266,11 @@ export default function StrategiesPage() {
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => rebalanceMut.mutate({})}
+                onClick={() => {
+                  if (confirm("确定执行策略池再平衡？这将归档低分策略。")) {
+                    rebalanceMut.mutate({});
+                  }
+                }}
                 disabled={rebalanceMut.isPending}
               >
                 <RefreshCw className={`h-4 w-4 mr-1 ${rebalanceMut.isPending ? "animate-spin" : ""}`} />
