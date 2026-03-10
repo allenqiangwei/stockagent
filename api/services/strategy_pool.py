@@ -66,7 +66,7 @@ class StrategyPoolManager:
             logger.info("Computed fingerprints for %d strategies", count)
         return count
 
-    def rebalance(self, max_per_family: int = 15, dry_run: bool = False) -> dict:
+    def rebalance(self, max_per_family: int = 3, dry_run: bool = False) -> dict:
         """Rebalance pool: keep top max_per_family per family, archive rest."""
         self.compute_all_fingerprints()
 

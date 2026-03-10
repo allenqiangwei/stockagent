@@ -41,7 +41,7 @@ def list_strategies(
 
 class _RebalanceRequest(BaseModel):
     dry_run: bool = False
-    max_per_family: int = 15
+    max_per_family: int = 3
 
 
 @router.post("/pool/rebalance")
