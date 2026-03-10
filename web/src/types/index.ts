@@ -127,6 +127,49 @@ export interface Strategy {
   category?: string | null;
   backtest_summary?: BacktestSummary | null;
   source_experiment_id?: number | null;
+  signal_fingerprint?: string | null;
+  family_rank?: number | null;
+  family_role?: string | null; // "champion" | "active" | "archive"
+  archived_at?: string | null;
+}
+
+// ── Strategy Pool / Family ───────────────────────
+export interface FamilySummary {
+  fingerprint: string;
+  representative_name: string;
+  active_count: number;
+  archived_count: number;
+  champion_score: number;
+  champion_id: number;
+  avg_score: number;
+  regime_coverage: string[];
+  exit_param_range: Record<string, unknown>;
+}
+
+export interface PoolRegimeCoverage {
+  families: number;
+  strategies: number;
+}
+
+export interface PoolStatus {
+  total_strategies: number;
+  active_strategies: number;
+  archived_strategies: number;
+  family_count: number;
+  families_summary: FamilySummary[];
+  regime_coverage: Record<string, PoolRegimeCoverage>;
+  last_rebalance_at: string | null;
+  signal_eval_reduction: string;
+}
+
+export interface RebalanceResult {
+  dry_run: boolean;
+  families_count: number;
+  archived_count: number;
+  activated_count: number;
+  active_strategies: number;
+  total_strategies: number;
+  details: Record<string, unknown>[];
 }
 
 export interface SignalItem {

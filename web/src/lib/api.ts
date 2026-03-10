@@ -142,6 +142,17 @@ export const strategies = {
   delete: (id: number) => del<{ deleted: number }>(`/strategies/${id}`),
   indicatorGroups: () =>
     request<IndicatorGroupsResponse>("/strategies/indicator-groups"),
+  poolStatus: () =>
+    request<import("@/types").PoolStatus>("/strategies/pool/status"),
+  rebalance: (dryRun = false, maxPerFamily = 15) =>
+    post<import("@/types").RebalanceResult>("/strategies/pool/rebalance", {
+      dry_run: dryRun,
+      max_per_family: maxPerFamily,
+    }),
+  families: () =>
+    request<import("@/types").FamilySummary[]>("/strategies/families"),
+  unarchive: (id: number) =>
+    post<{ message: string }>(`/strategies/${id}/unarchive`, {}),
 };
 
 // ── Signals ───────────────────────────────────────────

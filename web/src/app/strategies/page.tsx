@@ -13,9 +13,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { useStrategies, useIndicatorGroups } from "@/hooks/use-queries";
+import { useStrategies, useIndicatorGroups, usePoolStatus } from "@/hooks/use-queries";
 import { strategies as strategiesApi } from "@/lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
 import {
   Settings2,
   Trash2,
@@ -23,6 +23,10 @@ import {
   ToggleRight,
   Plus,
   Pencil,
+  RefreshCw,
+  ArchiveRestore,
+  Trophy,
+  Layers,
 } from "lucide-react";
 import type { Strategy, StrategyRule, IndicatorGroup, RegimeStatEntry } from "@/types";
 import { StrategyEditor } from "@/components/strategy/strategy-editor";
@@ -44,6 +48,27 @@ function CategoryBadge({ category }: { category?: string | null }) {
       {category}
     </Badge>
   );
+}
+
+// ── Family role badge ──────────────────────────
+function FamilyRoleBadge({ role }: { role?: string | null }) {
+  if (!role) return null;
+  if (role === "champion") {
+    return (
+      <Badge className="px-1 py-0 text-[10px] leading-4 bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 hover:bg-yellow-500/20">
+        <Trophy className="h-3 w-3 mr-0.5" />
+        冠军
+      </Badge>
+    );
+  }
+  if (role === "archive") {
+    return (
+      <Badge variant="secondary" className="px-1 py-0 text-[10px] leading-4 opacity-70">
+        归档
+      </Badge>
+    );
+  }
+  return null; // "active" — no extra badge needed
 }
 
 // ── AI label helpers ────────────────────────────
@@ -122,6 +147,17 @@ export default function StrategiesPage() {
   const { data: meta } = useIndicatorGroups();
   const groups = meta?.groups ?? {};
 
+  // Pool status
+  const { data: poolStatus } = usePoolStatus();
+  const rebalanceMut = useMutation({
+    mutationFn: ({ dryRun, maxPerFamily }: { dryRun?: boolean; maxPerFamily?: number } = {}) =>
+      strategiesApi.rebalance(dryRun, maxPerFamily),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["strategies"] });
+      qc.invalidateQueries({ queryKey: ["strategies", "pool-status"] });
+    },
+  });
+
   const [selectedId, setSelectedId] = useState<number>(0);
   const selectedStrategy = strats?.find((s) => s.id === selectedId) ?? null;
 
@@ -161,6 +197,12 @@ export default function StrategiesPage() {
     setEditorOpen(false);
   }
 
+  async function handleUnarchive(id: number) {
+    await strategiesApi.unarchive(id);
+    qc.invalidateQueries({ queryKey: ["strategies"] });
+    qc.invalidateQueries({ queryKey: ["strategies", "pool-status"] });
+  }
+
   const bs = selectedStrategy?.backtest_summary;
 
   return (
@@ -175,6 +217,58 @@ export default function StrategiesPage() {
           新建策略
         </Button>
       </div>
+
+      {/* Pool status card */}
+      {poolStatus && (
+        <Card>
+          <CardContent className="px-4 py-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-4 text-sm flex-wrap">
+                <div className="flex items-center gap-1.5">
+                  <Layers className="h-4 w-4 text-muted-foreground" />
+                  <span className="text-muted-foreground">策略池</span>
+                </div>
+                <div>
+                  <span className="font-mono font-medium">{poolStatus.total_strategies}</span>
+                  <span className="text-muted-foreground ml-1">总计</span>
+                </div>
+                <div>
+                  <span className="font-mono font-medium text-green-400">{poolStatus.active_strategies}</span>
+                  <span className="text-muted-foreground ml-1">活跃</span>
+                </div>
+                <div>
+                  <span className="font-mono font-medium text-muted-foreground">{poolStatus.archived_strategies}</span>
+                  <span className="text-muted-foreground ml-1">归档</span>
+                </div>
+                <div>
+                  <span className="font-mono font-medium">{poolStatus.family_count}</span>
+                  <span className="text-muted-foreground ml-1">族群</span>
+                </div>
+                {poolStatus.signal_eval_reduction && (
+                  <div>
+                    <span className="text-muted-foreground">信号精简</span>
+                    <span className="font-mono ml-1">{poolStatus.signal_eval_reduction}</span>
+                  </div>
+                )}
+                {poolStatus.last_rebalance_at && (
+                  <div className="text-xs text-muted-foreground">
+                    上次再平衡: {new Date(poolStatus.last_rebalance_at).toLocaleDateString("zh-CN")}
+                  </div>
+                )}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => rebalanceMut.mutate({})}
+                disabled={rebalanceMut.isPending}
+              >
+                <RefreshCw className={`h-4 w-4 mr-1 ${rebalanceMut.isPending ? "animate-spin" : ""}`} />
+                {rebalanceMut.isPending ? "执行中..." : "再平衡"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Category tabs */}
       <Tabs value={activeCategory} onValueChange={setActiveCategory}>
@@ -206,6 +300,7 @@ export default function StrategiesPage() {
                   <TableRow>
                     <TableHead>名称</TableHead>
                     <TableHead className="w-16">分类</TableHead>
+                    <TableHead className="w-14">角色</TableHead>
                     <TableHead className="w-14 text-right">评分</TableHead>
                     <TableHead className="w-16 text-right">收益</TableHead>
                     <TableHead className="w-16 text-right">回撤</TableHead>
@@ -217,14 +312,15 @@ export default function StrategiesPage() {
                 <TableBody>
                   {strats.map((s) => {
                     const b = s.backtest_summary;
+                    const isArchived = s.family_role === "archive";
                     return (
                       <TableRow
                         key={s.id}
-                        className={
+                        className={`${
                           selectedId === s.id
                             ? "bg-muted/50"
                             : "cursor-pointer hover:bg-muted/30"
-                        }
+                        }${isArchived ? " opacity-50" : ""}`}
                         onClick={() => setSelectedId(s.id)}
                       >
                         <TableCell className="font-medium max-w-[240px]">
@@ -239,6 +335,9 @@ export default function StrategiesPage() {
                         </TableCell>
                         <TableCell>
                           <CategoryBadge category={s.category} />
+                        </TableCell>
+                        <TableCell>
+                          <FamilyRoleBadge role={s.family_role} />
                         </TableCell>
                         <TableCell className="text-right font-mono text-xs">
                           {fmtScore(b?.score)}
@@ -267,35 +366,52 @@ export default function StrategiesPage() {
                             : "—"}
                         </TableCell>
                         <TableCell>
-                          <Badge variant={s.enabled ? "default" : "secondary"}>
-                            {s.enabled ? "启用" : "停用"}
-                          </Badge>
+                          {isArchived ? (
+                            <Badge variant="secondary" className="opacity-70">归档</Badge>
+                          ) : (
+                            <Badge variant={s.enabled ? "default" : "secondary"}>
+                              {s.enabled ? "启用" : "停用"}
+                            </Badge>
+                          )}
                         </TableCell>
                         <TableCell>
                           <div
                             className="flex items-center gap-1"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => openEdit(s)}
-                              title="编辑"
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => toggleEnabled(s)}
-                              title={s.enabled ? "停用" : "启用"}
-                            >
-                              {s.enabled ? (
-                                <ToggleRight className="h-4 w-4 text-chart-1" />
-                              ) : (
-                                <ToggleLeft className="h-4 w-4" />
-                              )}
-                            </Button>
+                            {isArchived ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => handleUnarchive(s.id)}
+                                title="取消归档"
+                              >
+                                <ArchiveRestore className="h-4 w-4 text-blue-400" />
+                              </Button>
+                            ) : (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => openEdit(s)}
+                                  title="编辑"
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => toggleEnabled(s)}
+                                  title={s.enabled ? "停用" : "启用"}
+                                >
+                                  {s.enabled ? (
+                                    <ToggleRight className="h-4 w-4 text-chart-1" />
+                                  ) : (
+                                    <ToggleLeft className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              </>
+                            )}
                             <Button
                               size="sm"
                               variant="ghost"
@@ -339,7 +455,16 @@ export default function StrategiesPage() {
                     )}
                     {stripAiPrefix(selectedStrategy.name)}
                     <CategoryBadge category={selectedStrategy.category} />
+                    <FamilyRoleBadge role={selectedStrategy.family_role} />
                   </div>
+                  {selectedStrategy.signal_fingerprint && (
+                    <div className="text-xs text-muted-foreground mt-0.5 font-mono truncate">
+                      族群: {selectedStrategy.signal_fingerprint.slice(0, 12)}...
+                      {selectedStrategy.family_rank != null && (
+                        <span className="ml-2">排名 #{selectedStrategy.family_rank}</span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Backtest summary (only when available) */}

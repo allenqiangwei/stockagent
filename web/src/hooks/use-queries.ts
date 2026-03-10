@@ -146,6 +146,13 @@ export function useIndicatorGroups() {
   });
 }
 
+export function usePoolStatus() {
+  return useQuery({
+    queryKey: ["strategies", "pool-status"],
+    queryFn: () => strategies.poolStatus(),
+  });
+}
+
 // ── Signals ──────────────────────────────────────
 export function useSignalMeta() {
   return useQuery({
