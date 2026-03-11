@@ -15,7 +15,7 @@ class BotPortfolio(Base):
     __tablename__ = "bot_portfolio"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    stock_code: Mapped[str] = mapped_column(String(6), unique=True, index=True)
+    stock_code: Mapped[str] = mapped_column(String(6), index=True)
     stock_name: Mapped[str] = mapped_column(String(50), default="")
     quantity: Mapped[int] = mapped_column(Integer, default=0)
     avg_cost: Mapped[float] = mapped_column(Float, default=0.0)

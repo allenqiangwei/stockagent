@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 
 class BotPortfolioItem(BaseModel):
+    id: Optional[int] = None
     stock_code: str
     stock_name: str = ""
     quantity: int = 0
@@ -79,10 +80,23 @@ class BotTradePlanItem(BaseModel):
     status: str = "pending"
     thinking: str = ""
     report_id: Optional[int] = None
-    source: str = "ai"  # ai|stop_loss|take_profit|max_hold
+    source: str = "ai"  # ai|beta|stop_loss|take_profit|max_hold
+    strategy_id: Optional[int] = None
     created_at: str = ""
     executed_at: Optional[str] = None
     execution_price: Optional[float] = None
+    # Beta scoring
+    alpha_score: Optional[float] = None
+    beta_score: Optional[float] = None
+    combined_score: Optional[float] = None
+    phase: Optional[str] = None  # cold|warm|mature
+    # Strategy details (enriched from strategy lookup)
+    strategy_name: Optional[str] = None
+    stop_loss_pct: Optional[float] = None
+    take_profit_pct: Optional[float] = None
+    max_hold_days: Optional[int] = None
+    buy_conditions: Optional[list] = None
+    sell_conditions: Optional[list] = None
     # Today's market data (populated if available)
     today_close: Optional[float] = None
     today_change_pct: Optional[float] = None

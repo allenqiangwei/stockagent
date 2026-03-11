@@ -60,7 +60,7 @@ def _get_prev_close(db: Session, stock_code: str, report_date: str) -> float | N
     return round(row.close, 2) if row and row.close else None
 
 
-def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:
+def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:  # noqa: C901
     """Check all holdings for SL/TP/MHD exit conditions, matching backtest engine logic.
 
     Execution order: SL > TP > MHD (same as backtest).
@@ -117,6 +117,8 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:
         if bought_today:
             continue
 
+        strat_id = h.strategy_id  # may be None for AI-recommended positions
+
         # ── SL check ──
         if sl_pct and sl_pct < 0:
             sl_threshold = round(ref_price * (1 + sl_pct / 100), 2)
@@ -127,6 +129,7 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:
                         db, h.stock_code, h.stock_name, sell_price, 100.0,
                         f"止损触发(跳空): 阈值¥{sl_threshold}, 开盘¥{open_p}",
                         None, trade_date, sell_reason="stop_loss",
+                        strategy_id=strat_id,
                     )
                     if result:
                         results.append(result)
@@ -137,6 +140,7 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:
                     db, h.stock_code, h.stock_name, sell_price, 100.0,
                     f"止损触发: 阈值¥{sl_threshold}, 日低¥{low}",
                     None, trade_date, sell_reason="stop_loss",
+                    strategy_id=strat_id,
                 )
                 if result:
                     results.append(result)
@@ -151,6 +155,7 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:
                     db, h.stock_code, h.stock_name, sell_price, 100.0,
                     f"止盈触发(跳空): 阈值¥{tp_threshold}, 开盘¥{open_p}",
                     None, trade_date, sell_reason="take_profit",
+                    strategy_id=strat_id,
                 )
                 if result:
                     results.append(result)
@@ -161,6 +166,7 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:
                     db, h.stock_code, h.stock_name, sell_price, 100.0,
                     f"止盈触发: 阈值¥{tp_threshold}, 日高¥{high}",
                     None, trade_date, sell_reason="take_profit",
+                    strategy_id=strat_id,
                 )
                 if result:
                     results.append(result)
@@ -181,7 +187,7 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:
                         db, h.stock_code, h.stock_name, "sell",
                         float(ohlcv.close), h.quantity, 100.0, next_td,
                         f"最长持有{mhd}天到期(已持有{hold_days}天)",
-                        None, source="max_hold",
+                        None, source="max_hold", strategy_id=strat_id,
                     )
                     results.append({
                         "action": "max_hold_plan", "stock_code": h.stock_code,
@@ -261,16 +267,22 @@ def _upsert_plan(db: Session, code: str, name: str, direction: str,
                  price: float, quantity: int, sell_pct: float,
                  plan_date: str, thinking: str, report_id: int | None,
                  *, source: str = "ai", strategy_id: int | None = None) -> dict:
-    """Insert or update a pending trade plan. One pending plan per stock+direction."""
-    existing = (
-        db.query(BotTradePlan)
-        .filter(
-            BotTradePlan.stock_code == code,
-            BotTradePlan.direction == direction,
-            BotTradePlan.status == "pending",
-        )
-        .first()
+    """Insert or update a pending trade plan.
+
+    Uniqueness scope:
+    - strategy_id set: one pending plan per (stock, direction, strategy_id)
+    - strategy_id None: one pending plan per (stock, direction) for AI plans
+    """
+    q = db.query(BotTradePlan).filter(
+        BotTradePlan.stock_code == code,
+        BotTradePlan.direction == direction,
+        BotTradePlan.status == "pending",
     )
+    if strategy_id is not None:
+        q = q.filter(BotTradePlan.strategy_id == strategy_id)
+    else:
+        q = q.filter(BotTradePlan.strategy_id.is_(None))
+    existing = q.first()
 
     if existing:
         existing.plan_price = price
@@ -384,7 +396,13 @@ def execute_pending_plans(db: Session, trade_date: str) -> list[dict]:
                 )
             else:
                 # Re-check holding quantity (may have changed since plan creation)
-                holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == plan.stock_code).first()
+                # For strategy-bound positions, match by (stock_code, strategy_id)
+                holding_q = db.query(BotPortfolio).filter(
+                    BotPortfolio.stock_code == plan.stock_code
+                )
+                if plan.strategy_id:
+                    holding_q = holding_q.filter(BotPortfolio.strategy_id == plan.strategy_id)
+                holding = holding_q.first()
                 if not holding or holding.quantity <= 0:
                     plan.status = "expired"
                     logger.info("Plan EXPIRED (no holding): sell %s", plan.stock_code)
@@ -396,7 +414,7 @@ def execute_pending_plans(db: Session, trade_date: str) -> list[dict]:
                 result = _execute_sell(
                     db, plan.stock_code, plan.stock_name, exec_price,
                     actual_sell_pct, plan.thinking, plan.report_id, trade_date,
-                    sell_reason=sell_reason,
+                    sell_reason=sell_reason, strategy_id=plan.strategy_id,
                 )
 
             if result:
@@ -456,10 +474,25 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
     if not exit_config:
         exit_config = {"stop_loss_pct": -10, "take_profit_pct": 15, "max_hold_days": 15}
 
-    # Update or create portfolio entry
-    holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == code).first()
+    # Update or create portfolio entry.
+    # Strategy-bound positions (strategy_id set): always create a new independent row.
+    # AI/manual positions (strategy_id=None): avg-up if a row for the same stock exists.
+    if strategy_id:
+        holding = (
+            db.query(BotPortfolio)
+            .filter(BotPortfolio.stock_code == code, BotPortfolio.strategy_id == strategy_id)
+            .first()
+        )
+    else:
+        holding = (
+            db.query(BotPortfolio)
+            .filter(BotPortfolio.stock_code == code, BotPortfolio.strategy_id.is_(None))
+            .first()
+        )
+
     if holding:
-        # Average up: recalculate avg_cost (don't overwrite exit_config from first buy)
+        # Average up for same (stock, strategy) — shouldn't happen for virtual books
+        # since beta_scorer already prevents duplicates, but handle defensively
         total_cost = holding.avg_cost * holding.quantity + amount
         holding.quantity += quantity
         holding.avg_cost = total_cost / holding.quantity
@@ -500,21 +533,31 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
 
 def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_pct: float,
                   reason: str, report_id: int | None, trade_date: str,
-                  *, sell_reason: str | None = None) -> dict | None:
-    """Sell a percentage of holdings. sell_pct=100 means full exit."""
-    holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == code).first()
+                  *, sell_reason: str | None = None,
+                  strategy_id: int | None = None) -> dict | None:
+    """Sell a percentage of holdings. sell_pct=100 means full exit.
+
+    strategy_id: when set, only affects the sub-position bound to that strategy.
+    """
+    if strategy_id:
+        holding = (
+            db.query(BotPortfolio)
+            .filter(BotPortfolio.stock_code == code, BotPortfolio.strategy_id == strategy_id)
+            .first()
+        )
+    else:
+        holding = (
+            db.query(BotPortfolio)
+            .filter(BotPortfolio.stock_code == code, BotPortfolio.strategy_id.is_(None))
+            .first()
+        )
     if not holding or holding.quantity <= 0:
-        logger.warning("Bot sell skipped: no holding for %s", code)
+        logger.warning("Bot sell skipped: no holding for %s (strategy_id=%s)", code, strategy_id)
         return None
 
-    # Rule: T+1 — cannot sell stock bought on the same day
-    bought_today = (
-        db.query(BotTrade)
-        .filter(BotTrade.stock_code == code, BotTrade.action == "buy", BotTrade.trade_date == trade_date)
-        .first()
-    )
-    if bought_today:
-        logger.info("Bot sell skipped: %s was bought today (T+1 rule), date=%s", code, trade_date)
+    # Rule: T+1 — cannot sell a position that was opened today
+    if holding.buy_date == trade_date:
+        logger.info("Bot sell skipped: %s (strategy_id=%s) was bought today (T+1 rule)", code, strategy_id)
         return None
 
     if not price or price <= 0:

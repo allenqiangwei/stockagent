@@ -92,6 +92,7 @@ def get_bot_portfolio(db: Session = Depends(get_db)):
                     pass
 
         result.append(BotPortfolioItem(
+            id=h.id,
             stock_code=h.stock_code,
             stock_name=h.stock_name,
             quantity=h.quantity,
@@ -158,7 +159,9 @@ def get_stock_timeline(stock_code: str, db: Session = Depends(get_db)):
     if not trades:
         raise HTTPException(404, f"No trades found for {stock_code}")
 
-    holding = db.query(BotPortfolio).filter(BotPortfolio.stock_code == stock_code).first()
+    # Sum all sub-positions for this stock (virtual books may have multiple rows)
+    holdings = db.query(BotPortfolio).filter(BotPortfolio.stock_code == stock_code).all()
+    total_quantity = sum(h.quantity for h in holdings)
     review = (
         db.query(BotTradeReview)
         .filter(BotTradeReview.stock_code == stock_code)
@@ -169,14 +172,14 @@ def get_stock_timeline(stock_code: str, db: Session = Depends(get_db)):
     buy_amount = sum(t.amount for t in trades if t.action == "buy")
     sell_amount = sum(t.amount for t in trades if t.action in ("sell", "reduce"))
 
-    status = "holding" if holding and holding.quantity > 0 else "closed"
+    status = "holding" if total_quantity > 0 else "closed"
     pnl = sell_amount - buy_amount if status == "closed" else 0.0
     pnl_pct = (pnl / buy_amount * 100) if buy_amount > 0 and status == "closed" else 0.0
 
     first_buy = next((t for t in trades if t.action == "buy"), None)
     last_trade = trades[-1] if trades else None
 
-    close, _ = _latest_close(db, stock_code) if holding else (None, None)
+    close, _ = _latest_close(db, stock_code) if total_quantity > 0 else (None, None)
 
     return BotStockTimeline(
         stock_code=stock_code,
@@ -189,9 +192,9 @@ def get_stock_timeline(stock_code: str, db: Session = Depends(get_db)):
         first_buy_date=first_buy.trade_date if first_buy else "",
         last_trade_date=last_trade.trade_date if last_trade else "",
         holding_days=0,
-        current_quantity=holding.quantity if holding else 0,
+        current_quantity=total_quantity,
         current_price=close,
-        current_market_value=round(close * holding.quantity, 2) if close and holding else None,
+        current_market_value=round(close * total_quantity, 2) if close and total_quantity else None,
         trades=[
             BotTradeItem(
                 id=t.id, stock_code=t.stock_code, stock_name=t.stock_name,
@@ -244,19 +247,22 @@ def list_reviews(
 
 
 def _get_today_prices(db: Session, stock_codes: list[str]) -> dict:
-    """Fetch today's OHLCV for a list of stocks. Only returns data dated today."""
+    """Fetch latest OHLCV for a list of stocks. Tries today first, falls back to most recent."""
     if not stock_codes:
         return {}
     from datetime import date as _date
+    from sqlalchemy import func
     from api.models.stock import DailyPrice
 
     today = _date.today()
+    # Try today's data first
     rows = (
         db.query(DailyPrice)
         .filter(DailyPrice.stock_code.in_(stock_codes), DailyPrice.trade_date == today)
         .all()
     )
     result = {}
+    found_codes = set()
     for row in rows:
         if row.close:
             change_pct = ((row.close - row.open) / row.open * 100) if row.open else 0.0
@@ -265,22 +271,97 @@ def _get_today_prices(db: Session, stock_codes: list[str]) -> dict:
                 "change_pct": round(change_pct, 2),
                 "high": round(row.high, 2) if row.high else None,
                 "low": round(row.low, 2) if row.low else None,
+                "is_today": True,
             }
+            found_codes.add(row.stock_code)
+
+    # Fallback: fetch most recent close for stocks missing today's data
+    missing = [c for c in stock_codes if c not in found_codes]
+    if missing:
+        # Get the latest trade_date per stock
+        latest_sub = (
+            db.query(DailyPrice.stock_code, func.max(DailyPrice.trade_date).label("max_date"))
+            .filter(DailyPrice.stock_code.in_(missing))
+            .group_by(DailyPrice.stock_code)
+            .subquery()
+        )
+        fallback_rows = (
+            db.query(DailyPrice)
+            .join(latest_sub, (DailyPrice.stock_code == latest_sub.c.stock_code) & (DailyPrice.trade_date == latest_sub.c.max_date))
+            .all()
+        )
+        for row in fallback_rows:
+            if row.close:
+                change_pct = ((row.close - row.open) / row.open * 100) if row.open else 0.0
+                result[row.stock_code] = {
+                    "close": round(row.close, 2),
+                    "change_pct": round(change_pct, 2),
+                    "high": round(row.high, 2) if row.high else None,
+                    "low": round(row.low, 2) if row.low else None,
+                    "is_today": False,
+                    "price_date": row.trade_date.isoformat() if hasattr(row.trade_date, 'isoformat') else str(row.trade_date),
+                }
+
     return result
 
 
-def _plan_to_item(p, prices: dict) -> BotTradePlanItem:
-    """Convert ORM plan + price lookup to response item."""
+def _plan_to_item(p, prices: dict, strategy_cache: dict | None = None) -> BotTradePlanItem:
+    """Convert ORM plan + price lookup to response item, enriched with strategy details."""
     px = prices.get(p.stock_code, {})
+
+    # Extract phase from thinking field: "[Beta] [AI] strategy alpha=... phase=cold"
+    phase = None
+    strategy_name = None
+    thinking = p.thinking or ""
+    if "phase=" in thinking:
+        try:
+            phase = thinking.split("phase=")[1].split()[0].strip()
+        except (IndexError, ValueError):
+            pass
+    # Extract strategy name: everything between "[Beta] " and " alpha="
+    if thinking.startswith("[Beta] ") and " alpha=" in thinking:
+        name_part = thinking[7:].split(" alpha=")[0].strip()
+        strategy_name = name_part
+
+    # Look up strategy details from cache
+    stop_loss_pct = None
+    take_profit_pct = None
+    max_hold_days = None
+    buy_conditions = None
+    sell_conditions = None
+
+    if strategy_cache and strategy_name:
+        strat = strategy_cache.get(strategy_name)
+        if strat:
+            ec = strat.exit_config or {}
+            stop_loss_pct = ec.get("stop_loss_pct")
+            take_profit_pct = ec.get("take_profit_pct")
+            max_hold_days = ec.get("max_hold_days")
+            buy_conditions = strat.buy_conditions
+            sell_conditions = strat.sell_conditions
+            if not strategy_name:
+                strategy_name = strat.name
+
     return BotTradePlanItem(
         id=p.id, stock_code=p.stock_code, stock_name=p.stock_name,
         direction=p.direction, plan_price=p.plan_price, quantity=p.quantity,
         sell_pct=p.sell_pct, plan_date=p.plan_date, status=p.status,
         thinking=p.thinking, report_id=p.report_id,
         source=getattr(p, "source", "ai") or "ai",
+        strategy_id=getattr(p, "strategy_id", None),
         created_at=p.created_at.isoformat() if p.created_at else "",
         executed_at=p.executed_at.isoformat() if p.executed_at else None,
         execution_price=p.execution_price,
+        alpha_score=getattr(p, "alpha_score", None),
+        beta_score=getattr(p, "beta_score", None),
+        combined_score=getattr(p, "combined_score", None),
+        phase=phase,
+        strategy_name=strategy_name,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        max_hold_days=max_hold_days,
+        buy_conditions=buy_conditions,
+        sell_conditions=sell_conditions,
         today_close=px.get("close"),
         today_change_pct=px.get("change_pct"),
         today_high=px.get("high"),
@@ -288,32 +369,64 @@ def _plan_to_item(p, prices: dict) -> BotTradePlanItem:
     )
 
 
+def _build_strategy_cache(db: Session, plans: list) -> dict:
+    """Build a name→Strategy lookup for all strategies referenced in plans' thinking fields.
+
+    Strategy names in thinking may be truncated, so we use prefix (LIKE) matching.
+    """
+    from api.models.strategy import Strategy
+    names = set()
+    for p in plans:
+        thinking = p.thinking or ""
+        if thinking.startswith("[Beta] ") and " alpha=" in thinking:
+            name_part = thinking[7:].split(" alpha=")[0].strip()
+            if name_part:
+                names.add(name_part)
+    if not names:
+        return {}
+    # Try exact match first, fall back to prefix match for truncated names
+    strategies = db.query(Strategy).filter(Strategy.name.in_(names)).all()
+    cache = {s.name: s for s in strategies}
+    # For names not found via exact match, try prefix match
+    missing = names - set(cache.keys())
+    for name in missing:
+        strat = db.query(Strategy).filter(Strategy.name.like(f"{name}%")).first()
+        if strat:
+            cache[name] = strat
+    return cache
+
+
 @router.get("/plans", response_model=list[BotTradePlanItem])
 def list_plans(
     status: str = Query("", description="Filter by status: pending|executed|expired"),
-    limit: int = Query(50, ge=1, le=200),
+    plan_date: str = Query("", description="Filter by plan_date (YYYY-MM-DD)"),
+    limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
-    """List trade plans, optionally filtered by status."""
+    """List trade plans, optionally filtered by status and plan_date."""
     q = db.query(BotTradePlan)
     if status:
         q = q.filter(BotTradePlan.status == status)
+    if plan_date:
+        q = q.filter(BotTradePlan.plan_date == plan_date)
     rows = q.order_by(BotTradePlan.plan_date.desc(), BotTradePlan.id.desc()).limit(limit).all()
     prices = _get_today_prices(db, list({p.stock_code for p in rows}))
-    return [_plan_to_item(p, prices) for p in rows]
+    strat_cache = _build_strategy_cache(db, rows)
+    return [_plan_to_item(p, prices, strat_cache) for p in rows]
 
 
 @router.get("/plans/pending", response_model=list[BotTradePlanItem])
 def list_pending_plans(db: Session = Depends(get_db)):
-    """List only pending trade plans (shortcut)."""
+    """List only pending trade plans, sorted by combined_score descending."""
     rows = (
         db.query(BotTradePlan)
         .filter(BotTradePlan.status == "pending")
-        .order_by(BotTradePlan.plan_date, BotTradePlan.id)
+        .order_by(BotTradePlan.alpha_score.desc().nullslast(), BotTradePlan.id)
         .all()
     )
     prices = _get_today_prices(db, list({p.stock_code for p in rows}))
-    return [_plan_to_item(p, prices) for p in rows]
+    strat_cache = _build_strategy_cache(db, rows)
+    return [_plan_to_item(p, prices, strat_cache) for p in rows]
 
 
 @router.put("/reviews/{review_id}/update")
