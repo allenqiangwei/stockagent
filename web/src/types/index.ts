@@ -736,10 +736,11 @@ export interface BotTradePlanItem {
   today_change_pct: number | null;
   today_high: number | null;
   today_low: number | null;
-  // Beta scoring
+  // Scoring
   alpha_score: number | null;
   beta_score: number | null;
   combined_score: number | null;
+  gamma_score: number | null;
   phase: string | null; // cold|warm|mature
   // Strategy details (enriched from strategy lookup)
   strategy_name: string | null;
