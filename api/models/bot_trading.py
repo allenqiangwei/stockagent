@@ -24,7 +24,7 @@ class BotPortfolio(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     # Exit monitoring — linked strategy + SL/TP/MHD config
     strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    strategy_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    strategy_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     exit_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     buy_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     buy_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
@@ -47,6 +47,7 @@ class BotTrade(Base):
     trade_date: Mapped[str] = mapped_column(String(10), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     sell_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)  # stop_loss|take_profit|max_hold|ai_recommend
+    strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
     __table_args__ = (
         Index("ix_bot_trade_code_date", "stock_code", "trade_date"),
@@ -100,6 +101,7 @@ class BotTradePlan(Base):
     alpha_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     beta_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     combined_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gamma_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         Index("ix_trade_plan_code_dir_status", "stock_code", "direction", "status"),

@@ -15,6 +15,7 @@ class TradingSignal(Base):
     stock_code: Mapped[str] = mapped_column(String(6))
     trade_date: Mapped[str] = mapped_column(String(10))
     final_score: Mapped[float] = mapped_column(Float)
+    gamma_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     signal_level: Mapped[int] = mapped_column(Integer)
     signal_level_name: Mapped[str] = mapped_column(String(20), default="")
     swing_score: Mapped[float] = mapped_column(Float, nullable=True)
