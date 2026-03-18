@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from collections import defaultdict
 from typing import Optional, Generator
 
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 from api.models.stock import Stock, Watchlist
 from api.models.strategy import Strategy
 from api.models.signal import TradingSignal
+from api.models.gamma_factor import GammaSnapshot
 from api.services.data_collector import DataCollector
 from api.services.indicator_engine import IndicatorEngine
 from src.signals.rule_engine import (
@@ -22,18 +24,6 @@ from src.signals.rule_engine import (
 from src.indicators.indicator_calculator import IndicatorConfig
 
 logger = logging.getLogger(__name__)
-
-# Fixed indicator params used for Alpha scoring (never changes per strategy)
-_SCORING_CONFIG = IndicatorConfig(
-    ma_periods=[20],
-    ema_periods=[],
-    rsi_periods=[14],
-    macd_params_list=[(12, 26, 9)],
-    kdj_params_list=[(9, 3, 3)],
-    adx_periods=[],
-    atr_periods=[],
-    calc_obv=False,
-)
 
 
 class SignalEngine:
@@ -55,6 +45,32 @@ class SignalEngine:
         """Load stock codes in user's watchlist (held stocks)."""
         rows = self.db.query(Watchlist.stock_code).all()
         return {r.stock_code for r in rows}
+
+    def _load_portfolio_strategy_map(self) -> dict[str, list[Strategy]]:
+        """Load {stock_code: [Strategy]} for all current holdings, including archived strategies.
+
+        This ensures sell conditions from archived strategies are still evaluated
+        for positions that were opened under those strategies before rebalancing.
+        """
+        from api.models.bot_trading import BotPortfolio
+        holdings = self.db.query(BotPortfolio).all()
+
+        # Collect unique strategy_ids that have sell conditions
+        strat_ids = {h.strategy_id for h in holdings if h.strategy_id}
+        strategies_by_id: dict[int, Strategy] = {}
+        if strat_ids:
+            rows = self.db.query(Strategy).filter(Strategy.id.in_(strat_ids)).all()
+            strategies_by_id = {s.id: s for s in rows}
+
+        result: dict[str, list[Strategy]] = {}
+        for h in holdings:
+            strat = strategies_by_id.get(h.strategy_id) if h.strategy_id else None
+            if strat and strat.sell_conditions:
+                result.setdefault(h.stock_code, [])
+                if strat not in result[h.stock_code]:
+                    result[h.stock_code].append(strat)
+
+        return result
 
     # ── Non-streaming generation (sample stocks) ──────────
 
@@ -85,6 +101,8 @@ class SignalEngine:
 
         name_map = self._load_name_map()
         held_codes = self._load_watchlist_codes()
+        portfolio_strategy_map = self._load_portfolio_strategy_map()
+        portfolio_codes = set(portfolio_strategy_map.keys())
 
         from api.services.news_sentiment_engine import get_sentiment_score_for_signal
         sentiment_score = get_sentiment_score_for_signal(self.db)
@@ -95,8 +113,9 @@ class SignalEngine:
                 signal = self._evaluate_stock(
                     code, trade_date, strategies,
                     stock_name=name_map.get(code, ""),
-                    is_held=code in held_codes,
+                    is_held=code in held_codes or code in portfolio_codes,
                     sentiment_score=sentiment_score,
+                    portfolio_sell_strategies=portfolio_strategy_map.get(code),
                 )
                 if signal:
                     results.append(signal)
@@ -109,6 +128,30 @@ class SignalEngine:
 
         for sig in results:
             self._save_signal(sig, trade_date)
+        self.db.commit()
+
+        # ── Phase 2: Sell scan for ALL portfolio holdings (not just sampled codes) ──
+        evaluated_codes = set(stock_codes)
+        for code, sell_strats in portfolio_strategy_map.items():
+            if code in evaluated_codes:
+                continue  # already evaluated above
+            try:
+                signal = self._evaluate_stock(
+                    code, trade_date, [],
+                    stock_name=name_map.get(code, ""),
+                    is_held=True,
+                    sentiment_score=sentiment_score,
+                    portfolio_sell_strategies=sell_strats,
+                )
+                if signal and signal.get("action") == "sell":
+                    self._save_signal(signal, trade_date)
+                    results.append(signal)
+            except Exception as e:
+                logger.warning("Portfolio sell scan failed for %s: %s", code, e)
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
         self.db.commit()
 
         return results
@@ -162,6 +205,7 @@ class SignalEngine:
             "trade_date": trade_date,
         })
 
+        # ── Phase 1: Buy signal scan across all stocks ────────────────────────
         for i, code in enumerate(stock_codes, 1):
             stock_name = name_map.get(code, "")
             try:
@@ -217,6 +261,41 @@ class SignalEngine:
                 len(stale_codes), trade_date,
             )
 
+        # ── Phase 2: Sell signal scan for portfolio holdings only ─────────────
+        # Checks sell conditions from each holding's specific strategy (even if archived),
+        # covering cases where the strategy was archived after rebalancing.
+        portfolio_strategy_map = self._load_portfolio_strategy_map()
+        if portfolio_strategy_map:
+            logger.info("Phase 2: sell scan for %d portfolio stocks", len(portfolio_strategy_map))
+            yield self._sse_event({
+                "type": "portfolio_sell_start",
+                "total": len(portfolio_strategy_map),
+            })
+            sell_generated = 0
+            for code, sell_strats in portfolio_strategy_map.items():
+                stock_name = name_map.get(code, "")
+                try:
+                    signal = self._evaluate_stock(
+                        code, trade_date, [],  # Phase 2: skip buy eval, only sell via portfolio_sell_strategies
+                        stock_name=stock_name,
+                        is_held=True,
+                        sentiment_score=sentiment_score,
+                        portfolio_sell_strategies=sell_strats,
+                    )
+                    if signal and signal.get("action") == "sell":
+                        self._save_signal(signal, trade_date)
+                        sell_generated += 1
+                        yield self._sse_event({"type": "signal", "data": signal})
+                except Exception as e:
+                    logger.warning("Portfolio sell scan failed for %s: %s", code, e)
+                    try:
+                        self.db.rollback()
+                    except Exception:
+                        pass
+            self.db.commit()
+            generated += sell_generated
+            logger.info("Phase 2 done: %d sell signals from portfolio scan", sell_generated)
+
         yield self._sse_event({
             "type": "done",
             "total_generated": generated,
@@ -237,6 +316,7 @@ class SignalEngine:
         stock_name: str = "",
         is_held: bool = False,
         sentiment_score: Optional[float] = None,
+        portfolio_sell_strategies: Optional[list[Strategy]] = None,
     ) -> Optional[dict]:
         """Evaluate all enabled strategies on a single stock.
 
@@ -252,8 +332,27 @@ class SignalEngine:
         if df is None or df.empty or len(df) < 60:
             return None
 
+        # Pre-query per-stock news sentiment (lazy — only computed once per stock)
+        _stock_sentiment: dict[str, float | None] = {}
+
+        def _inject_news_sentiment(full_df: pd.DataFrame) -> None:
+            """Fill NEWS_SENTIMENT columns with actual DB values if they exist."""
+            has_3d = "NEWS_SENTIMENT_3D" in full_df.columns
+            has_7d = "NEWS_SENTIMENT_7D" in full_df.columns
+            if not has_3d and not has_7d:
+                return
+            if not _stock_sentiment:
+                from api.services.news_stock_matcher import compute_stock_news_sentiment
+                _stock_sentiment["3d"] = compute_stock_news_sentiment(self.db, stock_code, window_days=3)
+                _stock_sentiment["7d"] = compute_stock_news_sentiment(self.db, stock_code, window_days=7)
+            if has_3d and _stock_sentiment["3d"] is not None:
+                full_df["NEWS_SENTIMENT_3D"] = _stock_sentiment["3d"]
+            if has_7d and _stock_sentiment["7d"] is not None:
+                full_df["NEWS_SENTIMENT_7D"] = _stock_sentiment["7d"]
+
         buy_triggered = False
         buy_strategies: list[str] = []
+        buy_strategy_objects: list[Strategy] = []
         sell_triggered = False
         sell_strategies: list[str] = []
 
@@ -273,32 +372,42 @@ class SignalEngine:
             else:
                 fp_groups[f"_solo_{strat.id}"].append(strat)
 
-        # ── Evaluate fingerprint groups (one eval per group) ──
+        # ── Group fp_groups by indicator config, compute indicators once per config ──
+        # Key: stable string repr of IndicatorConfig → (config, [(fp, group), ...])
+        indicator_groups: dict[str, tuple] = {}
+        computed_dfs: dict[str, object] = {}  # config_key → computed DataFrame
+
         for fp, group in fp_groups.items():
             representative = group[0]
-            buy_conds = representative.buy_conditions or []
-            sell_conds = representative.sell_conditions or []
-            all_conds = buy_conds + sell_conds
+            all_conds = (representative.buy_conditions or []) + (representative.sell_conditions or [])
             if not all_conds:
                 continue
-
             collected = collect_indicator_params(all_conds)
             config = IndicatorConfig.from_collected_params(collected)
+            config_key = str(sorted(vars(config).items()))
+            if config_key not in indicator_groups:
+                indicator_groups[config_key] = (config, [])
+            indicator_groups[config_key][1].append((fp, group))
+
+        for config_key, (config, fp_group_list) in indicator_groups.items():
             full_df = self.indicator_engine.compute(df, config=config)
+            _inject_news_sentiment(full_df)
+            computed_dfs[config_key] = full_df  # cache for Phase 2 reuse
 
-            if buy_conds:
-                triggered, _ = evaluate_conditions(buy_conds, full_df, mode="AND")
-                if triggered:
-                    buy_triggered = True
-                    for s in group:
-                        buy_strategies.append(s.name)
+            for fp, group in fp_group_list:
+                representative = group[0]
+                buy_conds = representative.buy_conditions or []
+                sell_conds = representative.sell_conditions or []
 
-            if is_held and sell_conds:
-                triggered, _ = evaluate_conditions(sell_conds, full_df, mode="OR")
-                if triggered:
-                    sell_triggered = True
-                    for s in group:
-                        sell_strategies.append(s.name)
+                if buy_conds:
+                    triggered, _ = evaluate_conditions(buy_conds, full_df, mode="AND")
+                    if triggered:
+                        buy_triggered = True
+                        for s in group:
+                            buy_strategies.append(s.name)
+                            buy_strategy_objects.append(s)
+                # Sell conditions are evaluated ONLY via portfolio_sell_strategies (Phase 2),
+                # ensuring only the position-owning strategy's exit logic is applied.
 
         # ── Evaluate combo strategies (unchanged) ──
         for strat in combo_strats:
@@ -324,6 +433,7 @@ class SignalEngine:
             collected = collect_indicator_params(all_member_conds)
             config = IndicatorConfig.from_collected_params(collected)
             full_df = self.indicator_engine.compute(df, config=config)
+            _inject_news_sentiment(full_df)
 
             buy_votes = 0
             voting_members: list[str] = []
@@ -338,22 +448,45 @@ class SignalEngine:
             if buy_votes >= vote_threshold:
                 buy_triggered = True
                 buy_strategies.append(f"{strat.name}({buy_votes}/{len(members)}票)")
+                buy_strategy_objects.append(strat)
+            # Combo sell evaluation handled via portfolio_sell_strategies only.
 
-            if is_held:
-                sell_votes = 0
-                for m in members:
-                    m_sell = m.sell_conditions or []
-                    if m_sell:
-                        triggered, _ = evaluate_conditions(m_sell, full_df, mode="OR")
+        # ── Evaluate portfolio-specific sell strategies (the position-owning strategy) ──
+        # These are loaded from holdings.strategy_id, covering both active and archived strategies.
+        # Group by indicator config and reuse already-computed DataFrames where possible.
+        if portfolio_sell_strategies:
+            owned_groups: dict[str, tuple] = {}
+            for strat in portfolio_sell_strategies:
+                sell_conds = strat.sell_conditions or []
+                if not sell_conds:
+                    continue
+                try:
+                    collected = collect_indicator_params(sell_conds)
+                    config = IndicatorConfig.from_collected_params(collected)
+                    config_key = str(sorted(vars(config).items()))
+                    if config_key not in owned_groups:
+                        owned_groups[config_key] = (config, [])
+                    owned_groups[config_key][1].append(strat)
+                except Exception as e:
+                    logger.warning("Portfolio sell config failed for %s / %s: %s", stock_code, strat.name, e)
+
+            for config_key, (config, strat_list) in owned_groups.items():
+                try:
+                    # Reuse already-computed df if this indicator config was used in Phase 1
+                    full_df = computed_dfs.get(config_key)
+                    if full_df is None:
+                        full_df = self.indicator_engine.compute(df, config=config)
+                        _inject_news_sentiment(full_df)
+                    for strat in strat_list:
+                        sell_conds = strat.sell_conditions or []
+                        triggered, triggered_labels = evaluate_conditions(sell_conds, full_df, mode="OR")
                         if triggered:
-                            sell_votes += 1
-
-                if sell_mode == "any" and sell_votes > 0:
-                    sell_triggered = True
-                    sell_strategies.append(strat.name)
-                elif sell_mode == "majority" and sell_votes > len(members) / 2:
-                    sell_triggered = True
-                    sell_strategies.append(strat.name)
+                            sell_triggered = True
+                            label_str = f"[{', '.join(triggered_labels)}]" if triggered_labels else ""
+                            archived_tag = "" if strat.archived_at is None else "(archived)"
+                            sell_strategies.append(f"{strat.name}{archived_tag}{label_str}")
+                except Exception as e:
+                    logger.warning("Portfolio sell eval failed for %s: %s", stock_code, e)
 
         # Determine action — sell takes priority for held stocks
         if sell_triggered:
@@ -371,21 +504,39 @@ class SignalEngine:
             if len(buy_strategies) < 2:
                 return None
 
-        # Matched strategy names (deduplicated, preserving order)
-        matched = sell_strategies if action == "sell" else buy_strategies
-        seen: set[str] = set()
-        reasons = []
-        for name in matched:
-            if name not in seen:
-                seen.add(name)
-                reasons.append(name)
+        # Build reasons list
+        if action == "sell":
+            # For sell: extract unique condition labels + count of triggering strategies
+            # sell_strategies entries are "StrategyName[label1, label2]" or "StrategyName"
+            import re as _re
+            seen_labels: set[str] = set()
+            label_list: list[str] = []
+            for entry in sell_strategies:
+                m = _re.search(r'\[([^\]]+)\]$', entry)
+                if m:
+                    for lbl in m.group(1).split(", "):
+                        lbl = lbl.strip()
+                        if lbl and lbl not in seen_labels:
+                            seen_labels.add(lbl)
+                            label_list.append(lbl)
+            strat_count = len(set(sell_strategies))
+            reasons = label_list if label_list else [f"{strat_count}策略触发"]
+            # Prepend strategy count summary
+            reasons = [f"{strat_count}策略触发"] + label_list
+        else:
+            seen: set[str] = set()
+            reasons = []
+            for name in buy_strategies:
+                if name not in seen:
+                    seen.add(name)
+                    reasons.append(name)
 
         # Alpha scoring — only for buy signals
         alpha_score = 0.0
-        score_breakdown = {"oversold": 0.0, "consensus": 0.0, "volume_price": 0.0}
+        score_breakdown = {"count": 0.0, "quality": 0.0, "diversity": 0.0}
         if action == "buy":
             alpha_score, score_breakdown = self._compute_alpha_score(
-                df, buy_strategies, len(strategies)
+                buy_strategy_objects
             )
 
         return {
@@ -403,65 +554,45 @@ class SignalEngine:
 
     def _compute_alpha_score(
         self,
-        df: pd.DataFrame,
-        buy_strategies: list[str],
-        total_strategies: int,
+        buy_strategy_objects: list[Strategy],
     ) -> tuple[float, dict]:
-        """Compute Alpha score for a stock that triggered buy signals.
+        """Compute Alpha score based on strategy activation strength.
+
+        Three dimensions (0-100 total):
+        - Count  (0-30): How many strategies triggered buy (log scale)
+        - Quality(0-40): Average backtest score of triggering strategies
+        - Diversity(0-30): How many unique signal fingerprint families triggered
 
         Returns:
-            (total_score, {"oversold": x, "consensus": y, "volume_price": z})
+            (total_score, {"count": x, "quality": y, "diversity": z})
         """
-        scored_df = self.indicator_engine.compute(df, config=_SCORING_CONFIG)
-        if scored_df is None or scored_df.empty or len(scored_df) < 2:
-            return 0.0, {"oversold": 0.0, "consensus": 0.0, "volume_price": 0.0}
+        if not buy_strategy_objects:
+            return 0.0, {"count": 0.0, "quality": 0.0, "diversity": 0.0}
 
-        latest = scored_df.iloc[-1]
-        prev = scored_df.iloc[-2]
+        # ── 1. Strategy count (0-30) — log scale ──
+        n = len(buy_strategy_objects)
+        count_score = min(30.0, 6.0 * math.log2(n + 1))
 
-        # ── 1. Oversold depth (0-30) ──
-        rsi_val = latest.get("RSI_14")
-        rsi_score = max(0.0, (30 - (rsi_val or 50)) / 30 * 15) if rsi_val is not None and not pd.isna(rsi_val) else 0.0
+        # ── 2. Strategy quality (0-40) — average backtest score ──
+        scores = []
+        for s in buy_strategy_objects:
+            bs = s.backtest_summary or {}
+            sc = bs.get("score")
+            if sc is not None:
+                scores.append(float(sc))
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+        quality_score = avg_score * 40.0
 
-        kdj_k = latest.get("KDJ_K_9_3_3")
-        kdj_score = max(0.0, (20 - (kdj_k or 50)) / 20 * 10) if kdj_k is not None and not pd.isna(kdj_k) else 0.0
+        # ── 3. Skeleton diversity (0-30) — unique fingerprint families ──
+        fingerprints = {s.signal_fingerprint for s in buy_strategy_objects if s.signal_fingerprint}
+        fp_count = len(fingerprints)
+        diversity_score = min(30.0, 10.0 * math.log2(fp_count + 1)) if fp_count > 0 else 0.0
 
-        macd_hist = latest.get("MACD_hist_12_26_9")
-        macd_prev = prev.get("MACD_hist_12_26_9")
-        macd_turning = 5.0 if (
-            macd_hist is not None and macd_prev is not None
-            and not pd.isna(macd_hist) and not pd.isna(macd_prev)
-            and float(macd_hist) > float(macd_prev)
-        ) else 0.0
-
-        oversold = min(30.0, rsi_score + kdj_score + macd_turning)
-
-        # ── 2. Multi-strategy consensus (0-40) ──
-        consensus = (len(buy_strategies) / max(total_strategies, 1)) * 40.0
-
-        # ── 3. Volume-price (0-30) ──
-        vol = latest.get("volume")
-        vol_ma5 = scored_df["volume"].iloc[-5:].mean() if len(scored_df) >= 5 else None
-        if vol is not None and vol_ma5 is not None and vol_ma5 > 0 and not pd.isna(vol):
-            vol_ratio_score = min(15.0, max(0.0, (float(vol) / float(vol_ma5) - 1) * 10))
-        else:
-            vol_ratio_score = 0.0
-
-        close = latest.get("close")
-        ma20 = latest.get("MA_20")
-        if close is not None and ma20 is not None and ma20 > 0 and not pd.isna(close) and not pd.isna(ma20):
-            ma_deviation = (float(ma20) - float(close)) / float(ma20) * 100
-            ma_score = min(15.0, max(0.0, ma_deviation * 3))
-        else:
-            ma_score = 0.0
-
-        volume_price = min(30.0, vol_ratio_score + ma_score)
-
-        total = float(round(oversold + consensus + volume_price, 1))
+        total = float(round(count_score + quality_score + diversity_score, 1))
         breakdown = {
-            "oversold": float(round(oversold, 1)),
-            "consensus": float(round(consensus, 1)),
-            "volume_price": float(round(volume_price, 1)),
+            "count": float(round(count_score, 1)),
+            "quality": float(round(quality_score, 1)),
+            "diversity": float(round(diversity_score, 1)),
         }
         return total, breakdown
 
@@ -485,8 +616,8 @@ class SignalEngine:
 
         if existing:
             existing.final_score = alpha
-            existing.swing_score = float(breakdown.get("oversold", 0.0))
-            existing.trend_score = float(breakdown.get("volume_price", 0.0))
+            existing.swing_score = float(breakdown.get("count", 0.0))
+            existing.trend_score = float(breakdown.get("quality", 0.0))
             existing.signal_level = {"buy": 4, "sell": 2}.get(action, 3)
             existing.signal_level_name = action_label
             existing.reasons = reasons_json
@@ -496,8 +627,8 @@ class SignalEngine:
                 stock_code=sig["stock_code"],
                 trade_date=trade_date,
                 final_score=alpha,
-                swing_score=float(breakdown.get("oversold", 0.0)),
-                trend_score=float(breakdown.get("volume_price", 0.0)),
+                swing_score=float(breakdown.get("count", 0.0)),
+                trend_score=float(breakdown.get("quality", 0.0)),
                 signal_level={"buy": 4, "sell": 2}.get(action, 3),
                 signal_level_name=action_label,
                 reasons=reasons_json,
@@ -507,15 +638,20 @@ class SignalEngine:
     # ── Queries ───────────────────────────────────────────
 
     def get_signals_by_date(self, trade_date: str) -> list[dict]:
-        """Fetch signals for a given date, with stock names."""
+        """Fetch signals for a given date, with stock names and gamma data."""
+        from sqlalchemy import and_
         rows = (
-            self.db.query(TradingSignal, Stock.name)
+            self.db.query(TradingSignal, Stock.name, GammaSnapshot)
             .outerjoin(Stock, TradingSignal.stock_code == Stock.code)
+            .outerjoin(GammaSnapshot, and_(
+                GammaSnapshot.stock_code == TradingSignal.stock_code,
+                GammaSnapshot.snapshot_date == TradingSignal.trade_date,
+            ))
             .filter(TradingSignal.trade_date == trade_date)
             .order_by(TradingSignal.final_score.desc())
             .all()
         )
-        return [self._signal_to_dict(sig, name or "") for sig, name in rows]
+        return [self._signal_to_dict(sig, name or "", snap) for sig, name, snap in rows]
 
     def get_signal_history(
         self,
@@ -583,7 +719,7 @@ class SignalEngine:
         }
 
     @staticmethod
-    def _signal_to_dict(row: TradingSignal, stock_name: str = "") -> dict:
+    def _signal_to_dict(row: TradingSignal, stock_name: str = "", snapshot: GammaSnapshot | None = None) -> dict:
         reasons = row.reasons or "[]"
         try:
             reasons_list = json.loads(reasons)
@@ -591,9 +727,21 @@ class SignalEngine:
             reasons_list = []
 
         alpha_score = row.final_score or 0.0
-        oversold = row.swing_score or 0.0
-        volume_price = row.trend_score or 0.0
-        consensus = round(max(0.0, alpha_score - oversold - volume_price), 1)
+        count_score = row.swing_score or 0.0
+        quality_score = row.trend_score or 0.0
+        diversity_score = round(max(0.0, alpha_score - count_score - quality_score), 1)
+
+        # Gamma fields (default to 0/null when no snapshot)
+        gamma_score = row.gamma_score or 0.0
+
+        # Combined score for display purposes.
+        # Uses cold-start weights (80/20) as a static approximation.
+        # The actual decision-time combined_score lives in BotTradePlan
+        # and uses dynamic phase-based weights from _get_gamma_phase().
+        if row.gamma_score is not None:
+            combined = round((alpha_score / 100.0) * 0.8 + (row.gamma_score / 100.0) * 0.2, 4)
+        else:
+            combined = round(alpha_score / 100.0, 4)
 
         return {
             "stock_code": row.stock_code,
@@ -601,11 +749,26 @@ class SignalEngine:
             "trade_date": row.trade_date,
             "final_score": alpha_score,
             "alpha_score": alpha_score,
-            "oversold_score": oversold,
-            "consensus_score": consensus,
-            "volume_price_score": volume_price,
+            "count_score": count_score,
+            "quality_score": quality_score,
+            "diversity_score": diversity_score,
             "signal_level": row.signal_level,
             "signal_level_name": row.signal_level_name,
             "action": row.market_regime or "hold",
             "reasons": reasons_list,
+            # Gamma fields
+            "gamma_score": gamma_score,
+            "gamma_daily_strength": snapshot.daily_strength if snapshot else 0.0,
+            "gamma_weekly_resonance": snapshot.weekly_resonance if snapshot else 0.0,
+            "gamma_structure_health": snapshot.structure_health if snapshot else 0.0,
+            "gamma_daily_mmd": (
+                f"{snapshot.daily_mmd_level}:{snapshot.daily_mmd_type}"
+                if snapshot and snapshot.daily_mmd_type else None
+            ),
+            "gamma_weekly_mmd": (
+                f"{snapshot.weekly_mmd_level}:{snapshot.weekly_mmd_type}"
+                if snapshot and snapshot.weekly_mmd_type else None
+            ),
+            "combined_score": combined,
+            "beta_score": 0.0,
         }
