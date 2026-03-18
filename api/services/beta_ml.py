@@ -26,7 +26,18 @@ FEATURE_NAMES = [
     "sector_heat_score", "regime_encoded",
     # Static context
     "strategy_family_encoded",
+    # Gamma features (from GammaSnapshot)
+    "gamma_score",
+    "daily_mmd_type_encoded",
+    "daily_mmd_age",
+    "weekly_resonance",
 ]
+
+# Label encoding for MMD types (shared between training and prediction)
+MMD_TYPE_ENCODING = {
+    "1B": 6, "2B": 5, "L2B": 4, "3B": 3, "L3B": 2,
+    "1S": 1, "2S": 1, "3S": 1, "L2S": 1, "L3S": 1,
+}
 
 # Strategy family encoding (extend as needed)
 FAMILY_MAP = {
@@ -114,30 +125,88 @@ def _features_to_array(features: dict) -> list[float]:
         features.get("sector_heat_score", 0.5),
         _encode_regime(features.get("regime_code")),
         _encode_family(features.get("strategy_family")),
+        # Gamma features
+        features.get("gamma_score", float("nan")),
+        MMD_TYPE_ENCODING.get(features.get("daily_mmd_type"), 0),
+        features.get("daily_mmd_age", float("nan")),
+        features.get("weekly_resonance", float("nan")),
     ]
 
 
 def _scorecard_predict(db: Session, features: dict) -> float:
-    """Simple heuristic scoring when insufficient training data.
+    """Heuristic scoring combining alpha with beta factors.
 
-    Combines alpha_score with basic market signals.
+    Uses available non-technical factors: market regime, market sentiment,
+    sector heat, news sentiment, plus basic market signals.
     """
-    alpha = features.get("alpha_score", 0.5)
-    score = alpha * 0.6  # base from alpha
+    score = 0.5  # neutral base — pure beta factors adjust from here
 
-    # Bonus for good market environment
+    # ── Market regime (from market_regimes table) ──
+    regime = features.get("regime_code", "")
+    if regime:
+        if "bull" in regime:
+            score += 0.10
+        elif "bear" in regime:
+            score -= 0.10
+        # ranging/volatile → no adjustment
+
+    # ── Market sentiment (from news_sentiment_results, scale: -100 to +100) ──
+    market_sent = features.get("market_sentiment")
+    if market_sent is not None:
+        if market_sent > 30:
+            score += 0.08
+        elif market_sent > 0:
+            score += 0.03
+        elif market_sent < -30:
+            score -= 0.08
+        elif market_sent < 0:
+            score -= 0.03
+
+    # ── Sector heat (from sector_heat table, scale: 0-100) ──
+    sector_heat = features.get("sector_heat_score")
+    if sector_heat is not None:
+        if sector_heat >= 70:
+            score += 0.08  # hot sector
+        elif sector_heat >= 50:
+            score += 0.03  # warm sector
+        elif sector_heat <= 30:
+            score -= 0.05  # cold sector
+
+    # ── Per-stock news sentiment (from Proposal C, scale: -1 to +1) ──
+    news_sent = features.get("news_sentiment_3d")
+    if news_sent is not None:
+        if news_sent > 0.3:
+            score += 0.06  # positive news cluster
+        elif news_sent < -0.3:
+            score -= 0.06  # negative news cluster
+
+    # ── PE valuation (from daily_basic via TuShare) ──
+    pe = features.get("pe")
+    if pe is not None and pe > 0:
+        if pe < 20:
+            score += 0.05  # undervalued
+        elif pe > 80:
+            score -= 0.05  # overvalued
+
+    # ── Turnover rate ──
+    turnover = features.get("turnover_rate")
+    if turnover is not None:
+        if 2 < turnover < 8:
+            score += 0.03  # healthy activity
+        elif turnover > 15:
+            score -= 0.03  # potentially speculative
+
+    # ── Legacy factors (index return, volatility, day-of-week) ──
     index_ret = features.get("index_return_5d", 0)
     if index_ret and index_ret > 0:
-        score += 0.1
+        score += 0.05
     elif index_ret and index_ret < -2:
-        score -= 0.1
+        score -= 0.05
 
-    # Bonus for favorable volatility
     vol = features.get("stock_volatility_20d", 0)
     if vol and 0 < vol < 3:
-        score += 0.05
+        score += 0.03
 
-    # Day-of-week effect (Monday/Friday slightly penalized)
     dow = features.get("day_of_week", 2)
     if dow in (0, 4):
         score -= 0.02
@@ -167,14 +236,14 @@ def _build_training_data(db: Session, window_days: int = 365) -> tuple[np.ndarra
     for review in reviews:
         snapshot = (
             db.query(BetaSnapshot)
-            .filter(BetaSnapshot.snapshot_id == review.entry_snapshot_id)
+            .filter(BetaSnapshot.id == review.entry_snapshot_id)
             .first()
         )
         if not snapshot:
             continue
 
         features = {
-            "alpha_score": snapshot.final_score or snapshot.score_total or 0.5,
+            "alpha_score": snapshot.final_score or snapshot.alpha_score or 0.5,
             "final_score": snapshot.final_score or 0.5,
             "entry_price": snapshot.entry_price or 0.0,
             "day_of_week": snapshot.day_of_week or 0,
@@ -184,9 +253,27 @@ def _build_training_data(db: Session, window_days: int = 365) -> tuple[np.ndarra
             "index_return_5d": snapshot.index_return_5d or 0.0,
             "index_return_20d": snapshot.index_return_20d or 0.0,
             "sector_heat_score": snapshot.sector_heat_score or 0.5,
-            "regime_code": snapshot.regime,
+            "regime_code": snapshot.market_regime,
             "strategy_family": snapshot.strategy_family,
         }
+
+        # Populate gamma features (np.nan for pre-deployment data)
+        from api.models.gamma_factor import GammaSnapshot
+        gamma_snap = (
+            db.query(GammaSnapshot)
+            .filter_by(stock_code=snapshot.stock_code, snapshot_date=snapshot.snapshot_date)
+            .first()
+        )
+        if gamma_snap:
+            features["gamma_score"] = gamma_snap.gamma_score
+            features["daily_mmd_type"] = gamma_snap.daily_mmd_type
+            features["daily_mmd_age"] = gamma_snap.daily_mmd_age
+            features["weekly_resonance"] = gamma_snap.weekly_resonance
+        else:
+            features["gamma_score"] = float("nan")
+            features["daily_mmd_type"] = None  # → 0 via MMD_TYPE_ENCODING
+            features["daily_mmd_age"] = float("nan")
+            features["weekly_resonance"] = float("nan")
 
         X_rows.append(_features_to_array(features))
         y_rows.append(1.0 if review.is_profitable else 0.0)
