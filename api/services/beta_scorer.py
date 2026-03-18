@@ -25,6 +25,38 @@ WEIGHT_TABLE = {
     "mature": (0.50, 0.50),
 }
 
+# Gamma weight table: (alpha_weight, gamma_weight)
+GAMMA_WEIGHT_TABLE = {
+    "cold": (0.80, 0.20),     # < 30 completed trades with gamma
+    "warm": (0.60, 0.40),     # 30-99
+    "mature": (0.50, 0.50),   # >= 100
+}
+
+
+def _get_gamma_phase(db: Session) -> str:
+    """Count completed trades that had gamma data at entry.
+
+    Uses INNER JOIN to GammaSnapshot — only reviews where a
+    snapshot existed on/before first_buy_date are counted.
+    """
+    from sqlalchemy import func, distinct, and_
+    from api.models.bot_trading import BotTradeReview
+    from api.models.gamma_factor import GammaSnapshot
+
+    n = (
+        db.query(func.count(distinct(BotTradeReview.id)))
+        .join(GammaSnapshot, and_(
+            GammaSnapshot.stock_code == BotTradeReview.stock_code,
+            GammaSnapshot.snapshot_date <= BotTradeReview.first_buy_date,
+        ))
+        .scalar()
+    ) or 0
+    if n < 30:
+        return "cold"
+    elif n < 100:
+        return "warm"
+    return "mature"
+
 
 def _get_phase(db: Session) -> str:
     n = db.query(BetaReview).filter(BetaReview.is_profitable.isnot(None)).count()
@@ -106,8 +138,12 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
 
     logger.info("Beta scorer: found %d buy signals for %s", len(buy_signals), trade_date)
 
-    phase = _get_phase(db)
-    alpha_w, beta_w = WEIGHT_TABLE[phase]
+    beta_phase = _get_phase(db)
+    gamma_phase = _get_gamma_phase(db)
+    alpha_w, gamma_w = GAMMA_WEIGHT_TABLE[gamma_phase]
+
+    # Pre-load shared beta factor context (query once, reuse for all signals)
+    shared_context = _load_shared_beta_context(db, trade_date)
 
     # Pre-load current counts per stock to enforce concentration limit
     holding_counts: dict[str, int] = dict(
@@ -153,15 +189,40 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
             # No named strategies — create one plan with no strategy binding
             strategy_names = [""]
 
-        # Score the stock (same alpha/beta for all sub-positions on this stock)
-        alpha = signal.final_score or 0.5
+        # Score the stock (same alpha/gamma/beta for all sub-positions)
+        alpha = signal.final_score or 0.0
+        gamma = signal.gamma_score  # May be None if chanlun-pro was unavailable
+
+        # Gamma-first combined score
+        if gamma is not None:
+            combined = round(
+                (alpha / 100.0) * alpha_w + (gamma / 100.0) * gamma_w, 4
+            )
+        else:
+            combined = round(alpha / 100.0, 4)  # Degrade to pure Alpha
+
+        # Beta reference (still computed for ML training, not for ranking)
         features = {
             "stock_code": code,
             "alpha_score": alpha,
             "day_of_week": datetime.now().weekday(),
+            **shared_context,
+            **_load_stock_beta_context(db, code),
         }
+
+        # Add gamma features for ML
+        if gamma is not None:
+            from api.models.gamma_factor import GammaSnapshot as GS
+            snap = db.query(GS).filter_by(
+                stock_code=code, snapshot_date=trade_date
+            ).first()
+            if snap:
+                features["gamma_score"] = snap.gamma_score
+                features["daily_mmd_type"] = snap.daily_mmd_type
+                features["daily_mmd_age"] = snap.daily_mmd_age
+                features["weekly_resonance"] = snap.weekly_resonance
+
         beta = predict_beta_score(db, features)
-        combined = round(alpha * alpha_w + beta * beta_w, 4)
 
         plan_price = _get_prev_close(db, code, trade_date) or 0.0
         if plan_price <= 0:
@@ -217,16 +278,36 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
                 plan_date=plan_date,
                 status="pending",
                 thinking=(
-                    f"[Beta] {strategy_name or 'signal'} "
-                    f"alpha={alpha:.3f} beta={beta:.3f} combined={combined:.4f} phase={phase}"
+                    f"[Gamma] {strategy_name or 'signal'} "
+                    f"alpha={alpha:.1f} gamma={gamma or 0:.1f} "
+                    f"combined={combined:.4f} phase={gamma_phase}"
                 ),
                 source="beta",
                 strategy_id=strategy_id,
-                alpha_score=alpha,
+                alpha_score=alpha,  # Keep raw 0-100 (existing convention)
                 beta_score=beta,
                 combined_score=combined,
+                gamma_score=gamma,
             )
             db.add(plan)
+
+            # Capture beta snapshot for XGBoost training
+            try:
+                from api.services.beta_engine import capture_signal_snapshot
+                # Infer strategy family from strategy name (e.g. "RSI_47_67..." → "RSI")
+                strat_family = None
+                if strat and strat.name:
+                    from api.services.beta_ml import FAMILY_MAP
+                    for fam in FAMILY_MAP:
+                        if fam != "unknown" and fam.lower() in strat.name.lower():
+                            strat_family = fam
+                            break
+                capture_signal_snapshot(
+                    db, code, stock_name, trade_date, features,
+                    strategy_family=strat_family,
+                )
+            except Exception as e:
+                logger.warning("Beta snapshot failed for %s (non-fatal): %s", code, e)
 
             # Update tracking state
             occupied_pairs.add((code, strategy_id))
@@ -238,23 +319,110 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
                 "stock_name": stock_name,
                 "strategy": strategy_name or "signal",
                 "strategy_id": strategy_id,
-                "alpha_score": alpha,
+                "alpha_score": alpha,  # Raw 0-100
+                "gamma_score": gamma,
                 "beta_score": beta,
                 "combined_score": combined,
                 "plan_price": plan_price,
                 "quantity": quantity,
-                "phase": phase,
+                "phase": gamma_phase,
             })
 
     if plans:
         plans.sort(key=lambda x: x["combined_score"], reverse=True)
         db.commit()
         logger.info(
-            "Beta scorer: %d plans (%d stocks) for %s (phase=%s)",
+            "Beta scorer: %d plans (%d stocks) for %s (gamma_phase=%s)",
             len(plans),
             len({p["stock_code"] for p in plans}),
             plan_date,
-            phase,
+            gamma_phase,
         )
 
     return plans
+
+
+def _load_shared_beta_context(db: Session, trade_date: str) -> dict:
+    """Load market-wide beta factors (queried once per scoring run)."""
+    context: dict = {}
+
+    # Market regime
+    try:
+        from api.models.market_regime import MarketRegimeLabel
+        from datetime import date as _date
+        d = _date.fromisoformat(trade_date)
+        regime = (
+            db.query(MarketRegimeLabel)
+            .filter(MarketRegimeLabel.week_end >= d)
+            .order_by(MarketRegimeLabel.week_end.desc())
+            .first()
+        )
+        if regime:
+            context["regime_code"] = regime.regime
+    except Exception:
+        pass
+
+    # Market sentiment
+    try:
+        from api.models.news_sentiment import NewsSentimentResult
+        sent = (
+            db.query(NewsSentimentResult)
+            .order_by(NewsSentimentResult.analysis_time.desc())
+            .first()
+        )
+        if sent:
+            context["market_sentiment"] = sent.market_sentiment
+    except Exception:
+        pass
+
+    return context
+
+
+def _load_stock_beta_context(db: Session, stock_code: str) -> dict:
+    """Load per-stock beta factors."""
+    context: dict = {}
+
+    # Sector heat
+    try:
+        from api.models.stock import Stock
+        from api.models.news_agent import SectorHeat
+        stock = db.query(Stock).filter(Stock.code == stock_code).first()
+        if stock and stock.industry:
+            heat = (
+                db.query(SectorHeat)
+                .filter(SectorHeat.sector_name == stock.industry)
+                .order_by(SectorHeat.snapshot_time.desc())
+                .first()
+            )
+            if heat:
+                context["sector_heat_score"] = heat.heat_score
+    except Exception:
+        pass
+
+    # Per-stock news sentiment (from Proposal C)
+    try:
+        from api.services.news_stock_matcher import compute_stock_news_sentiment
+        sent_3d = compute_stock_news_sentiment(db, stock_code, window_days=3)
+        if sent_3d is not None:
+            context["news_sentiment_3d"] = sent_3d
+    except Exception:
+        pass
+
+    # PE / turnover (from daily_basic via TuShare)
+    try:
+        from api.models.stock import DailyBasic
+        basic = (
+            db.query(DailyBasic)
+            .filter(DailyBasic.stock_code == stock_code)
+            .order_by(DailyBasic.trade_date.desc())
+            .first()
+        )
+        if basic:
+            if basic.pe is not None:
+                context["pe"] = basic.pe
+            if basic.turnover_rate is not None:
+                context["turnover_rate"] = basic.turnover_rate
+    except Exception:
+        pass
+
+    return context
