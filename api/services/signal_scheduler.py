@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class SignalScheduler:
     """Background scheduler that syncs daily data and executes trade plans."""
 
-    def __init__(self, refresh_hour: int = 19, refresh_minute: int = 0):
+    def __init__(self, refresh_hour: int = 15, refresh_minute: int = 30):
         self.refresh_hour = refresh_hour
         self.refresh_minute = refresh_minute
         self._running = False
@@ -189,6 +189,16 @@ class SignalScheduler:
                     jm.update_progress(job_id, 25, "批量同步日线数据")
                     self._sync_daily_prices(db, trade_date)
 
+                    # Step 1b: Sync daily_basic (PE/PB/turnover for beta scoring)
+                    try:
+                        if not collector:
+                            from api.services.data_collector import DataCollector
+                            collector = DataCollector(db)
+                        collector.get_daily_basic_df(trade_date)
+                        logger.info("Daily basic synced for %s", trade_date)
+                    except Exception as e:
+                        logger.warning("Daily basic sync failed (non-fatal): %s", e)
+
                     # Step 2: Execute pending trade plans (needs today's OHLCV)
                     self._sync_step = "执行交易计划"
                     jm.update_progress(job_id, 50, "执行交易计划")
@@ -239,18 +249,48 @@ class SignalScheduler:
                     self._sync_step = "生成交易信号"
                     jm.update_progress(job_id, 80, "生成交易信号")
                     try:
+                        import json as _json
                         from api.services.signal_engine import SignalEngine
                         engine = SignalEngine(db)
                         # Consume the streaming generator to run full scan
                         generated = 0
                         for event_str in engine.generate_signals_stream(trade_date):
-                            if '"type": "done"' in event_str:
-                                import json
-                                payload = json.loads(event_str.replace("data: ", "").strip())
+                            # Parse SSE: "data: {...}\n\n"
+                            line = event_str.strip()
+                            if line.startswith("data: "):
+                                line = line[6:]
+                            try:
+                                payload = _json.loads(line)
+                            except (ValueError, TypeError):
+                                continue
+                            evt_type = payload.get("type")
+                            if evt_type == "start":
+                                self._sync_total = payload.get("total", 0)
+                                self._sync_done = 0
+                            elif evt_type == "progress":
+                                self._sync_done = payload.get("current", 0)
+                                self._sync_step = f"生成交易信号 {self._sync_done}/{self._sync_total}"
+                                # Update job progress: map signal scan 0-100% to job 80-95%
+                                pct = payload.get("pct", 0)
+                                job_pct = 80 + int(pct * 0.15)
+                                if self._sync_done % 500 == 0:
+                                    jm.update_progress(job_id, job_pct, f"生成信号 {self._sync_done}/{self._sync_total}")
+                            elif evt_type == "done":
                                 generated = payload.get("total_generated", 0)
                         logger.info("Signal generation done for %s: %d signals", trade_date, generated)
                     except Exception as e:
                         logger.error("Signal generation failed (non-fatal): %s", e)
+
+                    # Step 4b: Match news to individual stocks
+                    self._sync_step = "新闻个股关联"
+                    jm.update_progress(job_id, 82, "新闻个股关联")
+                    try:
+                        from api.services.news_stock_matcher import match_news_to_stocks, align_news_prices
+                        match_stats = match_news_to_stocks(db, lookback_hours=48)
+                        aligned = align_news_prices(db, trade_date)
+                        logger.info("News-stock matching: %d linked, %d aligned", match_stats.get("linked", 0), aligned)
+                    except Exception as e:
+                        logger.warning("News-stock matching failed (non-fatal): %s", e)
 
                     # Step 5: Track daily holdings for Beta Overlay
                     jm.update_progress(job_id, 85, "Beta每日追踪")
@@ -271,17 +311,65 @@ class SignalScheduler:
                     except Exception as e:
                         logger.warning("Beta ML training failed (non-fatal): %s", e)
 
+                    # Step 5c2: Gamma scoring (缠论 buy/sell points)
+                    jm.update_progress(job_id, 90, "Gamma评分")
+                    try:
+                        from api.services.gamma_service import compute_gamma, reset_circuit_breaker
+                        from api.models.gamma_factor import GammaSnapshot
+                        from api.models.signal import TradingSignal  # Not imported at top level in this file
+
+                        reset_circuit_breaker()
+                        buy_signals = (
+                            db.query(TradingSignal)
+                            .filter(TradingSignal.trade_date == trade_date, TradingSignal.market_regime == "buy")
+                            .all()
+                        )
+                        gamma_count = 0
+                        for sig in buy_signals:
+                            result = compute_gamma(sig.stock_code, trade_date)
+                            if result is None:
+                                continue
+                            # Update TradingSignal
+                            sig.gamma_score = result["gamma_score"]
+                            # Upsert GammaSnapshot
+                            snap = (
+                                db.query(GammaSnapshot)
+                                .filter_by(stock_code=sig.stock_code, snapshot_date=trade_date)
+                                .first()
+                            )
+                            if snap:
+                                for k, v in result.items():
+                                    setattr(snap, k, v)
+                            else:
+                                db.add(GammaSnapshot(**result))
+                            gamma_count += 1
+                        db.commit()
+                        logger.info("Gamma scorer: %d/%d stocks scored", gamma_count, len(buy_signals))
+                    except Exception as e:
+                        logger.warning("Gamma scoring failed (non-fatal): %s", e)
+
                     # Step 5d: Score signals and create Beta-ranked plans
                     jm.update_progress(job_id, 92, "Beta评分+计划")
                     try:
                         from api.services.beta_scorer import score_and_create_plans
-                        from datetime import timedelta as _td
-                        plan_date = (datetime.strptime(trade_date, "%Y-%m-%d") + _td(days=1)).strftime("%Y-%m-%d")
+                        from api.services.bot_trading_engine import _get_next_trading_day
+                        plan_date = _get_next_trading_day(db, trade_date) or trade_date
                         plans = score_and_create_plans(db, trade_date, plan_date)
                         if plans:
                             logger.info("Beta scorer: %d plans created for %s", len(plans), plan_date)
                     except Exception as e:
                         logger.warning("Beta scoring failed (non-fatal): %s", e)
+
+                    # Step 5e: Create sell plans from sell signals
+                    jm.update_progress(job_id, 96, "生成卖出计划")
+                    try:
+                        from api.routers.signals import _create_sell_plans_from_signals
+                        from api.services.bot_trading_engine import _get_next_trading_day
+                        plan_date = _get_next_trading_day(db, trade_date) or trade_date
+                        sell_count = _create_sell_plans_from_signals(db, trade_date, plan_date)
+                        logger.info("Sell plans created for %s: %d", plan_date, sell_count)
+                    except Exception as e:
+                        logger.warning("Sell plan creation failed (non-fatal): %s", e)
 
                     logger.info("Daily data sync completed for %s", trade_date)
                     jm.succeed(job_id, f"Sync completed for {trade_date}")
@@ -302,22 +390,77 @@ class SignalScheduler:
             self._sync_done = 0
 
     def _sync_daily_prices(self, db, trade_date: str):
-        """Fetch latest daily prices via batch API (one call for entire market)."""
+        """Sync daily prices: TDX per-stock (no rate limit) with TuShare batch fallback."""
         from api.services.data_collector import DataCollector
+        from api.config import get_settings
 
         collector = DataCollector(db)
+        preferred = get_settings().data_sources.daily_batch
 
         self._sync_total = 1
         self._sync_done = 0
-        logger.info("Batch syncing daily prices for %s...", trade_date)
+        logger.info("Syncing daily prices for %s (preferred: %s)...", trade_date, preferred)
 
         try:
-            count = collector._fetch_daily_batch_by_date(trade_date)
+            if preferred == "tdx":
+                count = self._sync_daily_via_tdx(collector, trade_date)
+                # Fallback to TuShare if TDX got too few records
+                if count < 3000:
+                    logger.info("TDX got only %d records, trying TuShare batch fallback...", count)
+                    count2 = collector._fetch_daily_batch_by_date(trade_date)
+                    count = max(count, count2)
+            else:
+                count = collector._fetch_daily_batch_by_date(trade_date)
             self._sync_done = 1
-            logger.info("Batch daily sync done for %s: %d records", trade_date, count)
+            logger.info("Daily sync done for %s: %d records", trade_date, count)
         except Exception as e:
-            logger.error("Batch daily sync failed for %s: %s", trade_date, e)
+            logger.error("Daily sync failed for %s: %s", trade_date, e)
             self._sync_done = 1
+
+    def _sync_daily_via_tdx(self, collector, trade_date: str) -> int:
+        """Fetch daily data for all stocks via TDX (per-stock, but no rate limit)."""
+        from api.models.stock import Stock, DailyPrice
+        from datetime import date
+
+        stocks = collector.db.query(Stock.code).all()
+        if not stocks:
+            return 0
+
+        trade_d = date.fromisoformat(trade_date)
+        # Check which stocks already have data for this date
+        existing = set(
+            r.stock_code for r in
+            collector.db.query(DailyPrice.stock_code)
+            .filter(DailyPrice.trade_date == trade_d)
+            .all()
+        )
+
+        codes = [s.code for s in stocks if s.code not in existing]
+        if not codes:
+            logger.info("TDX sync: all %d stocks already have data for %s", len(stocks), trade_date)
+            return len(existing)
+
+        self._sync_total = len(codes)
+        self._sync_done = 0
+        logger.info("TDX sync: fetching %d stocks for %s (%d already cached)",
+                     len(codes), trade_date, len(existing))
+
+        added = 0
+        for i, code in enumerate(codes):
+            try:
+                df = collector._fetch_daily_tdx(code, trade_date, trade_date)
+                if df is not None and not df.empty:
+                    collector._cache_daily(code, df)
+                    added += 1
+            except Exception:
+                pass
+            self._sync_done = i + 1
+            if (i + 1) % 500 == 0:
+                collector.db.commit()
+                logger.info("TDX sync progress: %d/%d fetched, %d added", i + 1, len(codes), added)
+
+        collector.db.commit()
+        return added + len(existing)
 
 
 # ── Global singleton ──────────────────────────────
@@ -329,7 +472,7 @@ def get_signal_scheduler() -> SignalScheduler:
     """Get or create the global scheduler instance."""
     global _scheduler
     if _scheduler is None:
-        hour, minute = 19, 0
+        hour, minute = 15, 30
         try:
             from pathlib import Path
             import yaml
@@ -339,8 +482,8 @@ def get_signal_scheduler() -> SignalScheduler:
                 with open(config_path, "r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f) or {}
                 signals_cfg = cfg.get("signals", {})
-                hour = signals_cfg.get("auto_refresh_hour", 19)
-                minute = signals_cfg.get("auto_refresh_minute", 0)
+                hour = signals_cfg.get("auto_refresh_hour", 15)
+                minute = signals_cfg.get("auto_refresh_minute", 30)
         except Exception:
             pass
 
