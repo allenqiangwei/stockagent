@@ -4,23 +4,46 @@ import { Badge } from "@/components/ui/badge";
 import { Trophy } from "lucide-react";
 import type { SignalItem } from "@/types";
 
-function ScoreBar({ oversold, consensus, volumePrice, total }: {
-  oversold: number;
-  consensus: number;
-  volumePrice: number;
+function ScoreBar({ count, quality, diversity, total }: {
+  count: number;
+  quality: number;
+  diversity: number;
   total: number;
 }) {
   if (total <= 0) return null;
-  const pctO = (oversold / 100) * 100;
-  const pctC = (consensus / 100) * 100;
-  const pctV = (volumePrice / 100) * 100;
+  const pctC = (count / 100) * 100;
+  const pctQ = (quality / 100) * 100;
+  const pctD = (diversity / 100) * 100;
 
   return (
     <div className="flex items-center gap-2">
       <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden flex">
-        <div className="h-full bg-blue-500" style={{ width: `${pctO}%` }} title={`超卖 ${oversold}`} />
-        <div className="h-full bg-violet-500" style={{ width: `${pctC}%` }} title={`共识 ${consensus}`} />
-        <div className="h-full bg-orange-500" style={{ width: `${pctV}%` }} title={`量价 ${volumePrice}`} />
+        <div className="h-full bg-blue-500" style={{ width: `${pctC}%` }} title={`数量 ${count}`} />
+        <div className="h-full bg-violet-500" style={{ width: `${pctQ}%` }} title={`质量 ${quality}`} />
+        <div className="h-full bg-orange-500" style={{ width: `${pctD}%` }} title={`多样性 ${diversity}`} />
+      </div>
+      <span className="text-xs text-muted-foreground tabular-nums w-7 text-right">{total}</span>
+    </div>
+  );
+}
+
+function GammaScoreBar({ daily, weekly, health, total }: {
+  daily: number;
+  weekly: number;
+  health: number;
+  total: number;
+}) {
+  if (total <= 0) return null;
+  const pctD = (daily / 100) * 100;
+  const pctW = (weekly / 100) * 100;
+  const pctH = (health / 100) * 100;
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden flex">
+        <div className="h-full bg-emerald-500" style={{ width: `${pctD}%` }} title={`日线 ${daily}`} />
+        <div className="h-full bg-cyan-500" style={{ width: `${pctW}%` }} title={`周线 ${weekly}`} />
+        <div className="h-full bg-yellow-500" style={{ width: `${pctH}%` }} title={`结构 ${health}`} />
       </div>
       <span className="text-xs text-muted-foreground tabular-nums w-7 text-right">{total}</span>
     </div>
@@ -48,9 +71,13 @@ export function AlphaTopCards({
         <Trophy className="h-4 w-4 text-amber-500" />
         Alpha Top {items.length}
         <div className="flex items-center gap-3 ml-auto text-xs text-muted-foreground">
-          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-blue-500" />超卖</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-violet-500" />共识</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500" />量价</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-blue-500" />数量</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-violet-500" />质量</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500" />多样性</span>
+          <span className="mx-1 text-border">|</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-emerald-500" />日线</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-cyan-500" />周线</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-yellow-500" />结构</span>
         </div>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-2">
@@ -69,11 +96,34 @@ export function AlphaTopCards({
             </div>
 
             <ScoreBar
-              oversold={s.oversold_score}
-              consensus={s.consensus_score}
-              volumePrice={s.volume_price_score}
+              count={s.count_score}
+              quality={s.quality_score}
+              diversity={s.diversity_score}
               total={s.alpha_score}
             />
+
+            <GammaScoreBar
+              daily={s.gamma_daily_strength}
+              weekly={s.gamma_weekly_resonance}
+              health={s.gamma_structure_health}
+              total={s.gamma_score}
+            />
+
+            {s.gamma_daily_mmd && (
+              <div className="mt-1 flex items-center gap-1.5">
+                <Badge className="px-1 py-0 text-[10px] leading-4 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/20">
+                  {s.gamma_daily_mmd}
+                </Badge>
+                {s.gamma_weekly_mmd && (
+                  <Badge className="px-1 py-0 text-[10px] leading-4 bg-cyan-500/20 text-cyan-400 border border-cyan-500/40 hover:bg-cyan-500/20">
+                    周{s.gamma_weekly_mmd.split(":")[1]}
+                  </Badge>
+                )}
+                <span className="text-[10px] text-muted-foreground ml-auto">
+                  综合 {(s.combined_score * 100).toFixed(0)}
+                </span>
+              </div>
+            )}
 
             {s.reasons.length > 0 && (
               <div className="mt-1.5 text-xs text-muted-foreground truncate">

@@ -178,13 +178,22 @@ export interface SignalItem {
   trade_date: string;
   final_score: number;
   alpha_score: number;
-  oversold_score: number;
-  consensus_score: number;
-  volume_price_score: number;
+  count_score: number;
+  quality_score: number;
+  diversity_score: number;
   signal_level: number;
   signal_level_name: string;
   action: "buy" | "sell" | "hold";
   reasons: string[];
+  // Gamma factor
+  gamma_score: number;
+  gamma_daily_strength: number;
+  gamma_weekly_resonance: number;
+  gamma_structure_health: number;
+  gamma_daily_mmd: string | null;
+  gamma_weekly_mmd: string | null;
+  combined_score: number;
+  beta_score: number;
 }
 
 export interface SignalMeta {
@@ -598,6 +607,7 @@ export interface NewsEventItem {
 
 // ── Bot Trading ──
 export interface BotPortfolioItem {
+  id: number;
   stock_code: string;
   stock_name: string;
   quantity: number;
@@ -718,6 +728,7 @@ export interface BotTradePlanItem {
   thinking: string;
   report_id: number | null;
   source: "ai" | "stop_loss" | "take_profit" | "max_hold" | "beta";
+  strategy_id: number | null;
   created_at: string;
   executed_at: string | null;
   execution_price: number | null;
@@ -725,9 +736,18 @@ export interface BotTradePlanItem {
   today_change_pct: number | null;
   today_high: number | null;
   today_low: number | null;
+  // Beta scoring
   alpha_score: number | null;
   beta_score: number | null;
   combined_score: number | null;
+  phase: string | null; // cold|warm|mature
+  // Strategy details (enriched from strategy lookup)
+  strategy_name: string | null;
+  stop_loss_pct: number | null;
+  take_profit_pct: number | null;
+  max_hold_days: number | null;
+  buy_conditions: Record<string, unknown>[] | null;
+  sell_conditions: Record<string, unknown>[] | null;
 }
 
 // ── Beta ML Model ───────────────────────────────
