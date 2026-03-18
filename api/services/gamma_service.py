@@ -122,10 +122,10 @@ _DAILY_MMD_SCORES: dict[str, dict[str, int]] = {
 def _parse_mmds(mmds: list) -> list[tuple[str, str, int, float]]:
     """Parse MMD list into (mmd_type, level, timestamp, price) tuples.
 
-    Each MMD entry from chanlun-pro may look like:
-        {"t": 1710000000, "p": 25.3, "v": "笔:2B,1B"}
-    or similar structures. The 'v' field may contain multiple types
-    separated by commas, each prefixed with level + colon.
+    Each MMD entry from chanlun-pro looks like:
+        {"points": {"price": 12.5, "time": 1710000000}, "text": "笔:1B"}
+    The 'text' field may contain multiple types separated by commas,
+    each prefixed with level + colon.
 
     Returns a flat list of (mmd_type, level, timestamp, price).
     """
@@ -135,9 +135,9 @@ def _parse_mmds(mmds: list) -> list[tuple[str, str, int, float]]:
 
     for item in mmds:
         try:
-            ts = int(item.get("t", 0))
-            price = float(item.get("p", 0))
-            text = str(item.get("v", ""))
+            ts = int(item.get("points", {}).get("time", 0))
+            price = float(item.get("points", {}).get("price", 0.0))
+            text = str(item.get("text", ""))
 
             if not text:
                 continue
@@ -189,7 +189,7 @@ def _compute_daily_strength(
     trading_days = int(natural_days * 5 / 7)
 
     # Base score from lookup table
-    base_score = _DAILY_MMD_SCORES.get(mmd_type, {}).get(level, 15)
+    base_score = _DAILY_MMD_SCORES.get(mmd_type, {}).get(level, 0)
 
     # Time decay
     if trading_days <= 5:
@@ -218,13 +218,15 @@ def _compute_weekly_resonance(
 
     Returns (score, weekly_mmd_type, weekly_mmd_level).
     """
+    # Empty bar_times — no data to evaluate
+    if not bar_times:
+        return 10.0, None, None
+
     # Determine the cutoff timestamp for "last 4 bars"
     if len(bar_times) >= 4:
         cutoff_ts = bar_times[-4]
-    elif bar_times:
-        cutoff_ts = bar_times[0]
     else:
-        cutoff_ts = 0
+        cutoff_ts = bar_times[0]
 
     # Check for recent buy/sell points
     recent_buys = [(t, lvl, ts, p) for t, lvl, ts, p in mmds if t.endswith("B") and ts >= cutoff_ts]
@@ -241,16 +243,14 @@ def _compute_weekly_resonance(
         mmd_type, level, _, _ = recent_sells[0]
         return 0.0, mmd_type, level
 
-    # Check last bi direction
-    if bis:
-        try:
-            last_bi = bis[-1]
-            # bi direction: could be in 'd' field or similar
-            bi_dir = str(last_bi.get("d", last_bi.get("direction", "")))
-            if bi_dir.lower() in ("up", "1", "向上"):
+    # Check last bi direction — bis is a list of coordinate pairs
+    if bis and len(bis) > 0:
+        last_bi = bis[-1]
+        if isinstance(last_bi, list) and len(last_bi) >= 2:
+            start_price = last_bi[0].get("price", 0) if isinstance(last_bi[0], dict) else 0
+            end_price = last_bi[1].get("price", 0) if isinstance(last_bi[1], dict) else 0
+            if end_price > start_price:
                 return 20.0, None, None
-        except (AttributeError, IndexError, TypeError):
-            pass
 
     return 10.0, None, None
 
@@ -270,15 +270,31 @@ def _compute_structure_health(
     """
     score = 0.0
 
+    # Empty bar_times — skip BC and buy-density calculations
+    if not bar_times:
+        # Only evaluate ZS distance if possible
+        if bi_zss and current_price > 0:
+            last_zs = bi_zss[-1]
+            if isinstance(last_zs, list) and len(last_zs) >= 2:
+                zs_prices = [p.get("price", 0) for p in last_zs if isinstance(p, dict)]
+                if zs_prices:
+                    zs_low = min(zs_prices)
+                    zs_high = max(zs_prices)
+                    if current_price < zs_low:
+                        score += 8.0
+                    elif zs_low <= current_price <= zs_high:
+                        score += 4.0
+        return min(score, 25.0)
+
     # Cutoff timestamps
-    cutoff_10 = bar_times[-10] if len(bar_times) >= 10 else (bar_times[0] if bar_times else 0)
-    cutoff_30 = bar_times[-30] if len(bar_times) >= 30 else (bar_times[0] if bar_times else 0)
+    cutoff_10 = bar_times[-10] if len(bar_times) >= 10 else bar_times[0]
+    cutoff_30 = bar_times[-30] if len(bar_times) >= 30 else bar_times[0]
 
     # 1. 背驰确认 (BC within last 10 bars)
     if bcs:
         for bc in reversed(bcs):
             try:
-                bc_ts = int(bc.get("t", 0))
+                bc_ts = int(bc.get("points", {}).get("time", 0))
                 if bc_ts >= cutoff_10:
                     score += 10.0
                     break
@@ -287,19 +303,17 @@ def _compute_structure_health(
 
     # 2. 中枢距离 (ZS pivot distance)
     if bi_zss and current_price > 0:
-        try:
-            last_zs = bi_zss[-1]
-            zs_high = float(last_zs.get("h", last_zs.get("high", 0)))
-            zs_low = float(last_zs.get("l", last_zs.get("low", 0)))
-            if zs_high > 0 and zs_low > 0:
-                pivot = (zs_high + zs_low) / 2
-                if current_price < pivot:
-                    score += 8.0  # Below pivot — good for buy
+        last_zs = bi_zss[-1]
+        if isinstance(last_zs, list) and len(last_zs) >= 2:
+            zs_prices = [p.get("price", 0) for p in last_zs if isinstance(p, dict)]
+            if zs_prices:
+                zs_low = min(zs_prices)
+                zs_high = max(zs_prices)
+                if current_price < zs_low:
+                    score += 8.0  # Below pivot zone
                 elif zs_low <= current_price <= zs_high:
-                    score += 4.0  # Inside ZS
-                # Above pivot = 0 pts
-        except (ValueError, TypeError, AttributeError, IndexError):
-            pass
+                    score += 4.0  # Inside pivot zone
+                # Above = 0
 
     # 3. 买点密度 (buy point density in last 30 bars)
     buy_count = sum(1 for t, _, ts, _ in mmds if t.endswith("B") and ts >= cutoff_30)
@@ -393,14 +407,15 @@ def compute_gamma(stock_code: str, trade_date: str) -> dict | None:
     daily_bc_count = len(daily_bcs) if daily_bcs else 0
     daily_bi_zs_count = len(daily_bi_zss) if daily_bi_zss else 0
 
-    # Last bi direction
-    daily_last_bi_dir = None
+    # Last bi direction — bis is a list of coordinate pairs
+    last_bi_dir = None
     if daily_bis:
-        try:
-            last_bi = daily_bis[-1]
-            daily_last_bi_dir = str(last_bi.get("d", last_bi.get("direction", "")))[:5]
-        except (AttributeError, IndexError, TypeError):
-            pass
+        last_bi = daily_bis[-1]
+        if isinstance(last_bi, list) and len(last_bi) >= 2:
+            s = last_bi[0].get("price", 0) if isinstance(last_bi[0], dict) else 0
+            e = last_bi[1].get("price", 0) if isinstance(last_bi[1], dict) else 0
+            last_bi_dir = "up" if e > s else "down"
+    daily_last_bi_dir = last_bi_dir
 
     return {
         "stock_code": stock_code,
