@@ -741,6 +741,11 @@ export interface BotTradePlanItem {
   beta_score: number | null;
   combined_score: number | null;
   gamma_score: number | null;
+  gamma_daily_strength: number | null;
+  gamma_weekly_resonance: number | null;
+  gamma_structure_health: number | null;
+  gamma_daily_mmd: string | null;  // e.g. "3B:笔"
+  gamma_weekly_mmd: string | null;
   phase: string | null; // cold|warm|mature
   // Strategy details (enriched from strategy lookup)
   strategy_name: string | null;
@@ -749,6 +754,148 @@ export interface BotTradePlanItem {
   max_hold_days: number | null;
   buy_conditions: Record<string, unknown>[] | null;
   sell_conditions: Record<string, unknown>[] | null;
+}
+
+// ── Trading Diary ──
+export interface DiaryRefreshStep {
+  name: string;
+  status: "done" | "running" | "pending" | "failed" | "skipped";
+  duration_sec: number | null;
+  detail: string;
+  progress: string | null;
+  error: string | null;
+}
+
+export interface DiaryRefresh {
+  job_id: number | null;
+  status: "succeeded" | "running" | "failed" | "not_started";
+  started_at: string | null;
+  finished_at: string | null;
+  duration_sec: number | null;
+  steps: DiaryRefreshStep[];
+  error: string | null;
+}
+
+export interface DiaryExecutionBuy {
+  code: string;
+  name: string;
+  price: number;
+  quantity: number;
+  amount: number;
+  plan_price: number;
+  day_low: number | null;
+  trigger: string;
+  strategy_name: string | null;
+  alpha: number | null;
+  beta: number | null;
+  gamma: number | null;
+  combined: number | null;
+}
+
+export interface DiaryExecutionSell {
+  code: string;
+  name: string;
+  price: number;
+  quantity: number;
+  amount: number;
+  reason: string;
+  reason_label: string;
+  buy_price: number | null;
+  pnl: number | null;
+  pnl_pct: number | null;
+  hold_days: number | null;
+  trigger: string;
+}
+
+export interface DiaryExecutionExpired {
+  code: string;
+  name: string;
+  direction: string;
+  plan_price: number;
+  day_high: number | null;
+  day_low: number | null;
+  reason: string;
+  source: string | null;
+}
+
+export interface DiaryExecution {
+  summary: {
+    plans_total: number;
+    executed: number;
+    expired: number;
+    buys: number;
+    sells_tp: number;
+    sells_sl: number;
+    sells_mhd: number;
+    sells_ai: number;
+  };
+  buy_list: DiaryExecutionBuy[];
+  sell_list: DiaryExecutionSell[];
+  expired_list: DiaryExecutionExpired[];
+}
+
+export interface DiaryPlanBuy {
+  code: string;
+  name: string;
+  plan_price: number | null;
+  quantity: number | null;
+  strategy_name: string | null;
+  alpha: number | null;
+  beta: number | null;
+  gamma: number | null;
+  combined: number | null;
+  gamma_daily_mmd: string | null;
+  gamma_weekly_mmd: string | null;
+  source: string;
+  reason: string;
+}
+
+export interface DiaryPlanSell {
+  code: string;
+  name: string;
+  plan_price: number | null;
+  source: string;
+  source_label: string;
+  reason: string;
+  hold_days: number | null;
+  strategy_name: string | null;
+}
+
+export interface DiaryPlansCreated {
+  for_date: string;
+  summary: {
+    buy: number;
+    sell_tp: number;
+    sell_sl: number;
+    sell_mhd: number;
+    sell_signal: number;
+  };
+  buy_list: DiaryPlanBuy[];
+  sell_list: DiaryPlanSell[];
+}
+
+export interface DiarySignals {
+  generated: number;
+  buy_signals: number;
+  sell_signals: number;
+}
+
+export interface DiaryPortfolioSnapshot {
+  total_holdings: number;
+  total_invested: number;
+  total_market_value: number | null;
+  daily_pnl: number | null;
+  daily_pnl_pct: number | null;
+}
+
+export interface TradingDiary {
+  date: string;
+  is_trading_day: boolean;
+  refresh: DiaryRefresh;
+  execution: DiaryExecution;
+  portfolio_snapshot: DiaryPortfolioSnapshot | null;
+  signals: DiarySignals;
+  plans_created: DiaryPlansCreated;
 }
 
 // ── Beta ML Model ───────────────────────────────

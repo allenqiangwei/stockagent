@@ -534,3 +534,15 @@ export function useBotPendingPlans() {
     queryFn: () => bot.pendingPlans(),
   });
 }
+
+export function useDiary(date: string) {
+  return useQuery({
+    queryKey: ["diary", date],
+    queryFn: () => bot.diary(date),
+    enabled: !!date,
+    refetchInterval: (query) => {
+      const status = query.state.data?.refresh?.status;
+      return status === "running" ? 5000 : false;
+    },
+  });
+}

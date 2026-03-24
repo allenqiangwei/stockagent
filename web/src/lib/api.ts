@@ -85,6 +85,7 @@ import type {
   PoolStatus,
   RebalanceResult,
   FamilySummary,
+  TradingDiary,
 } from "@/types";
 
 export const market = {
@@ -231,6 +232,30 @@ export const lab = {
     ),
   explorationRound: (id: number) =>
     request<ExplorationRound>(`/lab/exploration-rounds/${id}`),
+  gridSearch: (strategyId: number, params: {
+    stop_loss_values?: number[];
+    take_profit_values?: number[];
+    max_hold_days_values?: number[];
+    initial_capital?: number;
+    max_positions?: number;
+    max_position_pct?: number;
+  }) =>
+    post<{ message: string; experiment_id: number; combinations: number }>(
+      `/lab/strategies/${strategyId}/grid-search`, params
+    ),
+  gridResults: (strategyId: number) =>
+    request<{
+      source_strategy_id: number;
+      source_name: string;
+      total_combinations: number;
+      stda_plus_count: number;
+      results: Array<{
+        id: number; name: string; stop_loss_pct: number; take_profit_pct: number;
+        max_hold_days: number; score: number; total_return_pct: number;
+        max_drawdown_pct: number; win_rate: number; total_trades: number;
+        avg_hold_days: number; is_stda_plus: boolean;
+      }>;
+    }>(`/lab/strategies/${strategyId}/grid-results`),
 };
 
 // ── Backtest ──────────────────────────────────────────
@@ -314,16 +339,20 @@ export const bot = {
     request<BotTradeItem[]>(
       `/bot/trades?stock_code=${stockCode}&limit=${limit}`
     ),
-  timeline: (stockCode: string) =>
-    request<BotStockTimeline>(`/bot/trades/${stockCode}/timeline`),
+  timeline: (stockCode: string, strategyId?: number) =>
+    request<BotStockTimeline>(
+      `/bot/trades/${stockCode}/timeline${strategyId != null ? `?strategy_id=${strategyId}` : ""}`
+    ),
   reviews: (limit = 50) =>
     request<BotTradeReviewItem[]>(`/bot/reviews?limit=${limit}`),
   summary: () => request<BotSummary>("/bot/summary"),
-  plans: (status?: string) =>
-    request<BotTradePlanItem[]>(
-      `/bot/plans${status ? `?status=${status}` : ""}`
-    ),
+  plans: (status?: string) => {
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    return request<BotTradePlanItem[]>(`/bot/plans?${params}`);
+  },
   pendingPlans: () => request<BotTradePlanItem[]>("/bot/plans/pending"),
+  diary: (date: string) => request<TradingDiary>(`/bot/diary/${date}`),
 };
 
 // ── News Signals ──────────────────────────────────────
