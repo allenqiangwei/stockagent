@@ -148,19 +148,29 @@ def list_trades(
 
 
 @router.get("/trades/{stock_code}/timeline", response_model=BotStockTimeline)
-def get_stock_timeline(stock_code: str, db: Session = Depends(get_db)):
-    """Get full trade timeline for a single stock (all trades + review if exists)."""
-    trades = (
-        db.query(BotTrade)
-        .filter(BotTrade.stock_code == stock_code)
-        .order_by(BotTrade.trade_date, BotTrade.id)
-        .all()
-    )
+def get_stock_timeline(
+    stock_code: str,
+    strategy_id: int = Query(None, description="Filter by strategy (for virtual books)"),
+    db: Session = Depends(get_db),
+):
+    """Get full trade timeline for a single stock.
+
+    Pass strategy_id to isolate a specific strategy's position (virtual books).
+    Omit to see aggregated view across all strategies.
+    """
+    trades_q = db.query(BotTrade).filter(BotTrade.stock_code == stock_code)
+    if strategy_id is not None:
+        trades_q = trades_q.filter(BotTrade.strategy_id == strategy_id)
+    trades = trades_q.order_by(BotTrade.trade_date, BotTrade.id).all()
+
     if not trades:
         raise HTTPException(404, f"No trades found for {stock_code}")
 
-    # Sum all sub-positions for this stock (virtual books may have multiple rows)
-    holdings = db.query(BotPortfolio).filter(BotPortfolio.stock_code == stock_code).all()
+    # Holdings: filter by strategy if provided
+    holdings_q = db.query(BotPortfolio).filter(BotPortfolio.stock_code == stock_code)
+    if strategy_id is not None:
+        holdings_q = holdings_q.filter(BotPortfolio.strategy_id == strategy_id)
+    holdings = holdings_q.all()
     total_quantity = sum(h.quantity for h in holdings)
     review = (
         db.query(BotTradeReview)
@@ -305,8 +315,9 @@ def _get_today_prices(db: Session, stock_codes: list[str]) -> dict:
     return result
 
 
-def _plan_to_item(p, prices: dict, strategy_cache: dict | None = None) -> BotTradePlanItem:
-    """Convert ORM plan + price lookup to response item, enriched with strategy details."""
+def _plan_to_item(p, prices: dict, strategy_cache: dict | None = None,
+                  gamma_cache: dict | None = None) -> BotTradePlanItem:
+    """Convert ORM plan + price lookup to response item, enriched with strategy + gamma details."""
     px = prices.get(p.stock_code, {})
 
     # Extract phase from thinking field: "[Beta] [AI] strategy alpha=... phase=cold"
@@ -318,10 +329,15 @@ def _plan_to_item(p, prices: dict, strategy_cache: dict | None = None) -> BotTra
             phase = thinking.split("phase=")[1].split()[0].strip()
         except (IndexError, ValueError):
             pass
-    # Extract strategy name: everything between "[Beta] " and " alpha="
-    if thinking.startswith("[Beta] ") and " alpha=" in thinking:
-        name_part = thinking[7:].split(" alpha=")[0].strip()
-        strategy_name = name_part
+    # Extract strategy name: everything between "[Beta]/[Gamma] [AI] " and " alpha="
+    for prefix in ["[Gamma] ", "[Beta] "]:
+        if thinking.startswith(prefix) and " alpha=" in thinking:
+            name_part = thinking[len(prefix):].split(" alpha=")[0].strip()
+            # Strip additional [AI] / [P] tags
+            while name_part.startswith("[") and "] " in name_part:
+                name_part = name_part.split("] ", 1)[1]
+            strategy_name = name_part
+            break
 
     # Look up strategy details from cache
     stop_loss_pct = None
@@ -355,6 +371,12 @@ def _plan_to_item(p, prices: dict, strategy_cache: dict | None = None) -> BotTra
         alpha_score=getattr(p, "alpha_score", None),
         beta_score=getattr(p, "beta_score", None),
         combined_score=getattr(p, "combined_score", None),
+        gamma_score=getattr(p, "gamma_score", None),
+        gamma_daily_strength=gamma_cache.get(p.stock_code, {}).get("daily_strength") if gamma_cache else None,
+        gamma_weekly_resonance=gamma_cache.get(p.stock_code, {}).get("weekly_resonance") if gamma_cache else None,
+        gamma_structure_health=gamma_cache.get(p.stock_code, {}).get("structure_health") if gamma_cache else None,
+        gamma_daily_mmd=gamma_cache.get(p.stock_code, {}).get("daily_mmd") if gamma_cache else None,
+        gamma_weekly_mmd=gamma_cache.get(p.stock_code, {}).get("weekly_mmd") if gamma_cache else None,
         phase=phase,
         strategy_name=strategy_name,
         stop_loss_pct=stop_loss_pct,
@@ -369,6 +391,43 @@ def _plan_to_item(p, prices: dict, strategy_cache: dict | None = None) -> BotTra
     )
 
 
+def _build_gamma_cache(db: Session, stock_codes: list[str]) -> dict:
+    """Build stock_code → gamma snapshot lookup from the latest GammaSnapshot per stock."""
+    if not stock_codes:
+        return {}
+    try:
+        from api.models.gamma_factor import GammaSnapshot
+        from sqlalchemy import func
+
+        unique_codes = list(set(stock_codes))
+        # Get latest snapshot per stock
+        subq = (
+            db.query(GammaSnapshot.stock_code, func.max(GammaSnapshot.snapshot_date).label("max_date"))
+            .filter(GammaSnapshot.stock_code.in_(unique_codes))
+            .group_by(GammaSnapshot.stock_code)
+            .subquery()
+        )
+        snaps = (
+            db.query(GammaSnapshot)
+            .join(subq, (GammaSnapshot.stock_code == subq.c.stock_code) & (GammaSnapshot.snapshot_date == subq.c.max_date))
+            .all()
+        )
+        cache = {}
+        for s in snaps:
+            daily_mmd = f"{s.daily_mmd_type}:{s.daily_mmd_level}" if s.daily_mmd_type else None
+            weekly_mmd = f"{s.weekly_mmd_type}:{s.weekly_mmd_level}" if s.weekly_mmd_type else None
+            cache[s.stock_code] = {
+                "daily_strength": s.daily_strength,
+                "weekly_resonance": s.weekly_resonance,
+                "structure_health": s.structure_health,
+                "daily_mmd": daily_mmd,
+                "weekly_mmd": weekly_mmd,
+            }
+        return cache
+    except Exception:
+        return {}
+
+
 def _build_strategy_cache(db: Session, plans: list) -> dict:
     """Build a name→Strategy lookup for all strategies referenced in plans' thinking fields.
 
@@ -378,10 +437,15 @@ def _build_strategy_cache(db: Session, plans: list) -> dict:
     names = set()
     for p in plans:
         thinking = p.thinking or ""
-        if thinking.startswith("[Beta] ") and " alpha=" in thinking:
-            name_part = thinking[7:].split(" alpha=")[0].strip()
-            if name_part:
-                names.add(name_part)
+        for prefix in ["[Gamma] ", "[Beta] "]:
+            if thinking.startswith(prefix) and " alpha=" in thinking:
+                name_part = thinking[len(prefix):].split(" alpha=")[0].strip()
+                # Strip [AI] / [P] tags
+                while name_part.startswith("[") and "] " in name_part:
+                    name_part = name_part.split("] ", 1)[1]
+                if name_part:
+                    names.add(name_part)
+                break
     if not names:
         return {}
     # Try exact match first, fall back to prefix match for truncated names
@@ -400,7 +464,7 @@ def _build_strategy_cache(db: Session, plans: list) -> dict:
 def list_plans(
     status: str = Query("", description="Filter by status: pending|executed|expired"),
     plan_date: str = Query("", description="Filter by plan_date (YYYY-MM-DD)"),
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(0, ge=0, le=5000, description="0 = no limit"),
     db: Session = Depends(get_db),
 ):
     """List trade plans, optionally filtered by status and plan_date."""
@@ -409,10 +473,14 @@ def list_plans(
         q = q.filter(BotTradePlan.status == status)
     if plan_date:
         q = q.filter(BotTradePlan.plan_date == plan_date)
-    rows = q.order_by(BotTradePlan.plan_date.desc(), BotTradePlan.id.desc()).limit(limit).all()
+    q = q.order_by(BotTradePlan.plan_date.desc(), BotTradePlan.combined_score.desc().nullslast(), BotTradePlan.id.desc())
+    if limit > 0:
+        q = q.limit(limit)
+    rows = q.all()
     prices = _get_today_prices(db, list({p.stock_code for p in rows}))
     strat_cache = _build_strategy_cache(db, rows)
-    return [_plan_to_item(p, prices, strat_cache) for p in rows]
+    gamma_cache = _build_gamma_cache(db, [p.stock_code for p in rows])
+    return [_plan_to_item(p, prices, strat_cache, gamma_cache) for p in rows]
 
 
 @router.get("/plans/pending", response_model=list[BotTradePlanItem])
@@ -421,12 +489,13 @@ def list_pending_plans(db: Session = Depends(get_db)):
     rows = (
         db.query(BotTradePlan)
         .filter(BotTradePlan.status == "pending")
-        .order_by(BotTradePlan.alpha_score.desc().nullslast(), BotTradePlan.id)
+        .order_by(BotTradePlan.combined_score.desc().nullslast(), BotTradePlan.id)
         .all()
     )
     prices = _get_today_prices(db, list({p.stock_code for p in rows}))
     strat_cache = _build_strategy_cache(db, rows)
-    return [_plan_to_item(p, prices, strat_cache) for p in rows]
+    gamma_cache = _build_gamma_cache(db, [p.stock_code for p in rows])
+    return [_plan_to_item(p, prices, strat_cache, gamma_cache) for p in rows]
 
 
 @router.put("/reviews/{review_id}/update")
@@ -493,3 +562,10 @@ def get_bot_summary(db: Session = Depends(get_db)):
         mhd_count=exit_counts.get("max_hold", 0),
         ai_sell_count=exit_counts.get("ai_recommend", 0),
     )
+
+
+@router.get("/diary/{diary_date}")
+def get_diary(diary_date: str, db: Session = Depends(get_db)):
+    """Get complete trading diary for a specific date."""
+    from api.services.diary_service import build_diary
+    return build_diary(db, diary_date)
