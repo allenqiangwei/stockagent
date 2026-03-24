@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +28,8 @@ import {
   CircleCheck,
   CircleX,
   FileDown,
+  Filter,
+  X,
 } from "lucide-react";
 import {
   useAIReports,
@@ -42,11 +44,45 @@ import {
   useBotReviews,
   useBotPlans,
   useAISchedulerStatus,
+  useDiary,
 } from "@/hooks/use-queries";
 import { ai, bot } from "@/lib/api";
 import type { AIReport, AIReportListItem, BotTradeItem, BotStockTimeline, BotTradePlanItem } from "@/types";
 
 // ── helpers ────────────────────────────────────────────
+
+/** Format a buy/sell condition for display, handling all compare_types. */
+function formatCondition(c: Record<string, unknown>): string {
+  // Prefer explicit label if available
+  if (c.label) return String(c.label);
+
+  const field = String(c.field || "");
+  const op = String(c.operator || "");
+  const ct = String(c.compare_type || "");
+  const n = c.lookback_n ?? c.lookback;
+
+  switch (ct) {
+    case "value":
+      return `${field}${op}${c.compare_value ?? ""}`;
+    case "field":
+      return `${field}${op}${c.compare_field || ""}`;
+    case "consecutive": {
+      const dir = c.consecutive_type === "rising" ? "连升" : "连降";
+      return `${field}${dir}${n ?? ""}`;
+    }
+    case "lookback_min":
+      return `${field}${op}${n ?? ""}日低`;
+    case "lookback_max":
+      return `${field}${op}${n ?? ""}日高`;
+    case "pct_change":
+      return `${field}变${c.compare_value ?? ""}%/${n ?? 1}日`;
+    case "pct_diff":
+      return `${field}差${op}${c.compare_value ?? ""}%`;
+    default:
+      // Legacy format or missing compare_type
+      return `${field}${op}${c.compare_value ?? c.value ?? ""}`;
+  }
+}
 
 function regimeLabel(regime: string | null): string {
   if (!regime) return "未知";
@@ -559,20 +595,62 @@ function BotTradingPanel() {
   const { data: portfolio } = useBotPortfolio();
   const { data: reviews } = useBotReviews();
   const { data: plans } = useBotPlans();
-  const [subTab, setSubTab] = useState<"holding" | "plans" | "closed">("holding");
+  const [subTab, setSubTab] = useState<"holding" | "plans" | "closed" | "diary">("holding");
+  const [diaryDate, setDiaryDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const { data: diary } = useDiary(subTab === "diary" ? diaryDate : "");
   const [expandedCode, setExpandedCode] = useState<string | null>(null);
   const [timelines, setTimelines] = useState<Record<string, BotStockTimeline>>({});
+  const [selectedStrategies, setSelectedStrategies] = useState<Set<string>>(new Set());
+  const [stratFilterOpen, setStratFilterOpen] = useState(false);
 
-  const loadTimeline = async (code: string) => {
-    if (timelines[code]) {
-      setExpandedCode(expandedCode === code ? null : code);
+  // Collect all unique strategy names across tabs
+  const allStrategyNames = useMemo(() => {
+    const names = new Set<string>();
+    portfolio?.forEach(h => { if (h.strategy_name) names.add(h.strategy_name); });
+    plans?.forEach(p => { if (p.strategy_name) names.add(p.strategy_name); });
+    // reviews don't have strategy_name at top level
+    return Array.from(names).sort();
+  }, [portfolio, plans]);
+
+  // Filter helpers
+  const matchesStrategyFilter = (name?: string | null) =>
+    selectedStrategies.size === 0 || (name != null && selectedStrategies.has(name));
+
+  const filteredPortfolio = useMemo(
+    () => portfolio?.filter(h => matchesStrategyFilter(h.strategy_name)),
+    [portfolio, selectedStrategies]
+  );
+  const filteredPlans = useMemo(
+    () => plans?.filter(p => matchesStrategyFilter(p.strategy_name)),
+    [plans, selectedStrategies]
+  );
+  // reviews pass through (no strategy_name field)
+  const filteredReviews = reviews;
+
+  // Close strategy filter dropdown on click outside
+  const stratFilterRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!stratFilterOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (stratFilterRef.current && !stratFilterRef.current.contains(e.target as Node)) {
+        setStratFilterOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [stratFilterOpen]);
+
+  const loadTimeline = async (code: string, strategyId?: number) => {
+    const key = strategyId != null ? `${code}_${strategyId}` : code;
+    if (timelines[key]) {
+      setExpandedCode(expandedCode === key ? null : key);
       return;
     }
     try {
-      const data = await bot.timeline(code);
-      setTimelines(prev => ({ ...prev, [code]: data }));
-      setExpandedCode(code);
-    } catch { setExpandedCode(code); }
+      const data = await bot.timeline(code, strategyId);
+      setTimelines(prev => ({ ...prev, [key]: data }));
+      setExpandedCode(key);
+    } catch { setExpandedCode(key); }
   };
 
   const pnlColor = (v: number) => v > 0 ? "text-red-400" : v < 0 ? "text-green-400" : "text-muted-foreground";
@@ -615,7 +693,7 @@ function BotTradingPanel() {
 
       {/* Sub-tabs */}
       <div className="flex gap-1 border-b border-border/30 pb-0">
-        {(["holding", "plans", "closed"] as const).map(tab => (
+        {(["holding", "plans", "closed", "diary"] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setSubTab(tab)}
@@ -625,20 +703,84 @@ function BotTradingPanel() {
                 : "border-transparent text-muted-foreground hover:text-foreground"
             }`}
           >
-            {tab === "holding" ? `当前持仓 (${portfolio?.length || 0})` : tab === "plans" ? `计划 (${plans?.length || 0})` : `已完结 (${reviews?.length || 0})`}
+            {tab === "holding" ? `当前持仓 (${filteredPortfolio?.length || 0})` : tab === "plans" ? `计划 (${filteredPlans?.filter((p: BotTradePlanItem) => p.status === "pending").length || 0})` : tab === "closed" ? `已完结 (${filteredReviews?.length || 0})` : "日记"}
           </button>
         ))}
       </div>
 
+      {/* Strategy filter */}
+      {allStrategyNames.length > 0 && (
+        <div className="relative" ref={stratFilterRef}>
+          <button
+            onClick={() => setStratFilterOpen(v => !v)}
+            className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+              selectedStrategies.size > 0
+                ? "border-primary/50 bg-primary/5 text-primary"
+                : "border-border/50 text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <Filter className="h-3 w-3" />
+            {selectedStrategies.size > 0
+              ? `已选 ${selectedStrategies.size} 个策略`
+              : `筛选策略 (${allStrategyNames.length})`}
+            {selectedStrategies.size > 0 && (
+              <span
+                role="button"
+                onClick={e => { e.stopPropagation(); setSelectedStrategies(new Set()); }}
+                className="ml-1 hover:text-destructive"
+              >
+                <X className="h-3 w-3" />
+              </span>
+            )}
+          </button>
+          {stratFilterOpen && (
+            <div className="absolute z-50 mt-1 w-80 max-h-64 overflow-y-auto rounded-lg border border-border bg-popover shadow-lg p-1">
+              {/* Select all / clear */}
+              <div className="flex gap-2 px-2 py-1.5 border-b border-border/30 mb-1">
+                <button
+                  onClick={() => setSelectedStrategies(new Set(allStrategyNames))}
+                  className="text-[10px] text-primary hover:underline"
+                >全选</button>
+                <button
+                  onClick={() => setSelectedStrategies(new Set())}
+                  className="text-[10px] text-muted-foreground hover:underline"
+                >清除</button>
+              </div>
+              {allStrategyNames.map(name => (
+                <label
+                  key={name}
+                  className="flex items-center gap-2 px-2 py-1 rounded hover:bg-accent/50 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    className="rounded border-border"
+                    checked={selectedStrategies.has(name)}
+                    onChange={() => {
+                      setSelectedStrategies(prev => {
+                        const next = new Set(prev);
+                        if (next.has(name)) next.delete(name);
+                        else next.add(name);
+                        return next;
+                      });
+                    }}
+                  />
+                  <span className="text-[11px] truncate">{name}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Holdings */}
       {subTab === "holding" && (
         <div className="space-y-3">
-          {(!portfolio || portfolio.length === 0) ? (
+          {(!filteredPortfolio || filteredPortfolio.length === 0) ? (
             <div className="text-center text-muted-foreground text-sm py-10">暂无持仓</div>
-          ) : portfolio.map(h => (
-            <div key={h.stock_code} className="rounded-lg border border-border/50 bg-card/30 overflow-hidden">
+          ) : filteredPortfolio.map(h => { const tlKey = h.strategy_id != null ? `${h.stock_code}_${h.strategy_id}` : h.stock_code; return (
+            <div key={h.id} className="rounded-lg border border-border/50 bg-card/30 overflow-hidden">
               <button
-                onClick={() => loadTimeline(h.stock_code)}
+                onClick={() => loadTimeline(h.stock_code, h.strategy_id ?? undefined)}
                 className="w-full text-left p-3 hover:bg-accent/30 transition-colors"
               >
                 <div className="flex items-center justify-between">
@@ -702,10 +844,10 @@ function BotTradingPanel() {
               </button>
 
               {/* Expanded timeline */}
-              {expandedCode === h.stock_code && timelines[h.stock_code] && (
+              {expandedCode === tlKey && timelines[tlKey] && (
                 <div className="border-t border-border/30 p-3 space-y-2">
-                  <div className="text-[10px] text-muted-foreground font-medium">交易记录 ({timelines[h.stock_code].trades.length}笔)</div>
-                  {timelines[h.stock_code].trades.map((t: BotTradeItem) => (
+                  <div className="text-[10px] text-muted-foreground font-medium">交易记录 ({timelines[tlKey].trades.length}笔)</div>
+                  {timelines[tlKey].trades.map((t: BotTradeItem) => (
                     <div key={t.id} className="flex items-start gap-2 text-xs">
                       <span className={`mt-0.5 ${t.action === "buy" ? "text-red-400" : t.action === "hold" ? "text-muted-foreground" : "text-green-400"}`}>
                         {t.action === "buy" ? "+" : t.action === "hold" ? "=" : "-"}
@@ -739,106 +881,273 @@ function BotTradingPanel() {
                 </div>
               )}
             </div>
-          ))}
+          ); })}
         </div>
       )}
 
       {/* Plans */}
       {subTab === "plans" && (
-        <div className="space-y-3">
-          {!plans?.length ? (
+        <div className="space-y-2">
+          {!filteredPlans?.length ? (
             <p className="text-center text-muted-foreground py-8">暂无交易计划</p>
           ) : (
             <>
+              {/* Pending count header */}
+              {(() => {
+                const pending = filteredPlans.filter((p: BotTradePlanItem) => p.status === "pending");
+                return pending.length > 0 ? (
+                  <div className="text-xs text-muted-foreground mb-1">
+                    待执行 {pending.length} 个计划 · 按Alpha得分排序
+                  </div>
+                ) : null;
+              })()}
+
               {/* Pending plans */}
-              {plans.filter((p: BotTradePlanItem) => p.status === "pending").map((plan: BotTradePlanItem) => (
-                <div key={plan.id} className={`border rounded-lg p-3 ${
-                  plan.source === "stop_loss" ? "border-red-400 bg-red-50 dark:bg-red-950/20 dark:border-red-700" :
-                  plan.source === "take_profit" ? "border-green-400 bg-green-50 dark:bg-green-950/20 dark:border-green-700" :
-                  plan.source === "max_hold" ? "border-amber-400 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-600" :
-                  "border-amber-300 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-700"
-                }`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
-                        plan.source === "stop_loss" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" :
-                        plan.source === "take_profit" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" :
-                        plan.source === "max_hold" ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400" :
-                        plan.direction === "buy" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" :
-                        "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                      }`}>
-                        {plan.source === "stop_loss" ? "止损" :
-                         plan.source === "take_profit" ? "止盈" :
-                         plan.source === "max_hold" ? "超期" :
-                         plan.direction === "buy" ? "AI买入" : "AI卖出"}
-                      </span>
-                      <span className="font-mono font-bold">{plan.stock_code}</span>
-                      <span className="text-muted-foreground text-sm">{plan.stock_name}</span>
-                      {plan.today_close != null ? (
-                        <span className="flex items-center gap-1.5 text-xs ml-1">
-                          <span className="text-foreground font-medium">¥{plan.today_close.toFixed(2)}</span>
-                          <span className={plan.today_change_pct! >= 0 ? "text-red-500" : "text-green-500"}>
-                            {plan.today_change_pct! >= 0 ? "+" : ""}{plan.today_change_pct!.toFixed(2)}%
-                          </span>
-                          <span className="text-muted-foreground">
-                            {plan.today_low?.toFixed(2)}~{plan.today_high?.toFixed(2)}
-                          </span>
+              {filteredPlans.filter((p: BotTradePlanItem) => p.status === "pending").map((plan: BotTradePlanItem, idx: number) => (
+                <details key={plan.id} className="group" open={idx < 5}>
+                  <summary className={`cursor-pointer list-none rounded-lg border p-3 transition-colors hover:bg-accent/30 ${
+                    plan.source === "stop_loss" ? "border-red-500/40 bg-red-500/5" :
+                    plan.source === "take_profit" ? "border-green-500/40 bg-green-500/5" :
+                    plan.source === "max_hold" ? "border-amber-500/40 bg-amber-500/5" :
+                    "border-border bg-card/50"
+                  }`}>
+                    {/* Row 1: Badge + Stock + Price + Score */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                          plan.source === "stop_loss" ? "bg-red-500/15 text-red-500" :
+                          plan.source === "take_profit" ? "bg-green-500/15 text-green-500" :
+                          plan.source === "max_hold" ? "bg-amber-500/15 text-amber-500" :
+                          plan.source === "beta" ? "bg-blue-500/15 text-blue-500" :
+                          plan.direction === "buy" ? "bg-emerald-500/15 text-emerald-500" :
+                          "bg-red-500/15 text-red-500"
+                        }`}>
+                          {plan.source === "stop_loss" ? "止损" :
+                           plan.source === "take_profit" ? "止盈" :
+                           plan.source === "max_hold" ? "超期" :
+                           plan.source === "beta" ? "Beta" :
+                           plan.direction === "buy" ? "买入" : "卖出"}
                         </span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground/60 ml-1">数据未更新</span>
-                      )}
+                        <span className="font-mono font-bold text-sm">{plan.stock_code}</span>
+                        <span className="text-sm truncate">{plan.stock_name || "—"}</span>
+                        {plan.today_close != null && (
+                          <span className="flex items-center gap-1 text-xs shrink-0">
+                            <span className="font-medium">¥{plan.today_close.toFixed(2)}</span>
+                            <span className={plan.today_change_pct != null && plan.today_change_pct >= 0 ? "text-red-500" : "text-green-500"}>
+                              {plan.today_change_pct != null ? `${plan.today_change_pct >= 0 ? "+" : ""}${plan.today_change_pct.toFixed(2)}%` : ""}
+                            </span>
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {plan.combined_score != null && (
+                          <span className="text-xs font-bold tabular-nums" style={{
+                            color: plan.combined_score >= 30 ? "var(--chart-2, #22c55e)" :
+                                   plan.combined_score >= 15 ? "var(--chart-4, #eab308)" :
+                                   "var(--muted-foreground)"
+                          }}>
+                            {plan.combined_score.toFixed(1)}
+                          </span>
+                        )}
+                        <span className="text-[10px] text-muted-foreground">{plan.plan_date}</span>
+                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/50 transition-transform group-open:rotate-180" />
+                      </div>
                     </div>
-                    <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">待执行 {plan.plan_date}</span>
+
+                    {/* Row 2: Strategy + Scores mini bar */}
+                    <div className="mt-1.5 flex items-center gap-3 text-[11px] text-muted-foreground">
+                      {plan.strategy_name && (
+                        <span className="truncate max-w-[120px]" title={plan.strategy_name}>
+                          {plan.strategy_name.replace(/.*\]\s*/, "").split("_").slice(0, 3).join("_")}
+                        </span>
+                      )}
+                      {plan.alpha_score != null && (
+                        <span className="tabular-nums">α{plan.alpha_score.toFixed(1)}</span>
+                      )}
+                      {plan.beta_score != null && (
+                        <span className="tabular-nums">β{(plan.beta_score * 100).toFixed(0)}</span>
+                      )}
+                      {plan.gamma_score != null && (
+                        <span className="tabular-nums" style={{
+                          color: plan.gamma_score >= 60 ? "var(--chart-2, #22c55e)" :
+                                 plan.gamma_score >= 30 ? "var(--chart-4, #eab308)" : "inherit"
+                        }}>γ{plan.gamma_score.toFixed(1)}</span>
+                      )}
+                      {plan.phase && (
+                        <span className={`px-1 py-0.5 rounded text-[10px] ${
+                          plan.phase === "cold" ? "bg-sky-500/10 text-sky-500" :
+                          plan.phase === "warm" ? "bg-amber-500/10 text-amber-500" :
+                          "bg-emerald-500/10 text-emerald-500"
+                        }`}>
+                          {plan.phase === "cold" ? "冷启动" : plan.phase === "warm" ? "预热" : "成熟"}
+                        </span>
+                      )}
+                      <span className="ml-auto tabular-nums">¥{plan.plan_price.toFixed(2)} × {plan.quantity}</span>
+                    </div>
+                  </summary>
+
+                  {/* Expanded detail panel */}
+                  <div className="border border-t-0 border-border rounded-b-lg px-3 pb-3 pt-2 bg-muted/20 space-y-2.5 text-xs">
+                    {/* Score breakdown */}
+                    {(plan.alpha_score != null || plan.beta_score != null) && (
+                      <div className="grid grid-cols-4 gap-1.5">
+                        <div className="rounded-md bg-background/60 p-1.5 text-center">
+                          <div className="text-[10px] text-muted-foreground">Alpha</div>
+                          <div className="font-bold tabular-nums text-sm">{plan.alpha_score != null ? plan.alpha_score.toFixed(1) : "—"}</div>
+                        </div>
+                        <div className="rounded-md bg-background/60 p-1.5 text-center">
+                          <div className="text-[10px] text-muted-foreground">Beta</div>
+                          <div className="font-bold tabular-nums text-sm">{plan.beta_score != null ? (plan.beta_score * 100).toFixed(0) : "—"}</div>
+                        </div>
+                        <div className="rounded-md bg-background/60 p-1.5 text-center">
+                          <div className="text-[10px] text-muted-foreground">Gamma</div>
+                          <div className="font-bold tabular-nums text-sm" style={{
+                            color: plan.gamma_score != null && plan.gamma_score >= 60 ? "var(--chart-2, #22c55e)" :
+                                   plan.gamma_score != null && plan.gamma_score >= 30 ? "var(--chart-4, #eab308)" :
+                                   "inherit"
+                          }}>{plan.gamma_score != null ? plan.gamma_score.toFixed(1) : "—"}</div>
+                        </div>
+                        <div className="rounded-md bg-background/60 p-1.5 text-center">
+                          <div className="text-[10px] text-muted-foreground">综合</div>
+                          <div className="font-bold tabular-nums text-sm" style={{
+                            color: plan.combined_score != null && plan.combined_score >= 0.8 ? "var(--chart-2, #22c55e)" :
+                                   plan.combined_score != null && plan.combined_score >= 0.5 ? "var(--chart-4, #eab308)" :
+                                   "inherit"
+                          }}>{plan.combined_score != null ? plan.combined_score.toFixed(2) : "—"}</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Exit config */}
+                    {(plan.stop_loss_pct != null || plan.take_profit_pct != null || plan.max_hold_days != null) && (
+                      <div className="flex gap-3 text-muted-foreground">
+                        {plan.stop_loss_pct != null && (
+                          <span>止损: <span className="text-red-500 font-medium">{plan.stop_loss_pct}%</span></span>
+                        )}
+                        {plan.take_profit_pct != null && (
+                          <span>止盈: <span className="text-green-500 font-medium">{plan.take_profit_pct}%</span></span>
+                        )}
+                        {plan.max_hold_days != null && (
+                          <span>MHD: <span className="text-foreground font-medium">{plan.max_hold_days}天</span></span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Buy conditions */}
+                    {plan.buy_conditions && plan.buy_conditions.length > 0 && (
+                      <div>
+                        <div className="text-[10px] text-muted-foreground/70 mb-1">买入条件</div>
+                        <div className="flex flex-wrap gap-1">
+                          {plan.buy_conditions.map((c: Record<string, unknown>, i: number) => (
+                            <span key={i} className="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-500/8 text-emerald-600 dark:text-emerald-400 text-[10px] font-mono">
+                              {formatCondition(c)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Sell conditions */}
+                    {plan.sell_conditions && plan.sell_conditions.length > 0 && (
+                      <div>
+                        <div className="text-[10px] text-muted-foreground/70 mb-1">卖出条件</div>
+                        <div className="flex flex-wrap gap-1">
+                          {plan.sell_conditions.map((c: Record<string, unknown>, i: number) => (
+                            <span key={i} className="inline-flex items-center px-1.5 py-0.5 rounded bg-red-500/8 text-red-600 dark:text-red-400 text-[10px] font-mono">
+                              {formatCondition(c)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Market data detail */}
+                    {plan.today_close != null && (
+                      <div className="flex gap-3 text-muted-foreground">
+                        <span>现价: <span className="text-foreground font-medium">¥{plan.today_close.toFixed(2)}</span></span>
+                        {plan.today_high != null && <span>最高: ¥{plan.today_high.toFixed(2)}</span>}
+                        {plan.today_low != null && <span>最低: ¥{plan.today_low.toFixed(2)}</span>}
+                        <span>计划价: <span className="text-foreground">¥{plan.plan_price.toFixed(2)}</span></span>
+                        <span>金额: <span className="text-foreground">¥{(plan.plan_price * plan.quantity).toLocaleString()}</span></span>
+                      </div>
+                    )}
+
+                    {/* Gamma details */}
+                    {plan.gamma_score != null && (
+                      <div>
+                        <div className="text-[10px] text-muted-foreground/70 mb-1">缠论 (Gamma)</div>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          <div className="rounded-md bg-background/60 p-1.5 text-center">
+                            <div className="text-[10px] text-muted-foreground">日线强度</div>
+                            <div className="font-bold tabular-nums text-xs">{plan.gamma_daily_strength != null ? plan.gamma_daily_strength.toFixed(1) : "—"}</div>
+                          </div>
+                          <div className="rounded-md bg-background/60 p-1.5 text-center">
+                            <div className="text-[10px] text-muted-foreground">周线共振</div>
+                            <div className="font-bold tabular-nums text-xs">{plan.gamma_weekly_resonance != null ? plan.gamma_weekly_resonance.toFixed(1) : "—"}</div>
+                          </div>
+                          <div className="rounded-md bg-background/60 p-1.5 text-center">
+                            <div className="text-[10px] text-muted-foreground">结构健康</div>
+                            <div className="font-bold tabular-nums text-xs">{plan.gamma_structure_health != null ? plan.gamma_structure_health.toFixed(1) : "—"}</div>
+                          </div>
+                        </div>
+                        {(plan.gamma_daily_mmd || plan.gamma_weekly_mmd) && (
+                          <div className="mt-1 flex gap-2 text-[10px]">
+                            {plan.gamma_daily_mmd && (
+                              <span className="px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-500 font-medium">
+                                日{plan.gamma_daily_mmd}
+                              </span>
+                            )}
+                            {plan.gamma_weekly_mmd && (
+                              <span className="px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-500 font-medium">
+                                周{plan.gamma_weekly_mmd}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Strategy name (truncated) */}
+                    {plan.strategy_name && (
+                      <div className="text-[10px] text-muted-foreground truncate" title={plan.strategy_name}>
+                        策略: {plan.strategy_name}
+                      </div>
+                    )}
                   </div>
-                  <div className="mt-2 flex gap-4 text-sm text-muted-foreground">
-                    <span>目标价: <span className="text-foreground">¥{plan.plan_price.toFixed(2)}</span></span>
-                    <span>数量: <span className="text-foreground">{plan.quantity}</span></span>
-                    {plan.direction === "sell" && <span>比例: <span className="text-foreground">{plan.sell_pct}%</span></span>}
-                  </div>
-                  {plan.thinking && (
-                    <p className="mt-2 text-xs text-muted-foreground line-clamp-2">{plan.thinking}</p>
-                  )}
-                </div>
+                </details>
               ))}
 
               {/* Executed/Expired plans */}
-              {plans.filter((p: BotTradePlanItem) => p.status !== "pending").length > 0 && (
+              {filteredPlans.filter((p: BotTradePlanItem) => p.status !== "pending").length > 0 && (
                 <details className="mt-4">
-                  <summary className="text-sm text-muted-foreground cursor-pointer">
-                    历史计划 ({plans.filter((p: BotTradePlanItem) => p.status !== "pending").length})
+                  <summary className="text-sm text-muted-foreground cursor-pointer hover:text-foreground transition-colors">
+                    历史计划 ({filteredPlans.filter((p: BotTradePlanItem) => p.status !== "pending").length})
                   </summary>
-                  <div className="mt-2 space-y-2">
-                    {plans.filter((p: BotTradePlanItem) => p.status !== "pending").map((plan: BotTradePlanItem) => (
-                      <div key={plan.id} className="border border-border rounded-lg p-2 opacity-60">
+                  <div className="mt-2 space-y-1.5">
+                    {filteredPlans.filter((p: BotTradePlanItem) => p.status !== "pending").map((plan: BotTradePlanItem) => (
+                      <div key={plan.id} className="border border-border/50 rounded-lg p-2 opacity-60 hover:opacity-80 transition-opacity">
                         <div className="flex items-center justify-between text-sm">
                           <div className="flex items-center gap-2">
-                            <span className={plan.direction === "buy" ? "text-green-600" : "text-red-600"}>
+                            <span className={plan.direction === "buy" ? "text-emerald-500" : "text-red-500"}>
                               {plan.direction === "buy" ? "买" : "卖"}
                             </span>
                             <span className="font-mono">{plan.stock_code}</span>
-                            <span className="text-muted-foreground">{plan.stock_name}</span>
-                            {plan.today_close != null ? (
-                              <span className="flex items-center gap-1 text-xs">
-                                <span className="text-foreground">¥{plan.today_close.toFixed(2)}</span>
-                                <span className={plan.today_change_pct! >= 0 ? "text-red-500" : "text-green-500"}>
-                                  {plan.today_change_pct! >= 0 ? "+" : ""}{plan.today_change_pct!.toFixed(2)}%
-                                </span>
+                            <span className="text-muted-foreground text-xs">{plan.stock_name}</span>
+                            {plan.combined_score != null && (
+                              <span className="text-[10px] tabular-nums text-muted-foreground">
+                                综合{plan.combined_score.toFixed(1)}
                               </span>
-                            ) : (
-                              <span className="text-[10px] text-muted-foreground/60">数据未更新</span>
                             )}
                           </div>
-                          <span className={`text-xs px-1.5 py-0.5 rounded ${plan.status === "executed" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400"}`}>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${plan.status === "executed" ? "bg-green-500/10 text-green-500" : "bg-muted text-muted-foreground"}`}>
                             {plan.status === "executed" ? "已执行" : "已过期"}
                           </span>
                         </div>
-                        <div className="mt-1 flex gap-3 text-xs text-muted-foreground">
+                        <div className="mt-1 flex gap-3 text-[11px] text-muted-foreground">
                           <span>¥{plan.plan_price.toFixed(2)}</span>
                           <span>{plan.quantity}股</span>
                           <span>{plan.plan_date}</span>
-                          {plan.today_high != null && (
-                            <span>高低: {plan.today_low?.toFixed(2)}~{plan.today_high?.toFixed(2)}</span>
-                          )}
+                          {plan.strategy_name && <span className="truncate max-w-[150px]">{plan.strategy_name}</span>}
                         </div>
                       </div>
                     ))}
@@ -853,9 +1162,9 @@ function BotTradingPanel() {
       {/* Closed trades (reviews) */}
       {subTab === "closed" && (
         <div className="space-y-3">
-          {(!reviews || reviews.length === 0) ? (
+          {(!filteredReviews || filteredReviews.length === 0) ? (
             <div className="text-center text-muted-foreground text-sm py-10">暂无已完结交易</div>
-          ) : reviews.map(r => (
+          ) : filteredReviews.map(r => (
             <div key={r.id} className="rounded-lg border border-border/50 bg-card/30 overflow-hidden">
               <button
                 onClick={() => loadTimeline(r.stock_code)}
@@ -929,6 +1238,229 @@ function BotTradingPanel() {
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {subTab === "diary" && (
+        <div className="space-y-4">
+          {/* Date picker */}
+          <div className="flex items-center gap-2">
+            <button onClick={() => {
+              const d = new Date(diaryDate);
+              d.setDate(d.getDate() - 1);
+              setDiaryDate(d.toISOString().slice(0, 10));
+            }} className="px-2 py-1 rounded hover:bg-muted text-muted-foreground">&lt;</button>
+            <input type="date" value={diaryDate} onChange={e => setDiaryDate(e.target.value)}
+              className="bg-background border border-border rounded px-2 py-1 text-sm" />
+            <button onClick={() => {
+              const d = new Date(diaryDate);
+              d.setDate(d.getDate() + 1);
+              setDiaryDate(d.toISOString().slice(0, 10));
+            }} className="px-2 py-1 rounded hover:bg-muted text-muted-foreground">&gt;</button>
+            <button onClick={() => setDiaryDate(new Date().toISOString().slice(0, 10))}
+              className="text-xs text-muted-foreground hover:text-foreground">今天</button>
+          </div>
+
+          {!diary ? (
+            <div className="text-center text-muted-foreground py-8">加载中...</div>
+          ) : (
+            <>
+              {/* Refresh pipeline */}
+              <div className="border border-border rounded-lg p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium">Do-Refresh 流程</span>
+                  <span className={`text-xs px-2 py-0.5 rounded ${
+                    diary.refresh.status === "succeeded" ? "bg-green-500/10 text-green-500" :
+                    diary.refresh.status === "running" ? "bg-blue-500/10 text-blue-500" :
+                    diary.refresh.status === "failed" ? "bg-red-500/10 text-red-500" :
+                    "bg-muted text-muted-foreground"
+                  }`}>
+                    {diary.refresh.status === "succeeded" ? "已完成" :
+                     diary.refresh.status === "running" ? "进行中" :
+                     diary.refresh.status === "failed" ? "失败" : "未开始"}
+                  </span>
+                </div>
+                {diary.refresh.duration_sec != null && (
+                  <div className="text-[10px] text-muted-foreground mb-2">
+                    耗时: {Math.round(diary.refresh.duration_sec / 60)}分钟
+                  </div>
+                )}
+                <div className="space-y-1">
+                  {diary.refresh.steps.map((step, i) => (
+                    <div key={i} className="flex items-center gap-2 text-xs">
+                      <span className="w-4 text-center shrink-0">
+                        {step.status === "done" ? "\u2705" :
+                         step.status === "running" ? "\uD83D\uDD04" :
+                         step.status === "failed" ? "\u274C" : "\u23F3"}
+                      </span>
+                      <span className={`flex-1 ${step.status === "pending" ? "text-muted-foreground" : ""}`}>
+                        {step.name}
+                      </span>
+                      {step.progress && (
+                        <span className="text-muted-foreground font-mono text-[10px]">{step.progress}</span>
+                      )}
+                      {step.detail && step.status === "done" && (
+                        <span className="text-muted-foreground text-[10px]">{step.detail}</span>
+                      )}
+                      {step.error && (
+                        <span className="text-red-500 truncate max-w-[200px] text-[10px]" title={step.error}>{step.error}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Execution */}
+              <div className="border border-border rounded-lg p-3">
+                <div className="text-sm font-medium mb-2">今日交易执行</div>
+                <div className="flex flex-wrap gap-2 text-xs mb-3">
+                  <span className="px-2 py-1 rounded bg-emerald-500/10 text-emerald-500">买入 {diary.execution.summary.buys}</span>
+                  <span className="px-2 py-1 rounded bg-green-500/10 text-green-500">止盈 {diary.execution.summary.sells_tp}</span>
+                  <span className="px-2 py-1 rounded bg-red-500/10 text-red-500">止损 {diary.execution.summary.sells_sl}</span>
+                  <span className="px-2 py-1 rounded bg-muted text-muted-foreground">过期 {diary.execution.summary.expired}</span>
+                </div>
+
+                {diary.execution.buy_list.length > 0 && (
+                  <details open={diary.execution.buy_list.length <= 20}>
+                    <summary className="text-xs text-muted-foreground cursor-pointer mb-1">买入明细 ({diary.execution.buy_list.length})</summary>
+                    <div className="space-y-1.5 mt-1">
+                      {diary.execution.buy_list.map((b, i) => (
+                        <div key={i} className="text-xs border-l-2 border-emerald-500 pl-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold">{b.code}</span>
+                            <span>{b.name}</span>
+                            <span className="text-muted-foreground">¥{b.price}×{b.quantity.toLocaleString()}</span>
+                            {b.combined != null && <span className="text-emerald-500 font-medium">{b.combined.toFixed(2)}</span>}
+                          </div>
+                          <div className="text-muted-foreground text-[10px]">
+                            {b.strategy_name && <span>{b.strategy_name.split("_").slice(0, 3).join("_")} </span>}
+                            {b.trigger && <span>| {b.trigger} </span>}
+                            {b.alpha != null && <span>α{b.alpha.toFixed(0)} </span>}
+                            {b.gamma != null && <span>γ{b.gamma.toFixed(1)}</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
+                {diary.execution.sell_list.length > 0 && (
+                  <details className="mt-2">
+                    <summary className="text-xs text-muted-foreground cursor-pointer mb-1">卖出明细 ({diary.execution.sell_list.length})</summary>
+                    <div className="space-y-1.5 mt-1">
+                      {diary.execution.sell_list.map((s, i) => (
+                        <div key={i} className="text-xs border-l-2 border-red-500 pl-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold">{s.code}</span>
+                            <span>{s.name}</span>
+                            <span className="text-muted-foreground">¥{s.price}×{s.quantity.toLocaleString()}</span>
+                            <span className={`px-1 py-0.5 rounded text-[10px] ${
+                              s.reason === "take_profit" ? "bg-green-500/10 text-green-500" :
+                              s.reason === "stop_loss" ? "bg-red-500/10 text-red-500" :
+                              "bg-muted text-muted-foreground"
+                            }`}>{s.reason_label}</span>
+                          </div>
+                          {s.trigger && <div className="text-[10px] text-muted-foreground">{s.trigger}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
+                {diary.execution.expired_list.length > 0 && (
+                  <details className="mt-2">
+                    <summary className="text-xs text-muted-foreground cursor-pointer mb-1">过期未触发 ({diary.execution.expired_list.length})</summary>
+                    <div className="space-y-1 mt-1">
+                      {diary.execution.expired_list.slice(0, 50).map((e, i) => (
+                        <div key={i} className="text-[10px] text-muted-foreground flex gap-2">
+                          <span className="font-mono">{e.code}</span>
+                          <span>{e.name}</span>
+                          <span>{e.reason}</span>
+                        </div>
+                      ))}
+                      {diary.execution.expired_list.length > 50 && (
+                        <div className="text-[10px] text-muted-foreground">...还有{diary.execution.expired_list.length - 50}条</div>
+                      )}
+                    </div>
+                  </details>
+                )}
+              </div>
+
+              {/* Signals & Plans */}
+              <div className="border border-border rounded-lg p-3">
+                <div className="text-sm font-medium mb-2">信号 & 明日计划 ({diary.plans_created.for_date})</div>
+                <div className="flex gap-3 text-xs mb-3 text-muted-foreground">
+                  <span>信号: {diary.signals.generated} (买{diary.signals.buy_signals} 卖{diary.signals.sell_signals})</span>
+                  <span>|</span>
+                  <span>明日: {diary.plans_created.summary.buy}买 + {diary.plans_created.summary.sell_tp + diary.plans_created.summary.sell_sl + diary.plans_created.summary.sell_mhd + diary.plans_created.summary.sell_signal}卖</span>
+                </div>
+
+                {diary.plans_created.buy_list.length > 0 && (
+                  <details open>
+                    <summary className="text-xs text-muted-foreground cursor-pointer mb-1">买入计划 ({diary.plans_created.buy_list.length})</summary>
+                    <div className="space-y-1.5 mt-1">
+                      {diary.plans_created.buy_list.map((p, i) => (
+                        <div key={i} className="text-xs border-l-2 border-emerald-500 pl-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold">{p.code}</span>
+                            <span>{p.name}</span>
+                            {p.plan_price && <span className="text-muted-foreground">@¥{p.plan_price.toFixed(2)}</span>}
+                            {p.combined != null && <span className="text-emerald-500 font-medium">{p.combined.toFixed(2)}</span>}
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">{p.reason}</div>
+                          <div className="text-[10px] flex gap-2">
+                            {p.alpha != null && <span>α{p.alpha.toFixed(0)}</span>}
+                            {p.gamma != null && <span>γ{p.gamma.toFixed(1)}</span>}
+                            {p.gamma_daily_mmd && (
+                              <span className="px-1 py-0.5 rounded bg-violet-500/10 text-violet-500">日{p.gamma_daily_mmd}</span>
+                            )}
+                            {p.gamma_weekly_mmd && (
+                              <span className="px-1 py-0.5 rounded bg-blue-500/10 text-blue-500">周{p.gamma_weekly_mmd}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
+                {diary.plans_created.sell_list.length > 0 && (
+                  <details className="mt-2">
+                    <summary className="text-xs text-muted-foreground cursor-pointer mb-1">卖出计划 ({diary.plans_created.sell_list.length})</summary>
+                    <div className="space-y-1 mt-1">
+                      {diary.plans_created.sell_list.slice(0, 50).map((s, i) => (
+                        <div key={i} className="text-[10px] text-muted-foreground flex gap-2">
+                          <span className="font-mono">{s.code}</span>
+                          <span>{s.name}</span>
+                          <span className={`px-1 py-0.5 rounded ${
+                            s.source === "take_profit" ? "bg-green-500/10 text-green-500" :
+                            s.source === "stop_loss" ? "bg-red-500/10 text-red-500" :
+                            s.source === "max_hold" ? "bg-amber-500/10 text-amber-500" :
+                            "bg-muted"
+                          }`}>{s.source_label}</span>
+                          <span>{s.reason}</span>
+                        </div>
+                      ))}
+                      {diary.plans_created.sell_list.length > 50 && (
+                        <div className="text-[10px] text-muted-foreground">...还有{diary.plans_created.sell_list.length - 50}条</div>
+                      )}
+                    </div>
+                  </details>
+                )}
+              </div>
+
+              {/* Portfolio snapshot */}
+              {diary.portfolio_snapshot && (
+                <div className="border border-border rounded-lg p-3">
+                  <div className="text-sm font-medium mb-1">持仓快照</div>
+                  <div className="flex gap-4 text-xs text-muted-foreground">
+                    <span>持仓 <span className="text-foreground font-medium">{diary.portfolio_snapshot.total_holdings}</span> 只</span>
+                    <span>投入 <span className="text-foreground font-medium">¥{(diary.portfolio_snapshot.total_invested / 10000).toFixed(0)}万</span></span>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
