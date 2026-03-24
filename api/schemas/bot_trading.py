@@ -89,6 +89,12 @@ class BotTradePlanItem(BaseModel):
     alpha_score: Optional[float] = None
     beta_score: Optional[float] = None
     combined_score: Optional[float] = None
+    gamma_score: Optional[float] = None
+    gamma_daily_strength: Optional[float] = None
+    gamma_weekly_resonance: Optional[float] = None
+    gamma_structure_health: Optional[float] = None
+    gamma_daily_mmd: Optional[str] = None  # e.g. "3B:笔"
+    gamma_weekly_mmd: Optional[str] = None
     phase: Optional[str] = None  # cold|warm|mature
     # Strategy details (enriched from strategy lookup)
     strategy_name: Optional[str] = None
@@ -139,3 +145,137 @@ class BotStockTimeline(BaseModel):
     current_market_value: Optional[float] = None
     trades: list[BotTradeItem] = []
     review: Optional[BotTradeReviewItem] = None
+
+
+# ── Trading Diary schemas ──
+
+class DiaryRefreshStep(BaseModel):
+    name: str
+    status: str  # done|running|pending|failed|skipped
+    duration_sec: Optional[float] = None
+    detail: str = ""
+    progress: Optional[str] = None
+    error: Optional[str] = None
+
+class DiaryRefresh(BaseModel):
+    job_id: Optional[int] = None
+    status: str  # succeeded|running|failed|not_started
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    duration_sec: Optional[float] = None
+    steps: list[DiaryRefreshStep] = []
+    error: Optional[str] = None
+
+class DiaryExecutionBuy(BaseModel):
+    code: str
+    name: str
+    price: float
+    quantity: int
+    amount: float
+    plan_price: float = 0
+    day_low: Optional[float] = None
+    trigger: str = ""
+    strategy_name: Optional[str] = None
+    alpha: Optional[float] = None
+    beta: Optional[float] = None
+    gamma: Optional[float] = None
+    combined: Optional[float] = None
+
+class DiaryExecutionSell(BaseModel):
+    code: str
+    name: str
+    price: float
+    quantity: int
+    amount: float
+    reason: str
+    reason_label: str
+    buy_price: Optional[float] = None
+    pnl: Optional[float] = None
+    pnl_pct: Optional[float] = None
+    hold_days: Optional[int] = None
+    trigger: str = ""
+
+class DiaryExecutionExpired(BaseModel):
+    code: str
+    name: str
+    direction: str
+    plan_price: float
+    day_high: Optional[float] = None
+    day_low: Optional[float] = None
+    reason: str
+    source: Optional[str] = None
+
+class DiaryExecutionSummary(BaseModel):
+    plans_total: int = 0
+    executed: int = 0
+    expired: int = 0
+    buys: int = 0
+    sells_tp: int = 0
+    sells_sl: int = 0
+    sells_mhd: int = 0
+    sells_ai: int = 0
+
+class DiaryExecution(BaseModel):
+    summary: DiaryExecutionSummary
+    buy_list: list[DiaryExecutionBuy] = []
+    sell_list: list[DiaryExecutionSell] = []
+    expired_list: list[DiaryExecutionExpired] = []
+
+class DiaryPlanBuy(BaseModel):
+    code: str
+    name: str
+    plan_price: Optional[float] = None
+    quantity: Optional[int] = None
+    strategy_name: Optional[str] = None
+    alpha: Optional[float] = None
+    beta: Optional[float] = None
+    gamma: Optional[float] = None
+    combined: Optional[float] = None
+    gamma_daily_mmd: Optional[str] = None
+    gamma_weekly_mmd: Optional[str] = None
+    source: str = "beta"
+    reason: str = ""
+
+class DiaryPlanSell(BaseModel):
+    code: str
+    name: str
+    plan_price: Optional[float] = None
+    source: str
+    source_label: str
+    reason: str = ""
+    hold_days: Optional[int] = None
+    strategy_name: Optional[str] = None
+
+class DiaryPlansSummary(BaseModel):
+    buy: int = 0
+    sell_tp: int = 0
+    sell_sl: int = 0
+    sell_mhd: int = 0
+    sell_signal: int = 0
+
+class DiaryPlansCreated(BaseModel):
+    for_date: str = ""
+    summary: DiaryPlansSummary = DiaryPlansSummary()
+    buy_list: list[DiaryPlanBuy] = []
+    sell_list: list[DiaryPlanSell] = []
+
+class DiarySignals(BaseModel):
+    generated: int = 0
+    buy_signals: int = 0
+    sell_signals: int = 0
+
+class DiaryPortfolioSnapshot(BaseModel):
+    total_holdings: int = 0
+    total_invested: float = 0
+    total_market_value: Optional[float] = None
+    daily_pnl: Optional[float] = None
+    daily_pnl_pct: Optional[float] = None
+
+class TradingDiary(BaseModel):
+    date: str
+    is_trading_day: bool = True
+    refresh: DiaryRefresh
+    execution: DiaryExecution
+    portfolio_snapshot: Optional[DiaryPortfolioSnapshot] = None
+    signals: DiarySignals
+    plans_created: DiaryPlansCreated
