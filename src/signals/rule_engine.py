@@ -87,8 +87,16 @@ INDICATOR_GROUPS = {
             ("open", "开盘价"),
             ("high", "最高价"),
             ("low", "最低价"),
+            ("volume", "成交量"),
         ],
         "params": {},
+    },
+    "VOLUME_MA": {
+        "label": "成交量均线",
+        "sub_fields": [
+            ("volume_ma", "成交量均线"),
+        ],
+        "params": {"period": {"label": "周期", "default": 5, "type": "int"}},
     },
 }
 
@@ -111,11 +119,22 @@ def get_default_params(field: str) -> Dict[str, Any]:
     return {k: v["default"] for k, v in group_def["params"].items()}
 
 
+def strip_timeframe_prefix(field: str) -> tuple[str, str]:
+    """Strip W_ or M_ timeframe prefix from a field name.
+
+    Returns (prefix, base_field). prefix is "" for daily fields.
+    """
+    if field.startswith(("W_", "M_")):
+        return field[:2], field[2:]
+    return "", field
+
+
 def get_field_group(field: str) -> Optional[str]:
-    """查找字段所属的指标分组"""
+    """查找字段所属的指标分组（自动忽略 W_/M_ 前缀）"""
+    _, base = strip_timeframe_prefix(field)
     for group_name, group_def in INDICATOR_GROUPS.items():
         for sub_field, _ in group_def["sub_fields"]:
-            if sub_field == field:
+            if sub_field == base:
                 return group_name
     return None
 
@@ -145,65 +164,72 @@ def resolve_column_name(field: str, params: Optional[Dict[str, Any]] = None) -> 
       - MACD/MACD_signal/MACD_hist: MACD_{fast}_{slow}_{signal} / ...
       - KDJ_K/KDJ_D/KDJ_J: KDJ_K_{fastk}_{slowk}_{slowd} / ...
       - Extended indicators (BOLL, CCI, WR, etc.): delegated to indicator_registry
+      - W_/M_ prefix: multi-timeframe (weekly/monthly), resolved then re-prefixed
     """
+    # Handle multi-timeframe prefix (W_ = weekly, M_ = monthly)
+    tf_prefix, base_field = strip_timeframe_prefix(field)
+
     # Try extended indicator registry first (handles BOLL, CCI, ICHIMOKU, AROON, etc.)
     try:
         from api.services.indicator_registry import resolve_extended_column
-        result = resolve_extended_column(field, params)
+        result = resolve_extended_column(base_field, params)
         if result:
-            return result
+            return tf_prefix + result
     except ImportError:
         pass
 
-    group = get_field_group(field)
+    group = get_field_group(base_field)
     if not group:
-        return field
+        return field  # return original (with prefix) for unknown fields
 
     # 无参数的指标直接返回
     if group in ("PRICE", "OBV"):
-        return field
+        return tf_prefix + base_field
 
     # 补全默认参数
-    effective_params = get_default_params(field)
+    effective_params = get_default_params(base_field)
     if params:
         effective_params.update(params)
 
+    resolved = base_field  # fallback
     if group == "RSI":
-        return f"RSI_{effective_params['period']}"
+        resolved = f"RSI_{effective_params['period']}"
     elif group == "MA":
-        return f"MA_{effective_params['period']}"
+        resolved = f"MA_{effective_params['period']}"
     elif group == "EMA":
-        return f"EMA_{effective_params['period']}"
+        resolved = f"EMA_{effective_params['period']}"
     elif group == "ATR":
-        return f"ATR_{effective_params['period']}"
+        resolved = f"ATR_{effective_params['period']}"
     elif group == "ADX":
         p = effective_params["period"]
-        if field == "ADX":
-            return f"ADX_{p}"
-        elif field == "ADX_plus_di":
-            return f"ADX_plus_di_{p}"
-        elif field == "ADX_minus_di":
-            return f"ADX_minus_di_{p}"
+        if base_field == "ADX":
+            resolved = f"ADX_{p}"
+        elif base_field == "ADX_plus_di":
+            resolved = f"ADX_plus_di_{p}"
+        elif base_field == "ADX_minus_di":
+            resolved = f"ADX_minus_di_{p}"
     elif group == "MACD":
         f_, s_, sig_ = effective_params["fast"], effective_params["slow"], effective_params["signal"]
         suffix = f"_{f_}_{s_}_{sig_}"
-        if field == "MACD":
-            return f"MACD{suffix}"
-        elif field == "MACD_signal":
-            return f"MACD_signal{suffix}"
-        elif field == "MACD_hist":
-            return f"MACD_hist{suffix}"
+        if base_field == "MACD":
+            resolved = f"MACD{suffix}"
+        elif base_field == "MACD_signal":
+            resolved = f"MACD_signal{suffix}"
+        elif base_field == "MACD_hist":
+            resolved = f"MACD_hist{suffix}"
     elif group == "KDJ":
         fk, sk, sd = effective_params["fastk"], effective_params["slowk"], effective_params["slowd"]
         suffix = f"_{fk}_{sk}_{sd}"
-        if field == "KDJ_K":
-            return f"KDJ_K{suffix}"
-        elif field == "KDJ_D":
-            return f"KDJ_D{suffix}"
-        elif field == "KDJ_J":
-            return f"KDJ_J{suffix}"
+        if base_field == "KDJ_K":
+            resolved = f"KDJ_K{suffix}"
+        elif base_field == "KDJ_D":
+            resolved = f"KDJ_D{suffix}"
+        elif base_field == "KDJ_J":
+            resolved = f"KDJ_J{suffix}"
+    elif group == "VOLUME_MA":
+        resolved = f"volume_ma_{effective_params['period']}"
 
-    return field
+    return tf_prefix + resolved
 
 
 # ── 从规则中提取所需指标参数 ──────────────────────────────
@@ -226,7 +252,11 @@ def collect_indicator_params(
 
     def _add_to_result(field_name, field_params):
         """将一个 (field, params) 加入收集结果"""
-        grp = get_field_group(field_name)
+        # Detect multi-timeframe prefix (W_RSI → tf_prefix="w_", base="RSI")
+        tf_prefix, base_field = strip_timeframe_prefix(field_name)
+        tf_key_prefix = tf_prefix.lower()  # "w_" or "m_" or ""
+
+        grp = get_field_group(base_field)
         if grp and grp in ("PRICE",):
             return
         if grp and grp == "OBV":
@@ -234,14 +264,14 @@ def collect_indicator_params(
             return
         if grp:
             # Core indicator — use core defaults
-            eff = get_default_params(field_name)
+            eff = get_default_params(base_field)
         else:
             # Try extended indicator registry
             from api.services.indicator_registry import (
                 get_extended_field_group,
                 EXTENDED_INDICATORS,
             )
-            ext_grp = get_extended_field_group(field_name)
+            ext_grp = get_extended_field_group(base_field)
             if not ext_grp:
                 return  # Unknown field, skip
             grp = ext_grp
@@ -250,7 +280,7 @@ def collect_indicator_params(
             eff = {k: v["default"] for k, v in meta["params"].items()}
         if field_params:
             eff.update(field_params)
-        k = grp.lower()
+        k = tf_key_prefix + grp.lower()  # "w_rsi", "m_ema", or just "rsi"
         fp = str(sorted(eff.items()))
         if k not in seen:
             seen[k] = set()
@@ -279,12 +309,15 @@ def collect_indicator_params(
 
     # OBV 无参数但始终需要计算（如果有规则引用）
     for rule in all_rules:
-        field = rule.get("field", "")
-        if get_field_group(field) == "OBV" and "obv" not in result:
-            result["obv"] = [{}]
-        cf = rule.get("compare_field", "")
-        if get_field_group(cf) == "OBV" and "obv" not in result:
-            result["obv"] = [{}]
+        for fld_key in ("field", "compare_field"):
+            fld = rule.get(fld_key, "")
+            if not fld:
+                continue
+            if get_field_group(fld) == "OBV":
+                tf_pre = strip_timeframe_prefix(fld)[0].lower()
+                obv_key = tf_pre + "obv"  # "obv", "w_obv", or "m_obv"
+                if obv_key not in result:
+                    result[obv_key] = [{}]
 
     return result
 
@@ -557,13 +590,15 @@ def evaluate_conditions(
         return True, triggered_labels
 
     else:  # OR
+        any_triggered = False
         for cond in conditions:
             if _evaluate_single_rule(cond, latest, df_slice=indicator_df):
+                any_triggered = True
                 label = cond.get("label", "")
                 if label:
                     triggered_labels.append(label)
-        # OR 模式：有任一触发就算触发
-        return len(triggered_labels) > 0, triggered_labels
+        # OR 模式：有任一触发就算触发（不依赖是否有 label）
+        return any_triggered, triggered_labels
 
 
 # ── 已知指标取值范围 ─────────────────────────────────────
@@ -584,6 +619,35 @@ FIELD_RANGES: Dict[str, Tuple[float, float]] = {
     "ULTOSC": (0, 100),
     "STOCH_K": (0, 100),
     "STOCH_D": (0, 100),
+    "NEWS_SENTIMENT_3D": (-1.0, 1.0),
+    "NEWS_SENTIMENT_7D": (-1.0, 1.0),
+    # Quantitative Factors
+    "MOM": (-100, 500),
+    "REALVOL": (0, 30),
+    "REALVOL_skew": (-5, 5),
+    "REALVOL_kurt": (-5, 30),
+    "REALVOL_downside": (0, 30),
+    "KBAR_upper_shadow": (0, 1),
+    "KBAR_lower_shadow": (0, 1),
+    "KBAR_body_ratio": (0, 1),
+    "KBAR_amplitude": (0, 0.3),
+    "KBAR_overnight_ret": (-15, 15),
+    "KBAR_intraday_ret": (-15, 15),
+    "PVOL_corr": (-1, 1),
+    "PVOL_amount_conc": (0, 1),
+    "PVOL_vwap_bias": (-20, 20),
+    "LIQ_amihud": (0, 100),
+    "LIQ_turnover_vol": (0, 5),
+    "LIQ_log_amount": (0, 30),
+    "PPOS_close_pos": (0, 1),
+    "PPOS_high_dist": (-50, 0),
+    "PPOS_low_dist": (0, 200),
+    "PPOS_drawdown": (-50, 0),
+    "PPOS_consec_dir": (-15, 15),
+    "RSTR": (-50, 100),
+    "RSTR_weighted": (-10, 10),
+    "AMPVOL_std": (0, 0.2),
+    "AMPVOL_parkinson": (0, 20),
 }
 
 

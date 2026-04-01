@@ -328,6 +328,105 @@ EXTENDED_INDICATORS: dict[str, dict[str, Any]] = {
         "sub_fields": [("VPT", "VPT")],
         "params": {},
     },
+
+    # ── Sentiment (exogenous — not computed from OHLCV) ────
+    "NEWS_SENTIMENT": {
+        "label": "新闻情绪",
+        "sub_fields": [
+            ("NEWS_SENTIMENT_3D", "3日新闻情绪"),
+            ("NEWS_SENTIMENT_7D", "7日新闻情绪"),
+        ],
+        "params": {},
+    },
+
+    # ── Quantitative Factors ─────────────────────────────────
+
+    "MOM": {
+        "label": "动量",
+        "sub_fields": [("MOM", "动量%")],
+        "params": {
+            "period": {"label": "回看周期", "default": 20, "type": "int"},
+        },
+    },
+    "REALVOL": {
+        "label": "已实现波动率",
+        "sub_fields": [
+            ("REALVOL", "波动率%"),
+            ("REALVOL_skew", "收益偏度"),
+            ("REALVOL_kurt", "收益峰度"),
+            ("REALVOL_downside", "下行波动率%"),
+        ],
+        "params": {
+            "period": {"label": "回看周期", "default": 20, "type": "int"},
+        },
+    },
+    "KBAR": {
+        "label": "K线形态",
+        "sub_fields": [
+            ("KBAR_upper_shadow", "上影线比率"),
+            ("KBAR_lower_shadow", "下影线比率"),
+            ("KBAR_body_ratio", "实体比率"),
+            ("KBAR_amplitude", "振幅"),
+            ("KBAR_overnight_ret", "隔夜收益率%"),
+            ("KBAR_intraday_ret", "日内收益率%"),
+        ],
+        "params": {},
+    },
+    "PVOL": {
+        "label": "量价关系",
+        "sub_fields": [
+            ("PVOL_corr", "量价相关性"),
+            ("PVOL_amount_conc", "成交额集中度"),
+            ("PVOL_vwap_bias", "VWAP偏离度%"),
+        ],
+        "params": {
+            "period": {"label": "回看周期", "default": 20, "type": "int"},
+        },
+    },
+    "LIQ": {
+        "label": "流动性",
+        "sub_fields": [
+            ("LIQ_amihud", "Amihud非流动性"),
+            ("LIQ_turnover_vol", "换手波动率"),
+            ("LIQ_log_amount", "对数成交额"),
+        ],
+        "params": {
+            "period": {"label": "回看周期", "default": 20, "type": "int"},
+        },
+    },
+    "PPOS": {
+        "label": "价格位置",
+        "sub_fields": [
+            ("PPOS_close_pos", "收盘价位置(0-1)"),
+            ("PPOS_high_dist", "距N日高点%"),
+            ("PPOS_low_dist", "距N日低点%"),
+            ("PPOS_drawdown", "N日最大回撤%"),
+            ("PPOS_consec_dir", "连涨/跌天数"),
+        ],
+        "params": {
+            "period": {"label": "回看周期", "default": 20, "type": "int"},
+        },
+    },
+    "RSTR": {
+        "label": "相对强弱",
+        "sub_fields": [
+            ("RSTR", "N日收益率%"),
+            ("RSTR_weighted", "加权动量"),
+        ],
+        "params": {
+            "period": {"label": "回看周期", "default": 20, "type": "int"},
+        },
+    },
+    "AMPVOL": {
+        "label": "振幅波动",
+        "sub_fields": [
+            ("AMPVOL_std", "振幅标准差"),
+            ("AMPVOL_parkinson", "Parkinson波动率"),
+        ],
+        "params": {
+            "period": {"label": "回看周期", "default": 5, "type": "int"},
+        },
+    },
 }
 
 
@@ -676,6 +775,182 @@ def _compute_vpt(df: pd.DataFrame, params: dict) -> pd.DataFrame:
     return pd.DataFrame({"VPT": vpt.volume_price_trend()}, index=df.index)
 
 
+# ── Sentiment (placeholder — actual values injected by signal_engine) ──
+
+def _compute_news_sentiment(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    return pd.DataFrame({
+        "NEWS_SENTIMENT_3D": pd.Series(np.nan, index=df.index),
+        "NEWS_SENTIMENT_7D": pd.Series(np.nan, index=df.index),
+    })
+
+
+# ── Quantitative Factors ──
+
+def _compute_mom(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    period = params.get("period", 20)
+    shifted = df["close"].shift(period)
+    mom = (df["close"] - shifted) / shifted.replace(0, np.nan) * 100
+    return pd.DataFrame({f"MOM_{period}": mom}, index=df.index)
+
+
+def _compute_realvol(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    period = params.get("period", 20)
+    returns = df["close"].pct_change()
+    s = f"_{period}"
+    vol = returns.rolling(period).std() * 100
+    skew = returns.rolling(period).skew()
+    kurt = returns.rolling(period).kurt()
+    # Downside vol: only negative returns, replace positive with NaN
+    neg_returns = returns.where(returns < 0, np.nan)
+    downside = neg_returns.rolling(period, min_periods=1).std() * 100
+    return pd.DataFrame({
+        f"REALVOL{s}": vol,
+        f"REALVOL_skew{s}": skew,
+        f"REALVOL_kurt{s}": kurt,
+        f"REALVOL_downside{s}": downside,
+    }, index=df.index)
+
+
+def _compute_kbar(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    bar_range = (df["high"] - df["low"]).replace(0, np.nan)
+    body_top = df[["open", "close"]].max(axis=1)
+    body_bot = df[["open", "close"]].min(axis=1)
+    upper_shadow = (df["high"] - body_top) / bar_range
+    lower_shadow = (body_bot - df["low"]) / bar_range
+    body_ratio = (body_top - body_bot) / bar_range
+    amplitude = (df["high"] - df["low"]) / df["close"].replace(0, np.nan)
+    prev_close = df["close"].shift(1)
+    overnight_ret = (df["open"] - prev_close) / prev_close.replace(0, np.nan) * 100
+    intraday_ret = (df["close"] - df["open"]) / df["open"].replace(0, np.nan) * 100
+    return pd.DataFrame({
+        "KBAR_upper_shadow": upper_shadow,
+        "KBAR_lower_shadow": lower_shadow,
+        "KBAR_body_ratio": body_ratio,
+        "KBAR_amplitude": amplitude,
+        "KBAR_overnight_ret": overnight_ret,
+        "KBAR_intraday_ret": intraday_ret,
+    }, index=df.index)
+
+
+def _compute_pvol(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    period = params.get("period", 20)
+    s = f"_{period}"
+    returns = df["close"].pct_change()
+    corr = returns.rolling(period).corr(df["volume"])
+    amount_max = df["amount"].rolling(period).max()
+    amount_sum = df["amount"].rolling(period).sum().replace(0, np.nan)
+    amount_conc = amount_max / amount_sum
+    vwap_amount_sum = df["amount"].rolling(period).sum()
+    vwap_volume_sum = df["volume"].rolling(period).sum().replace(0, np.nan)
+    vwap = vwap_amount_sum / vwap_volume_sum
+    vwap_bias = (df["close"] - vwap) / vwap.replace(0, np.nan) * 100
+    return pd.DataFrame({
+        f"PVOL_corr{s}": corr,
+        f"PVOL_amount_conc{s}": amount_conc,
+        f"PVOL_vwap_bias{s}": vwap_bias,
+    }, index=df.index)
+
+
+def _compute_liq(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    period = params.get("period", 20)
+    s = f"_{period}"
+    returns = df["close"].pct_change()
+    illiq = returns.abs() / df["amount"].replace(0, np.nan)
+    amihud = illiq.rolling(period).mean() * 1e9
+    vol_mean = df["volume"].rolling(period).mean().replace(0, np.nan)
+    vol_std = df["volume"].rolling(period).std()
+    turnover_vol = vol_std / vol_mean
+    log_amount = np.log1p(df["amount"].rolling(period).mean())
+    return pd.DataFrame({
+        f"LIQ_amihud{s}": amihud,
+        f"LIQ_turnover_vol{s}": turnover_vol,
+        f"LIQ_log_amount{s}": log_amount,
+    }, index=df.index)
+
+
+def _compute_ppos(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    period = params.get("period", 20)
+    s = f"_{period}"
+    roll_min_low = df["low"].rolling(period).min()
+    roll_max_high = df["high"].rolling(period).max()
+    hilo_range = (roll_max_high - roll_min_low).replace(0, np.nan)
+    close_pos = (df["close"] - roll_min_low) / hilo_range
+    high_dist = (df["close"] / roll_max_high.replace(0, np.nan) - 1) * 100
+    low_dist = (df["close"] / roll_min_low.replace(0, np.nan) - 1) * 100
+    roll_max_close = df["close"].rolling(period).max()
+    drawdown = (df["close"] / roll_max_close.replace(0, np.nan) - 1) * 100
+    # Consecutive direction: positive = up days, negative = down days
+    change = df["close"].diff()
+    direction = np.sign(change)
+    consec = pd.Series(0, index=df.index, dtype=float)
+    prev = 0.0
+    for i in range(len(direction)):
+        d = direction.iloc[i]
+        if np.isnan(d) or d == 0:
+            prev = 0.0
+        elif d > 0:
+            prev = max(prev, 0) + 1
+        else:
+            prev = min(prev, 0) - 1
+        consec.iloc[i] = prev
+    return pd.DataFrame({
+        f"PPOS_close_pos{s}": close_pos,
+        f"PPOS_high_dist{s}": high_dist,
+        f"PPOS_low_dist{s}": low_dist,
+        f"PPOS_drawdown{s}": drawdown,
+        f"PPOS_consec_dir{s}": consec,
+    }, index=df.index)
+
+
+def _compute_rstr(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    period = params.get("period", 20)
+    s = f"_{period}"
+    shifted = df["close"].shift(period)
+    rstr = (df["close"] - shifted) / shifted.replace(0, np.nan) * 100
+    # Weighted momentum: linearly decaying weights [period, period-1, ..., 1]
+    daily_ret = df["close"].pct_change()
+    weights = np.arange(1, period + 1, dtype=float)  # [1, 2, ..., N]
+    weight_sum = weights.sum()
+
+    def _weighted_mean(x):
+        if len(x) < period:
+            return np.nan
+        valid = x.values
+        if np.any(np.isnan(valid)):
+            return np.nan
+        return np.dot(valid, weights) / weight_sum
+
+    weighted = daily_ret.rolling(period).apply(_weighted_mean, raw=False)
+    return pd.DataFrame({
+        f"RSTR{s}": rstr,
+        f"RSTR_weighted{s}": weighted,
+    }, index=df.index)
+
+
+def _compute_ampvol(df: pd.DataFrame, params: dict) -> pd.DataFrame:
+    import numpy as np
+    period = params.get("period", 5)
+    s = f"_{period}"
+    amplitude = (df["high"] - df["low"]) / df["close"].replace(0, np.nan)
+    amp_std = amplitude.rolling(period).std()
+    log_hl = np.log(df["high"] / df["low"].replace(0, np.nan))
+    parkinson = np.sqrt(
+        (log_hl ** 2).rolling(period).mean() / (4 * np.log(2))
+    ) * 100
+    return pd.DataFrame({
+        f"AMPVOL_std{s}": amp_std,
+        f"AMPVOL_parkinson{s}": parkinson,
+    }, index=df.index)
+
+
 # ── Compute function map ──────────────────────────────────
 
 _COMPUTE_FUNCTIONS: dict[str, callable] = {
@@ -716,6 +991,17 @@ _COMPUTE_FUNCTIONS: dict[str, callable] = {
     "FI": _compute_fi,
     "NVI": _compute_nvi,
     "VPT": _compute_vpt,
+    # Sentiment
+    "NEWS_SENTIMENT": _compute_news_sentiment,
+    # Quantitative Factors
+    "MOM": _compute_mom,
+    "REALVOL": _compute_realvol,
+    "KBAR": _compute_kbar,
+    "PVOL": _compute_pvol,
+    "LIQ": _compute_liq,
+    "PPOS": _compute_ppos,
+    "RSTR": _compute_rstr,
+    "AMPVOL": _compute_ampvol,
 }
 
 
@@ -817,6 +1103,27 @@ def get_all_indicator_docs() -> str:
             for k, v in meta["params"].items()
         ) if meta["params"] else "无参数"
         lines.append(f"- **{meta['label']}** ({group_name}): 字段=[{fields_str}], 参数=[{params_str}]")
+
+    # Multi-timeframe support
+    lines.append("")
+    lines.append("## 多周期指标 (Multi-Timeframe)")
+    lines.append("以上所有指标均可加 W_ (周线) 或 M_ (月线) 前缀，在更大周期上计算后向前填充到日线。")
+    lines.append("- 周线指标: 字段名前加 `W_`，如 `W_RSI`(周线RSI)、`W_EMA`(周线EMA)、`W_ATR`(周线ATR)")
+    lines.append("- 月线指标: 字段名前加 `M_`，如 `M_RSI`(月线RSI)、`M_EMA`(月线EMA)")
+    lines.append("- 参数格式与日线完全相同，如 {\"field\": \"W_RSI\", \"params\": {\"period\": 14}, ...}")
+    lines.append("- 可与日线指标混合使用，实现多周期过滤（如：日线RSI超卖 + 周线趋势向上）")
+    lines.append("- 周线OHLCV也可直接引用: W_close, W_high, W_low, W_open")
+    lines.append("- 注意: 周线指标需要约70个交易日预热, 月线需要更长, 建议优先使用周线")
+
+    # News sentiment
+    lines.append("")
+    lines.append("## 新闻情绪指标 (News Sentiment)")
+    lines.append("基于个股关联新闻的滚动情绪评分，取值 [-1.0, +1.0]（+1全正面, -1全负面, 0中性/无新闻）")
+    lines.append("- `NEWS_SENTIMENT_3D`: 近3日新闻情绪")
+    lines.append("- `NEWS_SENTIMENT_7D`: 近7日新闻情绪")
+    lines.append("- 无参数，无需 W_/M_ 前缀")
+    lines.append("- 仅在实盘信号生成时有效，回测中默认为NaN（条件不触发）")
+    lines.append("- 示例: {\"field\": \"NEWS_SENTIMENT_3D\", \"operator\": \">\", \"compare_type\": \"value\", \"compare_value\": 0.3}")
 
     return "\n".join(lines)
 
