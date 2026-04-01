@@ -376,3 +376,78 @@ class TestFieldRanges:
         # Non-parametrized
         assert _get_field_range("KBAR_upper_shadow") == (0, 1)
         assert _get_field_range("KBAR_amplitude") == (0, 0.3)
+
+
+# ── Integration tests: backtest pipeline ────────────────
+
+def test_factors_in_backtest_conditions():
+    """Verify new factors can be used in buy_conditions and evaluated."""
+    from src.signals.rule_engine import evaluate_conditions, collect_indicator_params
+    from src.indicators.indicator_calculator import IndicatorConfig, IndicatorCalculator
+
+    df = _make_df(60)
+
+    buy_conditions = [
+        {"field": "MOM", "operator": ">", "compare_type": "value",
+         "compare_value": 0, "params": {"period": 5}},
+        {"field": "PPOS_close_pos", "operator": "<", "compare_type": "value",
+         "compare_value": 0.5, "params": {"period": 20}},
+        {"field": "REALVOL", "operator": "<", "compare_type": "value",
+         "compare_value": 5, "params": {"period": 20}},
+    ]
+
+    collected = collect_indicator_params(buy_conditions)
+    config = IndicatorConfig.from_collected_params(collected)
+    calculator = IndicatorCalculator(config)
+    indicators = calculator.calculate_all(df)
+    df_full = pd.concat([df, indicators], axis=1)
+
+    assert "MOM_5" in df_full.columns
+    assert "PPOS_close_pos_20" in df_full.columns
+    assert "REALVOL_20" in df_full.columns
+
+    triggered, labels = evaluate_conditions(buy_conditions, df_full, mode="AND")
+    assert isinstance(triggered, bool)
+
+
+def test_factors_vectorize():
+    """Verify new factors work with vectorized signal generation."""
+    from src.signals.rule_engine import collect_indicator_params
+    from src.indicators.indicator_calculator import IndicatorConfig, IndicatorCalculator
+    from src.backtest.vectorized_signals import vectorize_conditions
+
+    df = _make_df(60)
+
+    conditions = [
+        {"field": "MOM", "operator": ">", "compare_type": "value",
+         "compare_value": 0, "params": {"period": 20}},
+    ]
+
+    collected = collect_indicator_params(conditions)
+    config = IndicatorConfig.from_collected_params(collected)
+    calculator = IndicatorCalculator(config)
+    indicators = calculator.calculate_all(df)
+    df_full = pd.concat([df, indicators], axis=1)
+
+    signals = vectorize_conditions(conditions, df_full, mode="AND")
+    assert len(signals) == len(df_full)
+    assert signals.dtype == bool
+
+
+def test_all_new_fields_registered():
+    """Verify all 26 new sub-fields appear in get_all_fields()."""
+    from api.services.indicator_registry import get_all_fields
+    fields = get_all_fields()
+    new_factors = [
+        "MOM", "REALVOL", "REALVOL_skew", "REALVOL_kurt", "REALVOL_downside",
+        "KBAR_upper_shadow", "KBAR_lower_shadow", "KBAR_body_ratio",
+        "KBAR_amplitude", "KBAR_overnight_ret", "KBAR_intraday_ret",
+        "PVOL_corr", "PVOL_amount_conc", "PVOL_vwap_bias",
+        "LIQ_amihud", "LIQ_turnover_vol", "LIQ_log_amount",
+        "PPOS_close_pos", "PPOS_high_dist", "PPOS_low_dist",
+        "PPOS_drawdown", "PPOS_consec_dir",
+        "RSTR", "RSTR_weighted",
+        "AMPVOL_std", "AMPVOL_parkinson",
+    ]
+    missing = [f for f in new_factors if f not in fields]
+    assert not missing, f"Missing fields: {missing}"
