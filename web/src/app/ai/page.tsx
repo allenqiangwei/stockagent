@@ -897,7 +897,7 @@ function BotTradingPanel() {
                 const pending = filteredPlans.filter((p: BotTradePlanItem) => p.status === "pending");
                 return pending.length > 0 ? (
                   <div className="text-xs text-muted-foreground mb-1">
-                    待执行 {pending.length} 个计划 · 按Alpha得分排序
+                    待执行 {pending.length} 个计划 · 按置信度排序
                   </div>
                 ) : null;
               })()}
@@ -906,23 +906,28 @@ function BotTradingPanel() {
               {filteredPlans.filter((p: BotTradePlanItem) => p.status === "pending").map((plan: BotTradePlanItem, idx: number) => (
                 <details key={plan.id} className="group" open={idx < 5}>
                   <summary className={`cursor-pointer list-none rounded-lg border p-3 transition-colors hover:bg-accent/30 ${
+                    plan.confidence != null && plan.confidence >= 60 ? "border-emerald-500/40 bg-emerald-500/5" :
+                    plan.confidence != null && plan.confidence < 40 ? "border-red-500/40 bg-red-500/5" :
+                    plan.confidence != null ? "border-amber-500/40 bg-amber-500/5" :
                     plan.source === "stop_loss" ? "border-red-500/40 bg-red-500/5" :
                     plan.source === "take_profit" ? "border-green-500/40 bg-green-500/5" :
-                    plan.source === "max_hold" ? "border-amber-500/40 bg-amber-500/5" :
                     "border-border bg-card/50"
                   }`}>
-                    {/* Row 1: Badge + Stock + Price + Score */}
+                    {/* Row 1: Grade + Stock + Price + Score */}
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                        <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums ${
+                          plan.confidence != null && plan.confidence >= 60 ? "bg-emerald-500/15 text-emerald-500" :
+                          plan.confidence != null && plan.confidence >= 40 ? "bg-amber-500/15 text-amber-500" :
+                          plan.confidence != null ? "bg-red-500/15 text-red-500" :
                           plan.source === "stop_loss" ? "bg-red-500/15 text-red-500" :
                           plan.source === "take_profit" ? "bg-green-500/15 text-green-500" :
-                          plan.source === "max_hold" ? "bg-amber-500/15 text-amber-500" :
                           plan.source === "beta" ? "bg-blue-500/15 text-blue-500" :
                           plan.direction === "buy" ? "bg-emerald-500/15 text-emerald-500" :
                           "bg-red-500/15 text-red-500"
                         }`}>
-                          {plan.source === "stop_loss" ? "止损" :
+                          {plan.confidence != null ? `${plan.confidence.toFixed(0)}%` :
+                           plan.source === "stop_loss" ? "止损" :
                            plan.source === "take_profit" ? "止盈" :
                            plan.source === "max_hold" ? "超期" :
                            plan.source === "beta" ? "Beta" :
@@ -1313,10 +1318,19 @@ function BotTradingPanel() {
               {/* Execution */}
               <div className="border border-border rounded-lg p-3">
                 <div className="text-sm font-medium mb-2">今日交易执行</div>
+                <div className="text-[10px] text-muted-foreground mb-1">
+                  计划 {diary.execution.summary.executed}/{diary.execution.summary.plans_total} 执行
+                  {diary.execution.summary.sells_tp + diary.execution.summary.sells_sl > 0 && (
+                    <span> + {diary.execution.summary.sells_tp + diary.execution.summary.sells_sl} 退出监控</span>
+                  )}
+                </div>
                 <div className="flex flex-wrap gap-2 text-xs mb-3">
                   <span className="px-2 py-1 rounded bg-emerald-500/10 text-emerald-500">买入 {diary.execution.summary.buys}</span>
-                  <span className="px-2 py-1 rounded bg-green-500/10 text-green-500">止盈 {diary.execution.summary.sells_tp}</span>
-                  <span className="px-2 py-1 rounded bg-red-500/10 text-red-500">止损 {diary.execution.summary.sells_sl}</span>
+                  {diary.execution.summary.sells_tp > 0 && <span className="px-2 py-1 rounded bg-green-500/10 text-green-500">止盈 {diary.execution.summary.sells_tp}</span>}
+                  {diary.execution.summary.sells_sl > 0 && <span className="px-2 py-1 rounded bg-red-500/10 text-red-500">止损 {diary.execution.summary.sells_sl}</span>}
+                  {diary.execution.summary.sells_mhd > 0 && <span className="px-2 py-1 rounded bg-amber-500/10 text-amber-500">超期 {diary.execution.summary.sells_mhd}</span>}
+                  {(diary.execution.summary.sells_signal ?? 0) > 0 && <span className="px-2 py-1 rounded bg-blue-500/10 text-blue-500">信号 {diary.execution.summary.sells_signal}</span>}
+                  {diary.execution.summary.sells_ai > 0 && <span className="px-2 py-1 rounded bg-purple-500/10 text-purple-500">AI {diary.execution.summary.sells_ai}</span>}
                   <span className="px-2 py-1 rounded bg-muted text-muted-foreground">过期 {diary.execution.summary.expired}</span>
                 </div>
 

@@ -747,6 +747,10 @@ export interface BotTradePlanItem {
   gamma_daily_mmd: string | null;  // e.g. "3B:笔"
   gamma_weekly_mmd: string | null;
   phase: string | null; // cold|warm|mature
+  // Signal quality grade (data-driven, recalibrated daily)
+  signal_grade: "green" | "yellow" | "red" | null;
+  signal_win_rate: number | null;
+  confidence: number | null;
   // Strategy details (enriched from strategy lookup)
   strategy_name: string | null;
   stop_loss_pct: number | null;
@@ -828,6 +832,7 @@ export interface DiaryExecution {
     sells_sl: number;
     sells_mhd: number;
     sells_ai: number;
+    sells_signal: number;
   };
   buy_list: DiaryExecutionBuy[];
   sell_list: DiaryExecutionSell[];
