@@ -73,6 +73,8 @@ class BotTradeReview(Base):
     memory_synced: Mapped[bool] = mapped_column(Boolean, default=False)
     memory_note_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     trades: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
@@ -102,6 +104,10 @@ class BotTradePlan(Base):
     beta_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     combined_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     gamma_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Signal quality grade (from signal_grader calibration)
+    signal_grade: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    signal_win_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         Index("ix_trade_plan_code_dir_status", "stock_code", "direction", "status"),

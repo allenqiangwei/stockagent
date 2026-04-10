@@ -238,3 +238,67 @@ def get_ranked_plans(
         }
         for p in plans
     ]
+
+
+# ── Signal Grader ────────────────────────────────────────
+
+@router.get("/signal-grader/calibration")
+def get_signal_grader_calibration():
+    """Get current signal grader calibration report (bin-level win rates)."""
+    from api.services.signal_grader import get_calibration_report
+    return get_calibration_report()
+
+
+@router.post("/signal-grader/calibrate")
+def trigger_calibration(db: Session = Depends(get_db)):
+    """Manually trigger signal grader recalibration."""
+    from api.services.signal_grader import calibrate
+    return calibrate(db)
+
+
+@router.get("/signal-grader/grade")
+def grade_single_signal(
+    alpha: float = Query(..., description="Alpha score (0-100)"),
+    gamma: float = Query(None, description="Gamma score (0-100, optional)"),
+    combined: float = Query(0.5, description="Combined score (0-1)"),
+):
+    """Grade a single signal combination."""
+    from api.services.signal_grader import grade_signal
+    return grade_signal(alpha, gamma, combined)
+
+
+# ── Confidence Scorer ────────────────────────────────────────
+
+
+@router.get("/confidence/model")
+def get_confidence_model(db: Session = Depends(get_db)):
+    """Get active confidence model report (version, AUC, Brier, coefficients)."""
+    from api.services.confidence_scorer import get_model_report
+    return get_model_report(db)
+
+
+@router.post("/confidence/train")
+def trigger_confidence_training(db: Session = Depends(get_db)):
+    """Manually trigger confidence model training from historical trade data."""
+    from api.services.confidence_scorer import train_confidence_model
+    return train_confidence_model(db)
+
+
+@router.get("/confidence/predict")
+def predict_confidence_score(
+    alpha: float = Query(..., description="Alpha score (0-100)"),
+    gamma: float = Query(None, description="Gamma score (0-100, optional)"),
+    trend_strength: float = Query(0.0, description="Market trend strength"),
+    volatility: float = Query(0.0, description="Market volatility"),
+    index_return_pct: float = Query(0.0, description="Weekly index return %"),
+    db: Session = Depends(get_db),
+):
+    """Predict confidence score (0-100) for a signal with given features."""
+    from api.services.confidence_scorer import predict_confidence
+    score = predict_confidence(
+        db, alpha, gamma,
+        trend_strength=trend_strength,
+        volatility=volatility,
+        index_return_pct=index_return_pct,
+    )
+    return {"confidence": score}

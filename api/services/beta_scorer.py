@@ -268,6 +268,28 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
             if (code, strategy_id) in occupied_pairs:
                 continue
 
+            # Confidence scoring (Logistic Regression)
+            confidence = None
+            try:
+                from api.services.confidence_scorer import predict_confidence
+                from api.models.market_regime import MarketRegimeLabel
+                from datetime import date as _date
+                regime = (
+                    db.query(MarketRegimeLabel)
+                    .filter(MarketRegimeLabel.week_end >= _date.fromisoformat(trade_date))
+                    .order_by(MarketRegimeLabel.week_end.asc())
+                    .first()
+                )
+                if regime:
+                    confidence = predict_confidence(
+                        db, alpha, gamma,
+                        trend_strength=regime.trend_strength,
+                        volatility=regime.volatility,
+                        index_return_pct=regime.index_return_pct,
+                    )
+            except Exception as e:
+                logger.warning("Confidence scoring failed (non-fatal): %s", e)
+
             plan = BotTradePlan(
                 stock_code=code,
                 stock_name=stock_name,
@@ -278,16 +300,19 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
                 plan_date=plan_date,
                 status="pending",
                 thinking=(
-                    f"[Gamma] {strategy_name or 'signal'} "
+                    f"[C={confidence or '?'}] {strategy_name or 'signal'} "
                     f"alpha={alpha:.1f} gamma={gamma or 0:.1f} "
-                    f"combined={combined:.4f} phase={gamma_phase}"
+                    f"combined={combined:.4f}"
                 ),
                 source="beta",
                 strategy_id=strategy_id,
-                alpha_score=alpha,  # Keep raw 0-100 (existing convention)
+                alpha_score=alpha,
                 beta_score=beta,
                 combined_score=combined,
                 gamma_score=gamma,
+                signal_grade=None,
+                signal_win_rate=None,
+                confidence=confidence,
             )
             db.add(plan)
 
@@ -382,29 +407,42 @@ def _load_stock_beta_context(db: Session, stock_code: str) -> dict:
     """Load per-stock beta factors."""
     context: dict = {}
 
-    # Sector heat
+    # Sector heat — fuzzy match: exact → contains → keyword overlap
     try:
         from api.models.stock import Stock
         from api.models.news_agent import SectorHeat
         stock = db.query(Stock).filter(Stock.code == stock_code).first()
         if stock and stock.industry:
+            ind = stock.industry
+            # Try exact match first
             heat = (
                 db.query(SectorHeat)
-                .filter(SectorHeat.sector_name == stock.industry)
+                .filter(SectorHeat.sector_name == ind)
                 .order_by(SectorHeat.snapshot_time.desc())
                 .first()
             )
+            # Fallback: sector_name contains industry or vice versa
+            if not heat:
+                heat = (
+                    db.query(SectorHeat)
+                    .filter(SectorHeat.sector_name.contains(ind) | SectorHeat.sector_name.op("=")(ind))
+                    .order_by(SectorHeat.snapshot_time.desc())
+                    .first()
+                )
+            if not heat and len(ind) >= 2:
+                # Try each 2-char keyword from industry name
+                for i in range(len(ind) - 1):
+                    kw = ind[i:i+2]
+                    heat = (
+                        db.query(SectorHeat)
+                        .filter(SectorHeat.sector_name.contains(kw))
+                        .order_by(SectorHeat.snapshot_time.desc())
+                        .first()
+                    )
+                    if heat:
+                        break
             if heat:
                 context["sector_heat_score"] = heat.heat_score
-    except Exception:
-        pass
-
-    # Per-stock news sentiment (from Proposal C)
-    try:
-        from api.services.news_stock_matcher import compute_stock_news_sentiment
-        sent_3d = compute_stock_news_sentiment(db, stock_code, window_days=3)
-        if sent_3d is not None:
-            context["news_sentiment_3d"] = sent_3d
     except Exception:
         pass
 

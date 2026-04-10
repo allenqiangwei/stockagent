@@ -384,6 +384,9 @@ def _plan_to_item(p, prices: dict, strategy_cache: dict | None = None,
         max_hold_days=max_hold_days,
         buy_conditions=buy_conditions,
         sell_conditions=sell_conditions,
+        signal_grade=getattr(p, "signal_grade", None),
+        signal_win_rate=getattr(p, "signal_win_rate", None),
+        confidence=getattr(p, "confidence", None),
         today_close=px.get("close"),
         today_change_pct=px.get("change_pct"),
         today_high=px.get("high"),
@@ -473,7 +476,8 @@ def list_plans(
         q = q.filter(BotTradePlan.status == status)
     if plan_date:
         q = q.filter(BotTradePlan.plan_date == plan_date)
-    q = q.order_by(BotTradePlan.plan_date.desc(), BotTradePlan.combined_score.desc().nullslast(), BotTradePlan.id.desc())
+    # Sort: confidence desc, then combined_score desc
+    q = q.order_by(BotTradePlan.plan_date.desc(), BotTradePlan.confidence.desc().nullslast(), BotTradePlan.combined_score.desc().nullslast(), BotTradePlan.id.desc())
     if limit > 0:
         q = q.limit(limit)
     rows = q.all()
@@ -485,11 +489,11 @@ def list_plans(
 
 @router.get("/plans/pending", response_model=list[BotTradePlanItem])
 def list_pending_plans(db: Session = Depends(get_db)):
-    """List only pending trade plans, sorted by combined_score descending."""
+    """List only pending trade plans, sorted by confidence then combined_score."""
     rows = (
         db.query(BotTradePlan)
         .filter(BotTradePlan.status == "pending")
-        .order_by(BotTradePlan.combined_score.desc().nullslast(), BotTradePlan.id)
+        .order_by(BotTradePlan.confidence.desc().nullslast(), BotTradePlan.combined_score.desc().nullslast(), BotTradePlan.id)
         .all()
     )
     prices = _get_today_prices(db, list({p.stock_code for p in rows}))

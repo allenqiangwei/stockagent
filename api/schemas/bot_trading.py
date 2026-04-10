@@ -96,6 +96,10 @@ class BotTradePlanItem(BaseModel):
     gamma_daily_mmd: Optional[str] = None  # e.g. "3B:笔"
     gamma_weekly_mmd: Optional[str] = None
     phase: Optional[str] = None  # cold|warm|mature
+    # Signal quality grade
+    signal_grade: Optional[str] = None  # green|yellow|red
+    signal_win_rate: Optional[float] = None
+    confidence: Optional[float] = None
     # Strategy details (enriched from strategy lookup)
     strategy_name: Optional[str] = None
     stop_loss_pct: Optional[float] = None
@@ -214,6 +218,7 @@ class DiaryExecutionSummary(BaseModel):
     sells_sl: int = 0
     sells_mhd: int = 0
     sells_ai: int = 0
+    sells_signal: int = 0
 
 class DiaryExecution(BaseModel):
     summary: DiaryExecutionSummary

@@ -115,6 +115,18 @@ class SignalScheduler:
             return False
 
     def _run_loop(self):
+        # On startup, train confidence model from historical data
+        try:
+            from api.services.confidence_scorer import train_confidence_model
+            db = SessionLocal()
+            try:
+                cal = train_confidence_model(db)
+                logger.info("Confidence model startup training: %s", cal.get("status"))
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("Confidence model startup training failed: %s", e)
+
         # On startup, check if today was already synced (recover from process restart)
         today = datetime.now().strftime("%Y-%m-%d")
         if self._already_synced_today(today):
@@ -134,11 +146,39 @@ class SignalScheduler:
                 logger.info("Scheduled data sync triggered for %s", today)
                 self._do_refresh(today)
 
+            # 20:00 补录 daily_basic（TuShare 数据延迟，15:30 时往往还没出）
+            if now.hour == 20 and now.minute < 1 and not self._is_refreshing:
+                self._backfill_daily_basic(today)
+
             # Check every 30 seconds
             for _ in range(30):
                 if not self._running:
                     break
                 time.sleep(1)
+
+    def _backfill_daily_basic(self, trade_date: str):
+        """Backfill daily_basic at 20:00 if the 15:30 sync missed it (TuShare delay)."""
+        try:
+            from api.models.stock import DailyBasic
+            from datetime import date as _date
+            db = SessionLocal()
+            try:
+                exists = db.query(DailyBasic).filter(
+                    DailyBasic.trade_date == _date.fromisoformat(trade_date)
+                ).limit(1).count()
+                if exists:
+                    return  # Already have data, skip
+                from api.services.data_collector import DataCollector
+                collector = DataCollector(db)
+                result = collector.get_daily_basic_df(trade_date)
+                if result is not None and not result.empty:
+                    logger.info("Backfilled daily_basic for %s: %d stocks", trade_date, len(result))
+                else:
+                    logger.info("Daily basic backfill: no data available yet for %s", trade_date)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("Daily basic backfill failed (non-fatal): %s", e)
 
     def _do_refresh(self, trade_date: str):
         with self._lock:
@@ -347,6 +387,14 @@ class SignalScheduler:
                         logger.info("Gamma scorer: %d/%d stocks scored", gamma_count, len(buy_signals))
                     except Exception as e:
                         logger.warning("Gamma scoring failed (non-fatal): %s", e)
+
+                    # Step 5d-pre: Train confidence model from completed trades
+                    try:
+                        from api.services.confidence_scorer import train_confidence_model
+                        cal_result = train_confidence_model(db)
+                        logger.info("Confidence model: %s", cal_result.get("status"))
+                    except Exception as e:
+                        logger.warning("Confidence model training failed (non-fatal): %s", e)
 
                     # Step 5d: Score signals and create Beta-ranked plans
                     jm.update_progress(job_id, 92, "Beta评分+计划")
