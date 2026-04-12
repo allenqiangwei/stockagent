@@ -515,39 +515,55 @@ class LLMPlanner:
     ) -> tuple[list[dict], str]:
         """Try LLM providers in order, fall back to rule-based.
 
+        Splits large requests into batches of 10 to avoid token limits.
         Returns (configs, provider_name).
         """
-        user_prompt = _build_user_prompt(
-            pool_families, n_experiments, insights, suggestions, skeleton_candidates
-        )
         system_prompt = _PLANNER_SYSTEM_PROMPT.format(
             factor_table=_build_factor_table(),
             banned_list=", ".join(sorted(BANNED_FIELDS)),
         )
 
+        BATCH_SIZE = 10  # LLM can reliably produce 10 experiments per call
+
         for provider in self._providers:
             try:
                 logger.info("Trying LLM provider: %s", provider["name"])
-                raw = self._call_llm(provider, system_prompt, user_prompt)
-                configs = self._parse_json(raw)
-                if not isinstance(configs, list) or len(configs) == 0:
-                    logger.warning("Provider %s returned empty/invalid configs", provider["name"])
-                    continue
+                all_valid: list[dict] = []
+                remaining = n_experiments
+                batch_num = 0
 
-                # Validate each config
-                valid_configs = []
-                for cfg in configs:
-                    errors = validate_experiment_config(cfg)
-                    if errors:
-                        logger.warning("Config validation errors: %s — %s", cfg.get("name_suffix", "?"), errors)
-                    else:
-                        valid_configs.append(cfg)
+                while remaining > 0:
+                    batch_n = min(remaining, BATCH_SIZE)
+                    batch_num += 1
+                    logger.info("  Batch %d: requesting %d experiments", batch_num, batch_n)
 
-                if valid_configs:
-                    logger.info("Provider %s produced %d valid configs", provider["name"], len(valid_configs))
-                    return valid_configs, provider["name"]
+                    user_prompt = _build_user_prompt(
+                        pool_families, batch_n, insights, suggestions, skeleton_candidates
+                    )
+                    raw = self._call_llm(provider, system_prompt, user_prompt)
+                    configs = self._parse_json(raw)
+
+                    if not isinstance(configs, list) or len(configs) == 0:
+                        logger.warning("  Batch %d: empty/invalid response", batch_num)
+                        break  # This provider failed, try next
+
+                    # Validate each config
+                    for cfg in configs:
+                        errors = validate_experiment_config(cfg)
+                        if errors:
+                            logger.debug("  Config validation errors: %s", errors)
+                        else:
+                            all_valid.append(cfg)
+
+                    remaining -= batch_n
+                    logger.info("  Batch %d: %d valid (total %d/%d)",
+                               batch_num, len(configs), len(all_valid), n_experiments)
+
+                if all_valid:
+                    logger.info("Provider %s produced %d valid configs total", provider["name"], len(all_valid))
+                    return all_valid, provider["name"]
                 else:
-                    logger.warning("Provider %s: all configs failed validation", provider["name"])
+                    logger.warning("Provider %s: all batches failed", provider["name"])
             except Exception as e:
                 logger.error("Provider %s failed: %s", provider["name"], e)
 
@@ -569,8 +585,8 @@ class LLMPlanner:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.8,
-            max_tokens=4096,
+            temperature=0.7,
+            max_tokens=8000,
         )
         return response.choices[0].message.content or ""
 
