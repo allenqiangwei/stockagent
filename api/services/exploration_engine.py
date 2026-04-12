@@ -231,7 +231,7 @@ def _api(method: str, path: str, data: dict | None = None, timeout: int = 120) -
 def _promote_strategy(strategy_id: int, label: str = "[AI]", category: str = "") -> dict:
     """Promote an experiment strategy via API with URL-encoded label/category."""
     params = urllib.parse.urlencode({"label": label, "category": category})
-    return _api("POST", f"/api/lab/strategies/{strategy_id}/promote?{params}")
+    return _api("POST", f"lab/strategies/{strategy_id}/promote?{params}")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -768,7 +768,7 @@ class ExplorationEngine:
             return {"error": "Already running", "state": self.state}
 
         # Determine next round number from API
-        resp = _api("GET", "/api/lab/exploration-rounds?page=1&size=1")
+        resp = _api("GET", "lab/exploration-rounds?page=1&size=1")
         items = resp.get("items", [])
         if items:
             self.current_round = max(r.get("round_number", 0) for r in items) + 1
@@ -876,7 +876,7 @@ class ExplorationEngine:
 
                 # Step 3.5: Retry pending
                 self._set_step("retry_pending")
-                _api("POST", "/api/lab/experiments/retry-pending")
+                _api("POST", "lab/experiments/retry-pending")
                 if self._stop_event.is_set():
                     break
 
@@ -956,7 +956,7 @@ class ExplorationEngine:
     def _step_promote_check(self):
         """Scan recent experiments for unpromoted StdA+ strategies and promote them."""
         self._set_step("promote_check", "Scanning recent experiments")
-        resp = _api("GET", "/api/lab/experiments?page=1&size=300")
+        resp = _api("GET", "lab/experiments?page=1&size=300")
         items = resp.get("items", [])
         promoted_count = 0
 
@@ -964,7 +964,7 @@ class ExplorationEngine:
             exp_id = exp_item.get("id")
             if not exp_id:
                 continue
-            detail = _api("GET", f"/api/lab/experiments/{exp_id}")
+            detail = _api("GET", f"lab/experiments/{exp_id}")
             strategies = detail.get("strategies", [])
             for s in strategies:
                 if s.get("promoted"):
@@ -987,7 +987,7 @@ class ExplorationEngine:
 
     def _step_sync_unsynced_rounds(self):
         """Find exploration rounds with memory_synced=false, mark them synced."""
-        resp = _api("GET", "/api/lab/exploration-rounds?page=1&size=100")
+        resp = _api("GET", "lab/exploration-rounds?page=1&size=100")
         items = resp.get("items", [])
         synced = 0
         for r in items:
@@ -996,13 +996,13 @@ class ExplorationEngine:
                 if rid:
                     update_data = dict(r)
                     update_data["memory_synced"] = True
-                    _api("PUT", f"/api/lab/exploration-rounds/{rid}", update_data)
+                    _api("PUT", f"lab/exploration-rounds/{rid}", update_data)
                     synced += 1
         self.step_detail = f"Synced {synced} rounds"
 
     def _step_load_state(self) -> list[dict]:
         """Query pool status and return family summary."""
-        resp = _api("GET", "/api/strategies/pool/status")
+        resp = _api("GET", "strategies/pool/status")
         families = resp.get("family_summary", [])
         self.pool_families = len(families)
         self.pool_active = resp.get("active_strategies", 0)
@@ -1020,40 +1020,61 @@ class ExplorationEngine:
         return configs, provider
 
     def _step_submit(self, configs: list[dict]) -> list[int]:
-        """Submit experiments via batch-clone-backtest."""
+        """Submit each config as a separate experiment via batch-clone-backtest.
+
+        Each config has its own buy/sell conditions + multiple exit_configs.
+        Each becomes one experiment with N strategies (one per exit_config).
+        """
         source_id = getattr(self, "_source_strategy_id", 0)
         if not source_id:
             logger.error("No source_strategy_id set")
             return []
 
-        # Prepend base conditions to each config
+        exp_ids: list[int] = []
+        total_strats = 0
+
         for cfg in configs:
-            extra_buy = cfg.get("buy_conditions", [])
-            cfg["buy_conditions"] = copy.deepcopy(BASE_BUY) + extra_buy
+            # Build full buy/sell from base + extra
+            buy = copy.deepcopy(BASE_BUY) + cfg.get("extra_buy_conditions", cfg.get("buy_conditions", []))
+            sell = copy.deepcopy(BASE_SELL) + cfg.get("extra_sell_conditions", cfg.get("sell_conditions", []))
+            label = cfg.get("label", cfg.get("name_suffix", "exp"))
 
-            extra_sell = cfg.get("sell_conditions", [])
-            cfg["sell_conditions"] = copy.deepcopy(BASE_SELL) + extra_sell
+            # Build exit_configs for the API
+            exit_configs = []
+            for ec in cfg.get("exit_configs", []):
+                exit_configs.append({
+                    "name_suffix": f"_{label}_{ec.get('name', 'x')}",
+                    "exit_config": {
+                        "stop_loss_pct": ec.get("stop_loss_pct", -20),
+                        "take_profit_pct": ec.get("take_profit_pct", 2.0),
+                        "max_hold_days": ec.get("max_hold_days", 5),
+                    },
+                    "buy_conditions": buy,
+                    "sell_conditions": sell,
+                })
 
-        # Submit batch
-        payload = {
-            "source_strategy_id": source_id,
-            "exit_configs": configs,
-        }
-        resp = _api("POST", f"/api/lab/strategies/{source_id}/batch-clone-backtest", payload, timeout=300)
-        exp_id = resp.get("experiment_id")
-        if not exp_id:
-            logger.error("batch-clone-backtest failed: %s", resp)
-            return []
+            if not exit_configs:
+                continue
 
-        self.strategies_total = len(configs)
+            resp = _api("POST", f"lab/strategies/{source_id}/batch-clone-backtest", {
+                "source_strategy_id": source_id,
+                "exit_configs": exit_configs,
+            })
+            eid = resp.get("experiment_id")
+            if eid:
+                exp_ids.append(eid)
+                total_strats += resp.get("count", len(exit_configs))
+
+        self.strategies_total = total_strats
         self.strategies_done = 0
         self.strategies_invalid = 0
-        self.strategies_pending = len(configs)
+        self.strategies_pending = total_strats
 
         # Retry pending to ensure all strategies are queued
-        _api("POST", "/api/lab/experiments/retry-pending")
+        _api("POST", "lab/experiments/retry-pending")
 
-        return [exp_id]
+        logger.info("Submitted %d experiments, %d strategies", len(exp_ids), total_strats)
+        return exp_ids
 
     def _step_poll(self, exp_ids: list[int]):
         """Poll experiment status every 2 minutes until all done."""
@@ -1072,7 +1093,7 @@ class ExplorationEngine:
             stda = 0
 
             for eid in exp_ids:
-                detail = _api("GET", f"/api/lab/experiments/{eid}")
+                detail = _api("GET", f"lab/experiments/{eid}")
                 status = detail.get("status", "")
                 strategies = detail.get("strategies", [])
 
@@ -1121,7 +1142,7 @@ class ExplorationEngine:
 
             if stall_count >= 5:  # 10 min stall
                 logger.warning("Stall detected (%d polls no progress), triggering retry-pending", stall_count)
-                _api("POST", "/api/lab/experiments/retry-pending")
+                _api("POST", "lab/experiments/retry-pending")
                 stall_count = 0
 
             # Wait 2 minutes
@@ -1161,7 +1182,7 @@ class ExplorationEngine:
             "source_strategy_id": source_id,
             "exit_configs": loosened,
         }
-        resp = _api("POST", f"/api/lab/strategies/{source_id}/batch-clone-backtest", payload, timeout=300)
+        resp = _api("POST", f"lab/strategies/{source_id}/batch-clone-backtest", payload, timeout=300)
         exp_id = resp.get("experiment_id")
         if not exp_id:
             logger.error("Self-heal batch-clone-backtest failed: %s", resp)
@@ -1179,7 +1200,7 @@ class ExplorationEngine:
         }
 
         for eid in exp_ids:
-            detail = _api("GET", f"/api/lab/experiments/{eid}")
+            detail = _api("GET", f"lab/experiments/{eid}")
             strategies = detail.get("strategies", [])
 
             for s in strategies:
@@ -1226,7 +1247,7 @@ class ExplorationEngine:
                             break
 
         # Rebalance pool
-        _api("POST", "/api/strategies/rebalance")
+        _api("POST", "strategies/rebalance")
 
         self.step_detail = f"Promoted {promoted} strategies"
         return promoted
@@ -1334,24 +1355,24 @@ class ExplorationEngine:
             "memory_synced": False,
             "pinecone_synced": True,
         }
-        _api("POST", "/api/lab/exploration-rounds", data)
+        _api("POST", "lab/exploration-rounds", data)
 
     def _step_resolve_problems(self, exp_ids: list[int]):
         """Detect and fix: zombies, missed promotes, pool cleanup."""
         self._set_step("resolve_problems", "Zombie detection")
 
         # 1. Zombie detection: experiments stuck in backtesting
-        resp = _api("GET", "/api/lab/experiments?page=1&size=50")
+        resp = _api("GET", "lab/experiments?page=1&size=50")
         for exp_item in resp.get("items", []):
             if exp_item.get("status") == "backtesting":
                 eid = exp_item.get("id")
                 if eid and eid not in exp_ids:
                     logger.warning("Zombie experiment %d detected, triggering retry", eid)
-                    _api("POST", "/api/lab/experiments/retry-pending")
+                    _api("POST", "lab/experiments/retry-pending")
                     break
 
         # 2. Missed promote sweep — already handled by promote_check at start
         self.step_detail = "Zombie check + missed promote sweep done"
 
         # 3. Pool cleanup
-        _api("POST", "/api/strategies/cleanup?dry_run=false")
+        _api("POST", "strategies/cleanup?dry_run=false")
