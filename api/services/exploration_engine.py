@@ -201,7 +201,7 @@ def validate_experiment_config(config: dict) -> list[str]:
 # 5.  Internal API helper
 # ────────────────────────────────────────────────────────────────
 
-_API_BASE = "http://localhost:8050"
+_API_BASE = "http://127.0.0.1:8050/api/"
 
 
 def _api(method: str, path: str, data: dict | None = None, timeout: int = 120) -> dict:
@@ -213,7 +213,8 @@ def _api(method: str, path: str, data: dict | None = None, timeout: int = 120) -
     cmd += ["--max-time", str(timeout)]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
+        env = {"NO_PROXY": "localhost,127.0.0.1", "PATH": "/usr/bin:/bin"}
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10, env=env)
         if result.returncode != 0:
             logger.error("curl %s %s failed: %s", method, path, result.stderr)
             return {"error": result.stderr}
