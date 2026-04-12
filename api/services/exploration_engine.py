@@ -1023,8 +1023,9 @@ class ExplorationEngine:
     def _step_submit(self, configs: list[dict]) -> list[int]:
         """Submit each config as a separate experiment via batch-clone-backtest.
 
-        Each config has its own buy/sell conditions + multiple exit_configs.
-        Each becomes one experiment with N strategies (one per exit_config).
+        Handles two LLM output formats:
+        Format A (plan spec): {extra_buy_conditions, extra_sell_conditions, exit_configs: [...]}
+        Format B (LLM actual): {buy_conditions, sell_conditions, exit_config: {...}}
         """
         source_id = getattr(self, "_source_strategy_id", 0)
         if not source_id:
@@ -1035,36 +1036,55 @@ class ExplorationEngine:
         total_strats = 0
 
         for cfg in configs:
-            # Build full buy/sell from base + extra
-            buy = copy.deepcopy(BASE_BUY) + cfg.get("extra_buy_conditions", cfg.get("buy_conditions", []))
-            sell = copy.deepcopy(BASE_SELL) + cfg.get("extra_sell_conditions", cfg.get("sell_conditions", []))
+            # Build full buy/sell from base + extra (handle both field names)
+            extra_buy = cfg.get("extra_buy_conditions", cfg.get("buy_conditions", []))
+            extra_sell = cfg.get("extra_sell_conditions", cfg.get("sell_conditions", []))
+            buy = copy.deepcopy(BASE_BUY) + (extra_buy if isinstance(extra_buy, list) else [])
+            sell = copy.deepcopy(BASE_SELL) + (extra_sell if isinstance(extra_sell, list) else [])
             label = cfg.get("label", cfg.get("name_suffix", "exp"))
 
-            # Build exit_configs for the API
-            exit_configs = []
-            for ec in cfg.get("exit_configs", []):
-                exit_configs.append({
+            # Handle exit configs: could be list (exit_configs) or single dict (exit_config)
+            raw_exits = cfg.get("exit_configs", [])
+            if not raw_exits:
+                # Single exit_config → wrap in list
+                single = cfg.get("exit_config", {})
+                if single:
+                    raw_exits = [single]
+
+            if not raw_exits:
+                # No exit config at all → use default grid
+                raw_exits = [
+                    {"name": "SL20_TP0.5_MHD2", "stop_loss_pct": -20, "take_profit_pct": 0.5, "max_hold_days": 2},
+                    {"name": "SL20_TP1_MHD3",   "stop_loss_pct": -20, "take_profit_pct": 1.0, "max_hold_days": 3},
+                    {"name": "SL15_TP1.5_MHD3", "stop_loss_pct": -15, "take_profit_pct": 1.5, "max_hold_days": 3},
+                    {"name": "SL20_TP2_MHD5",   "stop_loss_pct": -20, "take_profit_pct": 2.0, "max_hold_days": 5},
+                    {"name": "SL25_TP3_MHD5",   "stop_loss_pct": -25, "take_profit_pct": 3.0, "max_hold_days": 5},
+                ]
+
+            # Build API-compatible exit_configs
+            api_exit_configs = []
+            for ec in raw_exits:
+                api_exit_configs.append({
                     "name_suffix": f"_{label}_{ec.get('name', 'x')}",
                     "exit_config": {
                         "stop_loss_pct": ec.get("stop_loss_pct", -20),
                         "take_profit_pct": ec.get("take_profit_pct", 2.0),
-                        "max_hold_days": ec.get("max_hold_days", 5),
+                        "max_hold_days": int(ec.get("max_hold_days", 5)),
                     },
                     "buy_conditions": buy,
                     "sell_conditions": sell,
                 })
 
-            if not exit_configs:
-                continue
-
             resp = _api("POST", f"lab/strategies/{source_id}/batch-clone-backtest", {
                 "source_strategy_id": source_id,
-                "exit_configs": exit_configs,
+                "exit_configs": api_exit_configs,
             })
             eid = resp.get("experiment_id")
             if eid:
                 exp_ids.append(eid)
-                total_strats += resp.get("count", len(exit_configs))
+                total_strats += resp.get("count", len(api_exit_configs))
+            else:
+                logger.warning("Failed to submit experiment '%s': %s", label, str(resp)[:100])
 
         self.strategies_total = total_strats
         self.strategies_done = 0
