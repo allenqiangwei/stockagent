@@ -17,7 +17,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from api.models.base import Base, engine
-from api.routers import market, stocks, strategies, signals, backtest, news, config, ai_lab, ai_analyst, news_signals, bot_trading, beta
+from api.routers import market, stocks, strategies, signals, backtest, news, config, ai_lab, ai_analyst, news_signals, bot_trading, beta, auth, jobs, ops, artifacts, memory, tdx, exploration_workflow
 
 # Configure logging
 logging.basicConfig(
@@ -151,7 +151,7 @@ def _recover_orphan_backtests():
         reset_count = 0
         for strat in orphans:
             exp = db.query(Experiment).get(strat.experiment_id)
-            if exp and exp.source_type == "clone":
+            if exp and exp.source_type in ("clone", "batch-clone"):
                 clone_strats.append((strat.id, exp.id))
             else:
                 # Regular experiment strategy — mark failed so retry API can re-run
@@ -305,6 +305,9 @@ def _run_migrations():
         _add_col_if_missing("strategies", "backtest_summary", "TEXT")
         _add_col_if_missing("strategies", "source_experiment_id", "INTEGER")
 
+        # Strategy pool: indicator family (3-tier taxonomy Level 1)
+        _add_col_if_missing("strategies", "indicator_family", "VARCHAR(80)")
+
         # Bot trading: exit monitoring fields
         _add_col_if_missing("bot_portfolio", "strategy_id", "INTEGER")
         _add_col_if_missing("bot_portfolio", "strategy_name", "VARCHAR(100)")
@@ -355,6 +358,13 @@ def _migrate_strategy_metadata():
                     .first()
                 )
                 if exp_strat:
+                    # Fetch PLR from linked BacktestRun
+                    plr_val = 0.0
+                    if exp_strat.backtest_run_id:
+                        from api.models.backtest import BacktestRun
+                        bt_run = db.query(BacktestRun).get(exp_strat.backtest_run_id)
+                        if bt_run and bt_run.profit_loss_ratio:
+                            plr_val = bt_run.profit_loss_ratio
                     s.backtest_summary = {
                         "score": exp_strat.score,
                         "total_return_pct": exp_strat.total_return_pct,
@@ -363,6 +373,7 @@ def _migrate_strategy_metadata():
                         "total_trades": exp_strat.total_trades,
                         "avg_hold_days": exp_strat.avg_hold_days,
                         "avg_pnl_pct": exp_strat.avg_pnl_pct,
+                        "profit_loss_ratio": plr_val,
                         "regime_stats": exp_strat.regime_stats,
                     }
                     s.source_experiment_id = exp_strat.id
@@ -376,9 +387,30 @@ def _migrate_strategy_metadata():
             logger.info("Backfill: updated %d strategies with category/backtest_summary", updated)
 
 
+def _seed_admin_key():
+    """Create a default admin API key if no keys exist (first install)."""
+    from sqlalchemy.orm import Session
+    from api.models.auth import ApiKey
+    from api.services.auth_service import generate_api_key
+
+    with Session(engine) as db:
+        count = db.query(ApiKey).count()
+        if count == 0:
+            _, raw_key = generate_api_key(db, name="default-admin", role="admin")
+            logger.info(
+                "=== FIRST RUN: Created default admin API key ===\n"
+                "  Key: %s\n"
+                "  Save this key! It will NOT be shown again.",
+                raw_key,
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create tables on startup, start background services."""
+    from api.routers.ops import set_startup_time
+    set_startup_time()
+
     logger.info("Creating database tables...")
     import api.models.ai_lab  # noqa: F401 — ensure AI Lab tables are registered
     import api.models.market_regime  # noqa: F401 — ensure market_regimes table is registered
@@ -387,6 +419,10 @@ async def lifespan(app: FastAPI):
     import api.models.news_agent  # noqa: F401 — register news agent tables
     import api.models.bot_trading  # noqa: F401 — register bot trading tables
     import api.models.beta_factor  # noqa: F401 — register beta factor tables
+    import api.models.auth  # noqa: F401 — register auth tables
+    import api.models.job  # noqa: F401 — register job tables
+    import api.models.artifact  # noqa: F401 — register artifact tables
+    import api.models.memory  # noqa: F401 — register memory tables
     Base.metadata.create_all(bind=engine)
 
     # Run lightweight ALTER TABLE migrations for new nullable columns
@@ -398,6 +434,9 @@ async def lifespan(app: FastAPI):
     # Note: _seed_strategies() removed — built-in strategies kept resurrecting
     # after user deletion. Users can create strategies manually or via AI Lab.
     _seed_templates()
+
+    # Seed initial admin API key if no keys exist
+    _seed_admin_key()
 
     # Sync index data (上证/深成指/创业板) for regime computation
     _sync_index_data()
@@ -418,7 +457,11 @@ async def lifespan(app: FastAPI):
     logger.info("Database ready.")
 
     # Recover orphaned backtests from previous server crash
-    _recover_orphan_backtests()
+    import os
+    if os.environ.get("SKIP_ORPHAN_RECOVERY"):
+        logger.info("Orphan recovery SKIPPED (SKIP_ORPHAN_RECOVERY=1)")
+    else:
+        _recover_orphan_backtests()
 
     # Start background services
     from src.services.news_service import start_news_service, stop_news_service
@@ -431,11 +474,11 @@ async def lifespan(app: FastAPI):
 
     from api.services.news_agent_scheduler import start_news_agent_scheduler, stop_news_agent_scheduler
     start_news_agent_scheduler()
-    logger.info("News agent scheduler started (08:00 pre_market, 18:00 evening)")
+    logger.info("News agent scheduler started (08:00 pre_market, 15:45 evening)")
 
     from api.services.signal_scheduler import start_signal_scheduler, stop_signal_scheduler
     start_signal_scheduler()
-    logger.info("Data sync scheduler started (19:00 daily).")
+    logger.info("Data sync scheduler started (15:30 daily).")
 
     yield
 
@@ -463,6 +506,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Middleware stack (outermost first: metrics → auth → audit)
+from api.middleware.metrics import MetricsMiddleware, metrics_endpoint
+from api.middleware.audit import AuditMiddleware
+from api.middleware.auth import AuthMiddleware
+app.add_middleware(AuditMiddleware)
+app.add_middleware(AuthMiddleware)
+app.add_middleware(MetricsMiddleware)
+
+# Prometheus metrics endpoint
+app.add_route("/metrics", metrics_endpoint)
+
 # Register routers
 app.include_router(market.router)
 app.include_router(stocks.router)
@@ -476,6 +530,13 @@ app.include_router(ai_analyst.router)
 app.include_router(news_signals.router)
 app.include_router(bot_trading.router)
 app.include_router(beta.router)
+app.include_router(auth.router)
+app.include_router(jobs.router)
+app.include_router(ops.router)
+app.include_router(artifacts.router)
+app.include_router(memory.router)
+app.include_router(tdx.router)
+app.include_router(exploration_workflow.router)
 
 
 @app.get("/api/health")
