@@ -80,9 +80,16 @@ SELL_ONLY_FIELDS = frozenset([
 BASE_BUY: list[dict] = [
     {
         "field": "RSI",
-        "operator": "between",
-        "compare_type": "between",
-        "compare_value": [48, 66],
+        "operator": ">",
+        "compare_type": "value",
+        "compare_value": 48,
+        "params": {"period": 14},
+    },
+    {
+        "field": "RSI",
+        "operator": "<",
+        "compare_type": "value",
+        "compare_value": 66,
         "params": {"period": 14},
     },
     {
@@ -166,34 +173,52 @@ def validate_condition(cond: dict) -> list[str]:
 
 
 def validate_experiment_config(config: dict) -> list[str]:
-    """Validate a full experiment config. Return list of errors (empty = valid)."""
+    """Validate experiment config (supports both old and new simplified format)."""
     errors: list[str] = []
-    if "name_suffix" not in config:
-        errors.append("missing 'name_suffix'")
-    buy = config.get("buy_conditions")
-    sell = config.get("sell_conditions")
-    exit_cfg = config.get("exit_config")
-    if buy is not None:
-        if not isinstance(buy, list):
-            errors.append("buy_conditions must be a list")
+
+    # Must have a name
+    if not config.get("name") and not config.get("name_suffix") and not config.get("label"):
+        errors.append("missing name/name_suffix/label")
+
+    # New simplified format: buy_factors = [{"factor": "X", "value": N}]
+    buy_factors = config.get("buy_factors", [])
+    if buy_factors:
+        if not isinstance(buy_factors, list):
+            errors.append("buy_factors must be a list")
         else:
-            for i, c in enumerate(buy):
-                for err in validate_condition(c):
-                    errors.append(f"buy[{i}]: {err}")
-    if sell is not None:
-        if not isinstance(sell, list):
-            errors.append("sell_conditions must be a list")
+            for i, bf in enumerate(buy_factors):
+                factor = bf.get("factor", "")
+                if not factor:
+                    errors.append(f"buy_factors[{i}]: missing factor")
+                elif factor in BANNED_FIELDS:
+                    errors.append(f"buy_factors[{i}]: banned factor '{factor}'")
+                elif factor not in VALID_BUY_FACTORS:
+                    errors.append(f"buy_factors[{i}]: unknown factor '{factor}'")
+                if "value" not in bf:
+                    errors.append(f"buy_factors[{i}]: missing value")
+
+    # Sell factors (same format)
+    sell_factors = config.get("sell_factors", [])
+    if sell_factors:
+        if not isinstance(sell_factors, list):
+            errors.append("sell_factors must be a list")
         else:
-            for i, c in enumerate(sell):
-                for err in validate_condition(c):
-                    errors.append(f"sell[{i}]: {err}")
-    if exit_cfg is not None:
-        if not isinstance(exit_cfg, dict):
-            errors.append("exit_config must be a dict")
-        else:
-            tp = exit_cfg.get("take_profit_pct")
-            if tp is not None and tp < 0.12:
-                errors.append(f"take_profit_pct={tp} below 0.12 floor")
+            for i, sf in enumerate(sell_factors):
+                factor = sf.get("factor", "")
+                if factor and factor in BANNED_FIELDS:
+                    errors.append(f"sell_factors[{i}]: banned factor '{factor}'")
+
+    # Old format: buy_conditions / sell_conditions (still supported)
+    for key in ("buy_conditions", "sell_conditions"):
+        conds = config.get(key)
+        if conds is not None:
+            if not isinstance(conds, list):
+                errors.append(f"{key} must be a list")
+            else:
+                for i, c in enumerate(conds):
+                    for err in validate_condition(c):
+                        errors.append(f"{key}[{i}]: {err}")
+
     return errors
 
 
@@ -365,76 +390,85 @@ def generate_skeleton_candidates(
 # ────────────────────────────────────────────────────────────────
 
 _PLANNER_SYSTEM_PROMPT = """\
-You are a quantitative strategy researcher for A-share (China) stock market.
-Your job is to design BUY conditions and SELL conditions for strategy experiments.
+你是A股量化策略研究员。设计探索实验。
 
-## Available Factors (for buy_conditions)
-Each factor has an operator and typical value range:
+## 简化输出格式
+你只需要输出因子名称和阈值数字,代码会自动添加正确的operator和params。
+
+## 可用因子及其阈值范围
 {factor_table}
 
-## BANNED fields (NEVER use these)
+## 禁用因子
 {banned_list}
 
-## Output Format
-Return a JSON array of experiment configs. Each config:
-```json
-{{
-  "name_suffix": "descriptive_name",
-  "buy_conditions": [...],
-  "sell_conditions": [...],
-  "exit_config": {{
-    "stop_loss_pct": -10,
-    "take_profit_pct": 1.0,
-    "max_hold_days": 2
-  }}
-}}
-```
-
-## CRITICAL: Condition Format (follow EXACTLY)
-Buy condition example:
-```json
-{{"field":"KBAR_amplitude","operator":"<","compare_type":"value","compare_value":0.05}}
-```
-With params:
-```json
-{{"field":"W_REALVOL","operator":"<","compare_type":"value","compare_value":25,"params":{{"period":20}}}}
-```
-
-Sell condition examples (use these as templates):
+## 输出格式 — 严格JSON数组
 ```json
 [
-  {{"field":"MOM","operator":"<","compare_type":"value","compare_value":-1.0,"params":{{"period":20}}}},
-  {{"field":"KBAR_amplitude","operator":">","compare_type":"value","compare_value":0.06}},
-  {{"field":"REALVOL","operator":">","compare_type":"value","compare_value":38,"params":{{"period":20}}}}
+  {{
+    "name": "描述性名称",
+    "buy_factors": [
+      {{"factor": "KBAR_amplitude", "value": 0.03}},
+      {{"factor": "W_REALVOL", "value": 25}}
+    ],
+    "sell_factors": [
+      {{"factor": "MOM", "value": -1.0}},
+      {{"factor": "KBAR_amplitude", "value": 0.06}}
+    ],
+    "stop_loss": -20,
+    "take_profit": 2.0,
+    "max_hold_days": 5
+  }}
 ]
 ```
 
-## Exit Config
-- stop_loss_pct: MUST be negative (e.g. -10 for 10% stop loss)
-- take_profit_pct: positive, minimum 0.12 (below this slippage eats profit)
-- max_hold_days: 1-30
-
-## Resource Allocation Principle
-- 60% new skeleton exploration (novel factor combinations)
-- 30% fill existing families that have gap > 0
-- 10% optimize top performers with parameter tweaks
-
-## Rules
-1. Each experiment should have 1-3 buy_conditions (do NOT include RSI or ATR — base conditions are prepended automatically)
-2. Each experiment should have 1-2 sell_conditions
-3. Use diverse factor combinations across experiments
-4. Vary exit_config parameters across experiments
-5. NEVER use banned fields
+## 规则
+1. 每个实验 1-3 个 buy_factors(不要包含RSI/ATR,已自动添加)
+2. 每个实验 0-2 个 sell_factors(卖出信号)
+3. value必须在因子的阈值范围内
+4. 不同实验使用不同的因子组合和exit参数
+5. 禁止使用禁用因子
+6. 只输出JSON,不要解释
 """
 
 
 def _build_factor_table() -> str:
-    """Build a markdown table of available factors for the system prompt."""
+    """Build a simplified factor list for the prompt (no operator — code handles it)."""
     lines = []
     for name, info in sorted(VALID_BUY_FACTORS.items()):
-        params_str = json.dumps(info["params"]) if info["params"] else "none"
-        lines.append(f"- {name}: op={info['op']}, range=[{info['min']}, {info['max']}], params={params_str}")
+        direction = "低买高卖" if info["op"] == "<" else "高买低卖"
+        lines.append(f"- {name}: 买入阈值范围 [{info['min']}, {info['max']}], {direction}")
     return "\n".join(lines)
+
+
+def _factor_to_condition(factor: str, value: float, for_sell: bool = False) -> dict | None:
+    """Convert simplified {factor, value} to full condition dict.
+
+    For buy: uses the factor's registered operator (e.g. "<" for KBAR_amplitude)
+    For sell: reverses the operator (e.g. ">" for KBAR_amplitude, meaning sell when amplitude is HIGH)
+    """
+    meta = VALID_BUY_FACTORS.get(factor)
+    if meta is None:
+        logger.warning("Unknown factor '%s', skipping", factor)
+        return None
+
+    # Buy: use registered operator. Sell: reverse it.
+    if for_sell:
+        op = ">" if meta["op"] == "<" else "<"
+    else:
+        op = meta["op"]
+
+    # Clamp value to valid range
+    clamped = max(meta["min"], min(meta["max"], value))
+
+    cond: dict = {
+        "field": factor,
+        "operator": op,
+        "compare_type": "value",
+        "compare_value": round(clamped, 4),
+    }
+    if meta.get("params"):
+        cond["params"] = meta["params"]
+    return cond
 
 
 def _build_user_prompt(
@@ -1035,41 +1069,66 @@ class ExplorationEngine:
         exp_ids: list[int] = []
         total_strats = 0
 
+        # Default exit grid — used for EVERY experiment to maximize coverage
+        DEFAULT_EXIT_GRID = [
+            {"name": "SL20_TP0.5_MHD2", "stop_loss_pct": -20, "take_profit_pct": 0.5, "max_hold_days": 2},
+            {"name": "SL20_TP1_MHD3",   "stop_loss_pct": -20, "take_profit_pct": 1.0, "max_hold_days": 3},
+            {"name": "SL15_TP1.5_MHD3", "stop_loss_pct": -15, "take_profit_pct": 1.5, "max_hold_days": 3},
+            {"name": "SL20_TP2_MHD5",   "stop_loss_pct": -20, "take_profit_pct": 2.0, "max_hold_days": 5},
+            {"name": "SL25_TP3_MHD5",   "stop_loss_pct": -25, "take_profit_pct": 3.0, "max_hold_days": 5},
+            {"name": "SL20_TP4_MHD7",   "stop_loss_pct": -20, "take_profit_pct": 4.0, "max_hold_days": 7},
+        ]
+
         for cfg in configs:
-            # Build full buy/sell from base + extra (handle both field names)
-            extra_buy = cfg.get("extra_buy_conditions", cfg.get("buy_conditions", []))
-            extra_sell = cfg.get("extra_sell_conditions", cfg.get("sell_conditions", []))
-            buy = copy.deepcopy(BASE_BUY) + (extra_buy if isinstance(extra_buy, list) else [])
-            sell = copy.deepcopy(BASE_SELL) + (extra_sell if isinstance(extra_sell, list) else [])
-            label = cfg.get("label", cfg.get("name_suffix", "exp"))
+            label = cfg.get("name", cfg.get("label", cfg.get("name_suffix", "exp")))
 
-            # Handle exit configs: could be list (exit_configs) or single dict (exit_config)
-            raw_exits = cfg.get("exit_configs", [])
-            if not raw_exits:
-                # Single exit_config → wrap in list
-                single = cfg.get("exit_config", {})
-                if single:
-                    raw_exits = [single]
+            # ── Build buy conditions ──
+            # New simplified format: buy_factors = [{"factor": "X", "value": N}]
+            # Old format: buy_conditions = [{"field": "X", "operator": "<", ...}]
+            buy = copy.deepcopy(BASE_BUY)
+            buy_factors = cfg.get("buy_factors", [])
+            if buy_factors:
+                # New simplified format → convert via _factor_to_condition
+                for bf in buy_factors:
+                    cond = _factor_to_condition(bf.get("factor", ""), bf.get("value", 0), for_sell=False)
+                    if cond:
+                        buy.append(cond)
+            else:
+                # Legacy format: raw conditions
+                extra = cfg.get("extra_buy_conditions", cfg.get("buy_conditions", []))
+                if isinstance(extra, list):
+                    buy.extend(extra)
 
-            if not raw_exits:
-                # No exit config at all → use default grid
-                raw_exits = [
-                    {"name": "SL20_TP0.5_MHD2", "stop_loss_pct": -20, "take_profit_pct": 0.5, "max_hold_days": 2},
-                    {"name": "SL20_TP1_MHD3",   "stop_loss_pct": -20, "take_profit_pct": 1.0, "max_hold_days": 3},
-                    {"name": "SL15_TP1.5_MHD3", "stop_loss_pct": -15, "take_profit_pct": 1.5, "max_hold_days": 3},
-                    {"name": "SL20_TP2_MHD5",   "stop_loss_pct": -20, "take_profit_pct": 2.0, "max_hold_days": 5},
-                    {"name": "SL25_TP3_MHD5",   "stop_loss_pct": -25, "take_profit_pct": 3.0, "max_hold_days": 5},
-                ]
+            # ── Build sell conditions ──
+            sell = copy.deepcopy(BASE_SELL)
+            sell_factors = cfg.get("sell_factors", [])
+            if sell_factors:
+                for sf in sell_factors:
+                    cond = _factor_to_condition(sf.get("factor", ""), sf.get("value", 0), for_sell=True)
+                    if cond:
+                        sell.append(cond)
+            else:
+                extra = cfg.get("extra_sell_conditions", cfg.get("sell_conditions", []))
+                if isinstance(extra, list):
+                    sell.extend(extra)
 
-            # Build API-compatible exit_configs
+            # ── Build exit configs ──
+            # Use LLM's exit params if provided, otherwise use default grid
+            sl = cfg.get("stop_loss", cfg.get("stop_loss_pct", -20))
+            tp = cfg.get("take_profit", cfg.get("take_profit_pct", 2.0))
+            mhd = cfg.get("max_hold_days", 5)
+
+            # Always use the full default grid to maximize StdA+ chances
+            exit_grid = DEFAULT_EXIT_GRID
+
             api_exit_configs = []
-            for ec in raw_exits:
+            for ec in exit_grid:
                 api_exit_configs.append({
-                    "name_suffix": f"_{label}_{ec.get('name', 'x')}",
+                    "name_suffix": f"_{label}_{ec['name']}",
                     "exit_config": {
-                        "stop_loss_pct": ec.get("stop_loss_pct", -20),
-                        "take_profit_pct": ec.get("take_profit_pct", 2.0),
-                        "max_hold_days": int(ec.get("max_hold_days", 5)),
+                        "stop_loss_pct": ec["stop_loss_pct"],
+                        "take_profit_pct": ec["take_profit_pct"],
+                        "max_hold_days": ec["max_hold_days"],
                     },
                     "buy_conditions": buy,
                     "sell_conditions": sell,
