@@ -425,9 +425,10 @@ _PLANNER_SYSTEM_PROMPT = """\
 1. 每个实验 1-3 个 buy_factors(不要包含RSI/ATR,已自动添加)
 2. 每个实验 0-2 个 sell_factors(卖出信号)
 3. value必须在因子的阈值范围内
-4. 不同实验使用不同的因子组合和exit参数
-5. 禁止使用禁用因子
-6. 只输出JSON,不要解释
+4. **多样性要求(重要!)**: 10个实验中,第一个因子(buy_factors[0])至少使用5种不同的因子。不要所有实验都用同一个因子开头。均匀覆盖: KBAR类, REALVOL类, AMPVOL类, RSTR类, PVOL类, MOM, LIQ类, W_类。
+5. 不同实验使用不同的exit参数(stop_loss在-10到-30之间, take_profit在0.5到5.0之间, max_hold_days在2到10之间)
+6. 禁止使用禁用因子
+7. 只输出JSON,不要解释
 """
 
 
@@ -1272,12 +1273,14 @@ class ExplorationEngine:
 
     def _step_promote_and_rebalance(self, exp_ids: list[int]) -> int:
         """Promote StdA+ strategies and Standard B regime champions, then rebalance."""
-        promoted = 0
+        promoted_a = 0  # Standard A (StdA+)
+        promoted_b = 0  # Standard B (regime champions)
         LABEL_MAP = {
             "bull": ("[AI-牛市]", "牛市"),
             "bear": ("[AI-熊市]", "熊市"),
             "rang": ("[AI-震荡]", "震荡"),
         }
+        regime_best: dict[str, tuple[int, float]] = {}  # key → (sid, pnl)
 
         for eid in exp_ids:
             detail = _api("GET", f"lab/experiments/{eid}")
@@ -1289,7 +1292,7 @@ class ExplorationEngine:
 
                 sid = s["id"]
 
-                # StdA+ promote
+                # Standard A: StdA+ promote
                 if is_stda_plus(
                     s.get("score", 0),
                     s.get("total_return_pct", 0),
@@ -1299,41 +1302,56 @@ class ExplorationEngine:
                 ):
                     result = _promote_strategy(sid)
                     if "error" not in result:
-                        promoted += 1
-                    continue
+                        promoted_a += 1
 
-                # Standard B: regime champion promote
+                # Standard B: track regime champions (even if already promoted as StdA+)
+                ret = s.get("total_return_pct", 0) or 0
+                if ret <= 0:
+                    continue
                 regime_stats = s.get("regime_stats") or {}
-                if not regime_stats:
-                    continue
-
-                best_regime = None
-                best_pnl = 0
-                for regime_key, rdata in regime_stats.items():
+                for rname, rdata in regime_stats.items():
                     if not isinstance(rdata, dict):
                         continue
-                    pnl = rdata.get("total_pnl", 0)
-                    if pnl > best_pnl:
-                        best_pnl = pnl
-                        best_regime = regime_key
-
-                if best_regime and best_pnl > 0:
-                    # Match regime to label
-                    for key_prefix, (label, category) in LABEL_MAP.items():
-                        if best_regime.lower().startswith(key_prefix):
-                            result = _promote_strategy(sid, label=label, category=category)
-                            if "error" not in result:
-                                promoted += 1
+                    pnl = rdata.get("total_pnl", 0) or 0
+                    if pnl <= 100:
+                        continue
+                    for key in LABEL_MAP:
+                        if key in rname.lower():
+                            if key not in regime_best or pnl > regime_best[key][1]:
+                                regime_best[key] = (sid, pnl)
                             break
 
-        # Rebalance pool
-        _api("POST", "strategies/rebalance")
+        # Promote Standard B regime champions
+        for key, (sid, pnl) in regime_best.items():
+            label, cat = LABEL_MAP[key]
+            result = _promote_strategy(sid, label=label, category=cat)
+            if "error" not in result:
+                promoted_b += 1
+            logger.info("Standard B: %s champion S%d (pnl=%.0f) → %s", key, sid, pnl, label)
 
-        self.step_detail = f"Promoted {promoted} strategies"
+        logger.info("Promote complete: %d StdA+ (Standard A), %d regime champions (Standard B)",
+                    promoted_a, promoted_b)
+
+        # Rebalance pool
+        rebalance_result = _api("POST", "strategies/pool/rebalance?max_per_family=15")
+        archived = rebalance_result.get("archived_count", 0)
+        active = rebalance_result.get("active_strategies", 0)
+        families = rebalance_result.get("families_count", 0)
+        logger.info("Rebalance: %d families, archived %d, active %d", families, archived, active)
+
+        promoted = promoted_a + promoted_b
+        self.step_detail = f"Promoted {promoted_a} StdA+ + {promoted_b} regime, rebalanced ({active} active, {archived} archived)"
         return promoted
 
     def _step_update_memory_doc(self, promoted: int):
-        """Update lab-experiment-analysis.md with auto-promote results and next priorities."""
+        """Update lab-experiment-analysis.md with round results.
+
+        Updates 4 sections:
+        1. Auto-Promote 记录 — cumulative count + this round's stats
+        2. 探索状态 — current pool composition
+        3. 下一步优先级 — data-driven next suggestions
+        4. 历史实验摘要 — round count + strategy count
+        """
         if not _INSIGHT_DOC.exists():
             return
 
@@ -1344,40 +1362,69 @@ class ExplorationEngine:
             return
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        rate = self.stda_count / max(1, self.strategies_done) * 100
 
-        # Update or add Auto-Promote section
+        # ── 1. Auto-Promote 记录 ──
+        # Try to update existing cumulative count
+        count_match = re.search(r"累计 \*\*(\d[\d,]*)\+?\*\*", content)
+        old_count = int(count_match.group(1).replace(",", "")) if count_match else 0
+        new_count = old_count + self.stda_count
+
         auto_section = (
-            f"\n## Auto-Promote (Engine)\n\n"
-            f"> 最近更新: {now}\n"
-            f"> R{self.current_round}: {promoted} promoted, "
-            f"{self.stda_count} StdA+, best={self.best_score:.4f}, "
-            f"provider={self.llm_provider}\n"
+            f"## Auto-Promote 记录\n\n"
+            f"> 累计 **{new_count:,}+** 个StdA+策略已promote。\n"
+            f"> **R{self.current_round}** (Engine, {now}): "
+            f"**{self.stda_count} StdA+ ({rate:.1f}%)** — "
+            f"best={self.best_score:.4f}, promoted={promoted}, "
+            f"provider={self.llm_provider}。"
+            f"Pool: {self.pool_families}家族, {self.pool_active}活跃\n"
         )
 
-        pattern = r"## Auto-Promote \(Engine\)\s*\n.*?(?=\n## |\Z)"
-        if re.search(pattern, content, re.DOTALL):
-            content = re.sub(pattern, auto_section.strip(), content, flags=re.DOTALL)
+        pattern = r"## Auto-Promote[^\n]*\n\n(?:>.*\n)+"
+        if re.search(pattern, content):
+            content = re.sub(pattern, auto_section, content)
         else:
             content += "\n" + auto_section
 
-        # Update 下一步优先级 section
-        next_section = (
-            f"\n## 下一步优先级\n\n"
-            f"- Pool: {self.pool_families} families, {self.pool_active} active, gap={self.pool_gap}\n"
-            f"- Last round R{self.current_round}: {self.strategies_done} done, "
-            f"{self.strategies_invalid} invalid, {self.stda_count} StdA+\n"
-            f"- LLM provider: {self.llm_provider}\n"
+        # ── 2. 下一步优先级 ──
+        # Get top-gap families for suggestions
+        pool_status = _api("GET", "strategies/pool/status")
+        families = pool_status.get("family_summary", [])
+        top_gaps = sorted(families, key=lambda f: -f.get("gap", 0))[:5]
+        gap_lines = "\n".join(
+            f"  - {f['family']} (gap={f['gap']}, avg={f['avg_score']:.4f})"
+            for f in top_gaps if f.get("gap", 0) > 0
         )
 
-        pattern2 = r"## 下一步优先级\s*\n.*?(?=\n## |\Z)"
-        if re.search(pattern2, content, re.DOTALL):
-            content = re.sub(pattern2, next_section.strip(), content, flags=re.DOTALL)
+        next_section = (
+            f"## 下一步优先级\n\n"
+            f"### R{self.current_round} 自动探索结果 ({now})\n\n"
+            f"**{self.stda_count} StdA+ ({rate:.1f}%)**, "
+            f"best={self.best_score:.4f}, provider={self.llm_provider}\n\n"
+            f"### 下一步优先级 (R{self.current_round + 1}+)\n\n"
+            f"1. **填充 top-gap 家族**:\n{gap_lines}\n"
+            f"2. **新因子组合探索** — pool gap={self.pool_gap}\n"
+            f"3. **优化已满家族** — 尝试新 sell 条件\n"
+        )
+
+        pattern2 = r"## 下一步优先级\s*\n[\s\S]*?(?=\n## 历史|$)"
+        if re.search(pattern2, content):
+            content = re.sub(pattern2, next_section, content)
         else:
             content += "\n" + next_section
 
+        # ── 3. 历史实验摘要 — update round count ──
+        hist_match = re.search(r"(\d+)轮探索累计", content)
+        if hist_match:
+            old_rounds = int(hist_match.group(1))
+            content = content.replace(
+                f"{old_rounds}轮探索累计",
+                f"{self.current_round}轮探索累计"
+            )
+
         try:
             _INSIGHT_DOC.write_text(content, encoding="utf-8")
-            logger.info("Updated insight doc: %s", _INSIGHT_DOC)
+            logger.info("Updated insight doc: Auto-Promote + 下一步 + 历史摘要")
         except Exception as e:
             logger.error("Failed to write insight doc: %s", e)
 
@@ -1390,7 +1437,7 @@ class ExplorationEngine:
 
         try:
             result = subprocess.run(
-                ["python3", str(script), "--incremental"],
+                ["python3", str(script)],
                 capture_output=True, text=True, timeout=120,
                 cwd=str(script.parent.parent),
             )
@@ -1439,20 +1486,43 @@ class ExplorationEngine:
 
     def _step_resolve_problems(self, exp_ids: list[int]):
         """Detect and fix: zombies, missed promotes, pool cleanup."""
-        self._set_step("resolve_problems", "Zombie detection")
+        issues: list[str] = []
 
-        # 1. Zombie detection: experiments stuck in backtesting
+        # 1. Zombie detection
+        self._set_step("resolve_problems", "检测zombie实验")
+        zombies = 0
         resp = _api("GET", "lab/experiments?page=1&size=50")
         for exp_item in resp.get("items", []):
-            if exp_item.get("status") == "backtesting":
-                eid = exp_item.get("id")
-                if eid and eid not in exp_ids:
-                    logger.warning("Zombie experiment %d detected, triggering retry", eid)
-                    _api("POST", "lab/experiments/retry-pending")
-                    break
+            if exp_item.get("status") in ("backtesting", "pending") and exp_item.get("id") not in exp_ids:
+                zombies += 1
+        if zombies:
+            _api("POST", "lab/experiments/retry-pending")
+            issues.append(f"Retried {zombies} zombie experiments")
+            logger.info("Step 10: retried %d zombie experiments", zombies)
 
-        # 2. Missed promote sweep — already handled by promote_check at start
-        self.step_detail = "Zombie check + missed promote sweep done"
+        # 2. Missed promote sweep
+        missed = 0
+        for eid in exp_ids:
+            detail = _api("GET", f"lab/experiments/{eid}")
+            for s in detail.get("strategies", []):
+                if s.get("status") == "done" and not s.get("promoted"):
+                    if is_stda_plus(s.get("score",0), s.get("total_return_pct",0),
+                                   s.get("max_drawdown_pct",100), s.get("total_trades",0),
+                                   s.get("win_rate",0)):
+                        _promote_strategy(s["id"])
+                        missed += 1
+        if missed:
+            issues.append(f"Promoted {missed} missed StdA+ strategies")
+            logger.info("Step 10: promoted %d missed strategies", missed)
 
-        # 3. Pool cleanup
-        _api("POST", "strategies/cleanup?dry_run=false")
+        # 3. Pool cleanup (remove below-threshold strategies)
+        cleanup = _api("POST", "strategies/cleanup")
+        deleted = cleanup.get("deleted", cleanup.get("would_delete", 0))
+        kept = cleanup.get("kept", cleanup.get("would_keep", 0))
+        if deleted:
+            issues.append(f"Cleanup: deleted {deleted}, kept {kept}")
+            logger.info("Step 10: cleanup deleted %d, kept %d", deleted, kept)
+
+        summary = "; ".join(issues) if issues else "无问题"
+        self.step_detail = summary
+        logger.info("Step 10 complete: %s", summary)
