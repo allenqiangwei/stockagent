@@ -79,6 +79,10 @@ class PortfolioBacktestResult:
     regime_stats: dict = field(default_factory=dict)  # {regime: {trades, wins, win_rate, return_pct}}
     index_return_pct: float = 0.0  # Shanghai Index return over same period
 
+    # Benchmark comparison (filled by caller if index data available)
+    benchmark_return: float = 0.0   # 基准(沪深300)收益率 %
+    excess_return: float = 0.0      # 超额收益 %
+
 
 class PortfolioBacktestEngine:
     """Portfolio-level backtest: one capital pool, position limits, daily simulation.
@@ -99,12 +103,21 @@ class PortfolioBacktestEngine:
         position_sizing: str = "equal_weight",
         max_position_pct: float = 30.0,
         slippage_pct: float = 0.1,
+        commission_pct: float = 0.025,   # 佣金 万2.5 (买卖各收)
+        stamp_tax_pct: float = 0.05,     # 印花税 (仅卖出)
+        transfer_fee_pct: float = 0.001, # 过户费 (仅卖出)
     ):
         self.initial_capital = initial_capital
         self.max_positions = max_positions
         self.position_sizing = position_sizing
         self.max_position_pct = max_position_pct  # max single stock weight %
         self.slippage_pct = slippage_pct
+        self.commission_pct = commission_pct
+        self.stamp_tax_pct = stamp_tax_pct
+        self.transfer_fee_pct = transfer_fee_pct
+        # Pre-compute total sell fee rate for convenience
+        self._sell_fee_rate = (commission_pct + stamp_tax_pct + transfer_fee_pct) / 100
+        self._buy_fee_rate = commission_pct / 100
 
     def run(
         self,
@@ -179,8 +192,16 @@ class PortfolioBacktestEngine:
         # ── Phase 1: Pre-compute indicators for ALL stocks ──
         all_rules = buy_conditions + sell_conditions
         collected_params = collect_indicator_params(all_rules)
-        config = IndicatorConfig.from_collected_params(collected_params)
+
+        # Separate daily / weekly / monthly indicator params
+        from src.indicators.multi_timeframe import separate_mtf_params, compute_mtf_indicators
+        daily_params, weekly_params, monthly_params = separate_mtf_params(collected_params)
+
+        config = IndicatorConfig.from_collected_params(daily_params)
         calculator = IndicatorCalculator(config)
+
+        weekly_config = IndicatorConfig.from_collected_params(weekly_params) if weekly_params else None
+        monthly_config = IndicatorConfig.from_collected_params(monthly_params) if monthly_params else None
 
         # stock_code → full DataFrame (OHLCV + indicators), date-indexed
         prepared: Dict[str, pd.DataFrame] = {}
@@ -198,6 +219,19 @@ class PortfolioBacktestEngine:
             )
             if "date" in df_full.columns:
                 df_full["date"] = pd.to_datetime(df_full["date"]).dt.strftime("%Y-%m-%d")
+
+            # Multi-timeframe indicators
+            if weekly_config:
+                w_df = compute_mtf_indicators(df, weekly_config, "W")
+                if w_df is not None:
+                    for col in w_df.columns:
+                        df_full[col] = w_df[col].values
+            if monthly_config:
+                m_df = compute_mtf_indicators(df, monthly_config, "M")
+                if m_df is not None:
+                    for col in m_df.columns:
+                        df_full[col] = m_df[col].values
+
             return code, df_full
 
         n_workers = min(8, os.cpu_count() or 4)
@@ -329,6 +363,13 @@ class PortfolioBacktestEngine:
                 row_idx = stock_date_idx[code][current_date]
                 df_stock = prepared[code]
                 row = df_stock.iloc[row_idx]
+
+                # Suspension check: volume == 0 means stock is suspended
+                volume = float(row.get("volume", 0))
+                if volume <= 0:
+                    pos.hold_days += 1
+                    continue  # Can't trade suspended stock
+
                 open_p = float(row.get("open", row["close"]))
                 close = float(row["close"])
                 low = float(row.get("low", close))
@@ -437,8 +478,15 @@ class PortfolioBacktestEngine:
                 row_idx = stock_date_idx[code][current_date]
                 close = float(prepared[code].iloc[row_idx]["close"])
                 exec_price = price_override if price_override is not None else close
-                pnl_pct = (exec_price - pos.buy_price) / pos.buy_price * 100
-                cash += pos.shares * exec_price
+                gross_proceeds = pos.shares * exec_price
+                sell_fees = gross_proceeds * self._sell_fee_rate
+                net_proceeds = gross_proceeds - sell_fees
+                cash += net_proceeds
+
+                # PnL reflects actual costs (buy commission + sell fees)
+                effective_buy = pos.buy_price * (1 + self._buy_fee_rate)
+                effective_sell = exec_price * (1 - self._sell_fee_rate)
+                pnl_pct = (effective_sell - effective_buy) / effective_buy * 100
 
                 trades.append(Trade(
                     stock_code=code,
@@ -478,6 +526,10 @@ class PortfolioBacktestEngine:
                         continue
 
                     if is_combo and member_strategies:
+                        # Suspension check: skip if volume == 0
+                        volume = float(df_stock.iloc[row_idx].get("volume", 0))
+                        if volume <= 0:
+                            continue
                         # Combo: check if pending buy from yesterday
                         if code in pending_combo_buys:
                             pending_combo_buys.discard(code)
@@ -521,6 +573,10 @@ class PortfolioBacktestEngine:
                             buy_signal = triggered
 
                         if buy_signal:
+                            # Suspension check: skip if volume == 0
+                            volume = float(df_stock.iloc[row_idx].get("volume", 0))
+                            if volume <= 0:
+                                continue
                             open_p = float(df_stock.iloc[row_idx].get("open", df_stock.iloc[row_idx]["close"]))
                             prev_c = float(df_stock.iloc[row_idx - 1]["close"])
                             limit_up, _ = calc_limit_prices(code, prev_c)
@@ -578,13 +634,17 @@ class PortfolioBacktestEngine:
                     if shares <= 0:
                         continue
                     cost = shares * buy_price
-                    if cost > cash:
-                        shares = math.floor(cash / buy_price)
+                    buy_commission = cost * self._buy_fee_rate
+                    total_cost = cost + buy_commission
+                    if total_cost > cash:
+                        shares = math.floor(cash / (buy_price * (1 + self._buy_fee_rate)))
                         if shares <= 0:
                             continue
                         cost = shares * buy_price
+                        buy_commission = cost * self._buy_fee_rate
+                        total_cost = cost + buy_commission
 
-                    cash -= cost
+                    cash -= total_cost
                     positions[code] = Position(
                         stock_code=code,
                         buy_date=current_date,
@@ -621,8 +681,14 @@ class PortfolioBacktestEngine:
                 df_stock = prepared[code]
                 close = float(df_stock.iloc[-1]["close"])
 
-            pnl_pct = (close - pos.buy_price) / pos.buy_price * 100
-            cash += pos.shares * close
+            gross_proceeds = pos.shares * close
+            sell_fees = gross_proceeds * self._sell_fee_rate
+            net_proceeds = gross_proceeds - sell_fees
+            cash += net_proceeds
+
+            effective_buy = pos.buy_price * (1 + self._buy_fee_rate)
+            effective_sell = close * (1 - self._sell_fee_rate)
+            pnl_pct = (effective_sell - effective_buy) / effective_buy * 100
 
             trades.append(Trade(
                 stock_code=code,
@@ -670,8 +736,17 @@ class PortfolioBacktestEngine:
 
         all_rules = buy_conditions + sell_conditions
         collected_params = collect_indicator_params(all_rules)
-        config = IndicatorConfig.from_collected_params(collected_params)
+
+        # Separate daily / weekly / monthly indicator params
+        from src.indicators.multi_timeframe import separate_mtf_params, compute_mtf_indicators
+        daily_params, weekly_params, monthly_params = separate_mtf_params(collected_params)
+
+        config = IndicatorConfig.from_collected_params(daily_params)
         calculator = IndicatorCalculator(config)
+
+        # Build configs for multi-timeframe (only if conditions reference W_/M_ fields)
+        weekly_config = IndicatorConfig.from_collected_params(weekly_params) if weekly_params else None
+        monthly_config = IndicatorConfig.from_collected_params(monthly_params) if monthly_params else None
 
         # Phase 1: Parallel indicator computation
         prepared: Dict[str, pd.DataFrame] = {}
@@ -688,6 +763,19 @@ class PortfolioBacktestEngine:
             )
             if "date" in df_full.columns:
                 df_full["date"] = pd.to_datetime(df_full["date"]).dt.strftime("%Y-%m-%d")
+
+            # Multi-timeframe: compute weekly/monthly indicators, forward-fill to daily
+            if weekly_config:
+                w_df = compute_mtf_indicators(df, weekly_config, "W")
+                if w_df is not None:
+                    for col in w_df.columns:
+                        df_full[col] = w_df[col].values
+            if monthly_config:
+                m_df = compute_mtf_indicators(df, monthly_config, "M")
+                if m_df is not None:
+                    for col in m_df.columns:
+                        df_full[col] = m_df[col].values
+
             return code, df_full
 
         n_workers = min(8, os.cpu_count() or 4)
@@ -821,6 +909,13 @@ class PortfolioBacktestEngine:
                 row_idx = stock_date_idx[code][current_date]
                 df_stock = prepared[code]
                 row = df_stock.iloc[row_idx]
+
+                # Suspension check: volume == 0 means stock is suspended
+                volume = float(row.get("volume", 0))
+                if volume <= 0:
+                    pos.hold_days += 1
+                    continue  # Can't trade suspended stock
+
                 open_p = float(row.get("open", row["close"]))
                 close = float(row["close"])
                 low = float(row.get("low", close))
@@ -891,8 +986,15 @@ class PortfolioBacktestEngine:
                 row_idx = stock_date_idx[code][current_date]
                 close = float(prepared[code].iloc[row_idx]["close"])
                 exec_price = price_override if price_override is not None else close
-                pnl_pct = (exec_price - pos.buy_price) / pos.buy_price * 100
-                cash += pos.shares * exec_price
+                gross_proceeds = pos.shares * exec_price
+                sell_fees = gross_proceeds * self._sell_fee_rate
+                net_proceeds = gross_proceeds - sell_fees
+                cash += net_proceeds
+
+                effective_buy = pos.buy_price * (1 + self._buy_fee_rate)
+                effective_sell = exec_price * (1 - self._sell_fee_rate)
+                pnl_pct = (effective_sell - effective_buy) / effective_buy * 100
+
                 trades.append(Trade(
                     stock_code=code,
                     strategy_name=strategy_name,
@@ -926,6 +1028,10 @@ class PortfolioBacktestEngine:
                     buy_vec = buy_signal_map.get(code)
                     if buy_vec is not None and row_idx < len(buy_vec) and buy_vec[row_idx]:
                         df_stock = prepared[code]
+                        # Suspension check: skip if volume == 0
+                        volume = float(df_stock.iloc[row_idx].get("volume", 0))
+                        if volume <= 0:
+                            continue
                         open_p = float(df_stock.iloc[row_idx].get("open", df_stock.iloc[row_idx]["close"]))
                         prev_c = float(df_stock.iloc[row_idx - 1]["close"])
                         limit_up, _ = calc_limit_prices(code, prev_c)
@@ -976,12 +1082,16 @@ class PortfolioBacktestEngine:
                     if shares <= 0:
                         continue
                     cost = shares * buy_price
-                    if cost > cash:
-                        shares = math.floor(cash / buy_price)
+                    buy_commission = cost * self._buy_fee_rate
+                    total_cost = cost + buy_commission
+                    if total_cost > cash:
+                        shares = math.floor(cash / (buy_price * (1 + self._buy_fee_rate)))
                         if shares <= 0:
                             continue
                         cost = shares * buy_price
-                    cash -= cost
+                        buy_commission = cost * self._buy_fee_rate
+                        total_cost = cost + buy_commission
+                    cash -= total_cost
                     positions[code] = Position(
                         stock_code=code, buy_date=current_date,
                         buy_price=buy_price, shares=shares, cost_basis=cost,
@@ -1010,8 +1120,16 @@ class PortfolioBacktestEngine:
                 close = float(prepared[code].iloc[row_idx]["close"])
             else:
                 close = float(prepared[code].iloc[-1]["close"])
-            pnl_pct = (close - pos.buy_price) / pos.buy_price * 100
-            cash += pos.shares * close
+
+            gross_proceeds = pos.shares * close
+            sell_fees = gross_proceeds * self._sell_fee_rate
+            net_proceeds = gross_proceeds - sell_fees
+            cash += net_proceeds
+
+            effective_buy = pos.buy_price * (1 + self._buy_fee_rate)
+            effective_sell = close * (1 - self._sell_fee_rate)
+            pnl_pct = (effective_sell - effective_buy) / effective_buy * 100
+
             trades.append(Trade(
                 stock_code=code, strategy_name=strategy_name,
                 buy_date=pos.buy_date, buy_price=pos.buy_price,

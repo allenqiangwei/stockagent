@@ -1,6 +1,7 @@
 """规则引擎：基于条件+动作模式的信号评估，支持指标参数化"""
 
 import logging
+import math
 from typing import List, Dict, Any, Tuple, Optional, Set
 import pandas as pd
 
@@ -413,6 +414,10 @@ def _evaluate_single_rule(
         left_val = float(left_val)
         right_val = float(right_val)
     except (ValueError, TypeError):
+        return False
+
+    # Guard against NaN that survived float() conversion
+    if math.isnan(left_val) or math.isnan(right_val):
         return False
 
     return _compare(left_val, operator, right_val)
