@@ -103,6 +103,7 @@ class PortfolioBacktestEngine:
         position_sizing: str = "equal_weight",
         max_position_pct: float = 30.0,
         slippage_pct: float = 0.1,
+        enable_fees: bool = False,         # 手续费总开关 (默认关闭)
         commission_pct: float = 0.025,   # 佣金 万2.5 (买卖各收)
         stamp_tax_pct: float = 0.05,     # 印花税 (仅卖出)
         transfer_fee_pct: float = 0.001, # 过户费 (仅卖出)
@@ -112,12 +113,17 @@ class PortfolioBacktestEngine:
         self.position_sizing = position_sizing
         self.max_position_pct = max_position_pct  # max single stock weight %
         self.slippage_pct = slippage_pct
+        self.enable_fees = enable_fees
         self.commission_pct = commission_pct
         self.stamp_tax_pct = stamp_tax_pct
         self.transfer_fee_pct = transfer_fee_pct
-        # Pre-compute total sell fee rate for convenience
-        self._sell_fee_rate = (commission_pct + stamp_tax_pct + transfer_fee_pct) / 100
-        self._buy_fee_rate = commission_pct / 100
+        # Pre-compute fee rates (0 when disabled)
+        if enable_fees:
+            self._sell_fee_rate = (commission_pct + stamp_tax_pct + transfer_fee_pct) / 100
+            self._buy_fee_rate = commission_pct / 100
+        else:
+            self._sell_fee_rate = 0.0
+            self._buy_fee_rate = 0.0
 
     def run(
         self,
@@ -128,6 +134,7 @@ class PortfolioBacktestEngine:
         progress_callback=None,
         regime_map: Optional[Dict[str, str]] = None,
         cancel_event: Optional[threading.Event] = None,
+        index_data: Optional[pd.DataFrame] = None,
     ) -> PortfolioBacktestResult:
         """Run portfolio backtest across multiple stocks.
 
@@ -718,6 +725,7 @@ class PortfolioBacktestEngine:
             start_date=sorted_dates[0],
             end_date=sorted_dates[-1],
             regime_map=regime_map,
+            index_data=index_data,
         )
 
     def prepare_data(
@@ -850,6 +858,7 @@ class PortfolioBacktestEngine:
         precomputed: Dict[str, Any],
         regime_map: Optional[Dict[str, str]] = None,
         cancel_event: Optional[threading.Event] = None,
+        index_data: Optional[pd.DataFrame] = None,
     ) -> "PortfolioBacktestResult":
         """Run Phase 3-5 using pre-computed data from prepare_data().
 
@@ -1147,6 +1156,7 @@ class PortfolioBacktestEngine:
             strategy_name=strategy_name, trades=trades,
             equity_curve=equity_curve, start_date=sorted_dates[0],
             end_date=sorted_dates[-1], regime_map=regime_map,
+            index_data=index_data,
         )
 
     def _rank_candidates(
@@ -1280,6 +1290,7 @@ class PortfolioBacktestEngine:
         start_date: str,
         end_date: str,
         regime_map: Optional[Dict[str, str]] = None,
+        index_data: Optional[pd.DataFrame] = None,
     ) -> PortfolioBacktestResult:
         """Compute all metrics from trades and equity curve."""
         total_trades = len(trades)
@@ -1325,7 +1336,9 @@ class PortfolioBacktestEngine:
 
         # Regime stats (aggregate trades by market regime at buy time)
         regime_stats = self._calc_regime_stats(trades) if regime_map else {}
-        index_return_pct = self._calc_index_return(regime_map) if regime_map else 0.0
+        index_return_pct = self._calc_index_return(index_data, start_date, end_date)
+        benchmark_return = index_return_pct
+        excess_return = total_return_pct - benchmark_return
 
         return PortfolioBacktestResult(
             strategy_name=strategy_name,
@@ -1350,6 +1363,8 @@ class PortfolioBacktestEngine:
             sell_reason_stats=sell_reason_stats,
             regime_stats=regime_stats,
             index_return_pct=round(index_return_pct, 2),
+            benchmark_return=round(benchmark_return, 2),
+            excess_return=round(excess_return, 2),
         )
 
     @staticmethod
@@ -1383,9 +1398,23 @@ class PortfolioBacktestEngine:
         return result
 
     @staticmethod
-    def _calc_index_return(regime_map: Optional[Dict[str, str]]) -> float:
-        """Placeholder — actual index return comes from regime_service.get_regime_summary()."""
-        return 0.0
+    def _calc_index_return(index_data: Optional[pd.DataFrame], start_date: str, end_date: str) -> float:
+        """Calculate index return over the backtest period for benchmark comparison."""
+        if index_data is None or index_data.empty:
+            return 0.0
+        try:
+            df = index_data.copy()
+            if "date" in df.columns:
+                df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
+            if len(df) < 2:
+                return 0.0
+            first_close = float(df.iloc[0]["close"])
+            last_close = float(df.iloc[-1]["close"])
+            if first_close <= 0:
+                return 0.0
+            return (last_close - first_close) / first_close * 100
+        except Exception:
+            return 0.0
 
     @staticmethod
     def _calc_max_drawdown(equity_curve: List[dict]) -> float:

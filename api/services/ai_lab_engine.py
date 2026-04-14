@@ -56,6 +56,24 @@ class ExperimentProgress:
             self.events.append(event)
             self._cond.notify_all()
 
+        # Forward to job_events for persistence (best-effort)
+        job_id = getattr(self, "_job_id", None)
+        if job_id:
+            try:
+                from api.services.job_manager import get_job_manager
+                jm = get_job_manager()
+                event_type = data.get("type", "log")
+                jm.emit_event(job_id, event_type, data)
+                # Update progress if available
+                if "progress" in data:
+                    jm.update_progress(
+                        job_id,
+                        int(data.get("progress", 0)),
+                        data.get("message", ""),
+                    )
+            except Exception:
+                pass  # non-critical
+
     def finish(self):
         """Mark the stream as complete (no more events)."""
         with self._cond:
@@ -168,6 +186,19 @@ class ExperimentRunner:
             self._progress[experiment_id] = progress
             self._start_times[experiment_id] = time.time()
 
+        # Create a job for tracking
+        from api.services.job_manager import get_job_manager
+        jm = get_job_manager()
+        job_id = jm.create(
+            "experiment",
+            f"Experiment #{experiment_id}",
+            triggered_by="api",
+            ref_type="experiment",
+            ref_id=experiment_id,
+        )
+        jm.start(job_id)
+        progress._job_id = job_id  # attach for event forwarding
+
         t = threading.Thread(
             target=self._run_in_thread,
             args=(experiment_id, progress),
@@ -189,10 +220,14 @@ class ExperimentRunner:
 
     def _run_in_thread(self, experiment_id: int, progress: ExperimentProgress):
         """Run experiment in a background thread with its own DB session."""
+        job_id = getattr(progress, "_job_id", None)
         db = SessionLocal()
         try:
             engine = AILabEngine(db)
             engine.run_experiment(experiment_id, progress)
+            if job_id:
+                from api.services.job_manager import get_job_manager
+                get_job_manager().succeed(job_id, f"Experiment #{experiment_id} done")
         except Exception as e:
             logger.error("Experiment %d crashed: %s", experiment_id, e, exc_info=True)
             try:
@@ -203,6 +238,9 @@ class ExperimentRunner:
             except Exception:
                 pass
             progress.push({"type": "error", "message": f"实验异常: {e}"})
+            if job_id:
+                from api.services.job_manager import get_job_manager
+                get_job_manager().fail(job_id, str(e)[:500])
         finally:
             progress.finish()
             db.close()
@@ -1182,8 +1220,17 @@ class AILabEngine:
         timer.daemon = True
         timer.start()
 
+        # Load index data for benchmark comparison
+        index_data = None
         try:
-            result = engine.run(strategy_dict, stock_data, regime_map=regime_map, cancel_event=cancel_event)
+            index_data = self.collector.get_daily_df("000001.SH", start_date, end_date, local_only=True)
+            if index_data is None:
+                index_data = self.collector.get_index_daily_df("000001.SH", start_date, end_date)
+        except Exception:
+            pass
+
+        try:
+            result = engine.run(strategy_dict, stock_data, regime_map=regime_map, cancel_event=cancel_event, index_data=index_data)
         except SignalExplosionError as e:
             strat.status = "invalid"
             strat.error_message = str(e)
