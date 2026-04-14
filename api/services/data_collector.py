@@ -1051,3 +1051,68 @@ class DataCollector:
                 logger.info("Index %s (%s) synced", info["name"], code)
             except Exception as e:
                 logger.warning("Index sync failed for %s: %s", code, e)
+
+    # ── Adj-factor recompute ─────────────────────────────
+
+    def recompute_adj_factors(self, stock_codes: list[str] | None = None) -> int:
+        """Recompute adj_factor for given stocks (or all if None).
+
+        Fetches fresh xdxr data from TDX and updates daily_prices rows
+        where the adj_factor has drifted beyond 0.0001.
+
+        Returns total rows updated.
+        """
+        from api.services.tdx_collector import TdxCollector
+        tdx = TdxCollector()
+
+        if stock_codes is None:
+            rows = self.db.query(DailyPrice.stock_code).distinct().all()
+            stock_codes = [r[0] for r in rows]
+
+        updated = 0
+        for i, code in enumerate(stock_codes):
+            try:
+                # Get existing dates for this stock
+                prices = (
+                    self.db.query(DailyPrice)
+                    .filter(DailyPrice.stock_code == code)
+                    .order_by(DailyPrice.trade_date)
+                    .all()
+                )
+                if not prices:
+                    continue
+
+                start = prices[0].trade_date.isoformat()
+                end = prices[-1].trade_date.isoformat()
+
+                # Fetch raw with fresh adj_factor
+                df = tdx.fetch_daily_raw(code, start, end)
+                if df is None or df.empty:
+                    continue
+
+                # Build date->adj_factor map
+                adj_map = {}
+                for _, row in df.iterrows():
+                    adj_map[row["date"]] = float(row["adj_factor"])
+
+                # Update DB
+                for p in prices:
+                    d_str = p.trade_date.isoformat()
+                    new_adj = adj_map.get(d_str)
+                    if new_adj is not None and abs((p.adj_factor or 1.0) - new_adj) > 0.0001:
+                        p.adj_factor = new_adj
+                        updated += 1
+
+                self.db.commit()
+            except Exception as e:
+                logger.warning("adj_factor recompute failed for %s: %s", code, e)
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
+
+            if (i + 1) % 100 == 0:
+                logger.info("adj_factor recompute progress: %d/%d stocks", i + 1, len(stock_codes))
+
+        logger.info("adj_factor recompute done: %d rows updated across %d stocks", updated, len(stock_codes))
+        return updated

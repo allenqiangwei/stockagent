@@ -150,6 +150,10 @@ class SignalScheduler:
             if now.hour == 20 and now.minute < 1 and not self._is_refreshing:
                 self._backfill_daily_basic(today)
 
+            # Sunday 03:00: full adj_factor recompute (weekly)
+            if now.weekday() == 6 and now.hour == 3 and now.minute < 1 and not self._is_refreshing:
+                self._recompute_all_adj_factors()
+
             # Check every 30 seconds
             for _ in range(30):
                 if not self._running:
@@ -179,6 +183,20 @@ class SignalScheduler:
                 db.close()
         except Exception as e:
             logger.warning("Daily basic backfill failed (non-fatal): %s", e)
+
+    def _recompute_all_adj_factors(self):
+        """Weekly full adj_factor recompute for all stocks."""
+        try:
+            from api.services.data_collector import DataCollector
+            db = SessionLocal()
+            try:
+                collector = DataCollector(db)
+                updated = collector.recompute_adj_factors(None)
+                logger.info("Weekly adj_factor recompute: %d rows updated", updated)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("Weekly adj_factor recompute failed: %s", e)
 
     def _do_refresh(self, trade_date: str):
         with self._lock:
