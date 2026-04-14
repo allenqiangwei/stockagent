@@ -99,11 +99,11 @@ def get_watchlist(db: Session = Depends(get_db)):
         date_str = None
         if prices:
             latest = prices[0]
-            close = float(latest.close)
+            close = float(latest.close * (latest.adj_factor or 1.0))
             td = latest.trade_date
             date_str = td.isoformat() if hasattr(td, 'isoformat') else str(td)
             if len(prices) >= 2:
-                prev_close = float(prices[1].close)
+                prev_close = float(prices[1].close * (prices[1].adj_factor or 1.0))
                 if prev_close > 0:
                     change_pct = round((close - prev_close) / prev_close * 100, 2)
         result.append(WatchlistItem(
@@ -196,9 +196,9 @@ def get_portfolio(db: Session = Depends(get_db)):
         market_value = None
         if prices:
             latest = prices[0]
-            close = float(latest.close)
+            close = float(latest.close * (latest.adj_factor or 1.0))
             if len(prices) >= 2:
-                prev_close = float(prices[1].close)
+                prev_close = float(prices[1].close * (prices[1].adj_factor or 1.0))
                 if prev_close > 0:
                     change_pct = round((close - prev_close) / prev_close * 100, 2)
             if p.avg_cost > 0:

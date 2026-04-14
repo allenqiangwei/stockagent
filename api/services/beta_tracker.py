@@ -18,7 +18,7 @@ def track_daily_holdings(db: Session, trade_date: str) -> int:
     if not holdings:
         return 0
 
-    from src.data_storage.database import DailyPrice, IndexDaily, Stock
+    from api.models.stock import DailyPrice, IndexDaily, Stock
 
     codes = [h.stock_code for h in holdings]
     prices = {
@@ -58,8 +58,10 @@ def track_daily_holdings(db: Session, trade_date: str) -> int:
         if existing:
             continue
 
+        _adj = float(price.adj_factor or 1.0)
+        _close = price.close * _adj
         entry_price = holding.buy_price or holding.avg_cost
-        cum_pnl = ((price.close - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+        cum_pnl = ((_close - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
 
         recent_prices = (
             db.query(DailyPrice)
@@ -70,8 +72,8 @@ def track_daily_holdings(db: Session, trade_date: str) -> int:
         )
         daily_ret = 0.0
         if len(recent_prices) >= 2:
-            prev_close = recent_prices[1].close
-            daily_ret = ((price.close - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+            prev_close = recent_prices[1].close * float(recent_prices[1].adj_factor or 1.0)
+            daily_ret = ((_close - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
 
         vol_ratio = None
         if len(recent_prices) >= 6:
@@ -91,7 +93,7 @@ def track_daily_holdings(db: Session, trade_date: str) -> int:
 
         news_count = 0
         try:
-            from src.data_storage.database import NewsEvent
+            from api.models.news_agent import NewsEvent
             news_count = db.query(NewsEvent).filter(NewsEvent.event_date == trade_date).count()
         except Exception:
             pass
@@ -100,7 +102,7 @@ def track_daily_holdings(db: Session, trade_date: str) -> int:
             holding_id=holding.id,
             stock_code=code,
             track_date=trade_date,
-            close_price=price.close,
+            close_price=_close,
             daily_return_pct=round(daily_ret, 4),
             cumulative_pnl_pct=round(cum_pnl, 4),
             volume=price.volume,

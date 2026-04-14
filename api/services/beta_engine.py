@@ -103,6 +103,59 @@ def capture_beta_snapshots(
     return snapshot_ids
 
 
+def capture_signal_snapshot(
+    db: Session,
+    stock_code: str,
+    stock_name: str,
+    snapshot_date: str,
+    features: dict,
+    strategy_family: str | None = None,
+) -> int | None:
+    """Lightweight snapshot for the signal pipeline (beta_scorer).
+
+    Reuses already-computed beta context from score_and_create_plans()
+    and supplements with ML features for XGBoost training.
+    Does NOT commit — caller handles the transaction.
+
+    Returns snapshot ID or None on failure.
+    """
+    try:
+        stock = _get_stock(db, stock_code)
+        valuation = _get_latest_valuation(db, stock_code, snapshot_date)
+        ml_features = _compute_ml_features(db, stock_code, snapshot_date, valuation)
+
+        snap = BetaSnapshot(
+            stock_code=stock_code,
+            stock_name=stock_name,
+            snapshot_date=snapshot_date,
+            market_regime=features.get("regime_code"),
+            market_sentiment=features.get("market_sentiment"),
+            industry=stock.industry if stock else None,
+            sector_heat_score=features.get("sector_heat_score"),
+            pe=features.get("pe") or (valuation.pe if valuation else None),
+            pb=valuation.pb if valuation else None,
+            market_cap=valuation.total_mv if valuation else None,
+            turnover_rate=features.get("turnover_rate") or (valuation.turnover_rate if valuation else None),
+            action="buy",
+            alpha_score=features.get("alpha_score"),
+            final_score=features.get("alpha_score"),
+            strategy_family=strategy_family,
+            entry_price=ml_features.get("entry_price"),
+            day_of_week=ml_features.get("day_of_week"),
+            stock_return_5d=ml_features.get("stock_return_5d"),
+            stock_volatility_20d=ml_features.get("stock_volatility_20d"),
+            volume_ratio_5d=ml_features.get("volume_ratio_5d"),
+            index_return_5d=ml_features.get("index_return_5d"),
+            index_return_20d=ml_features.get("index_return_20d"),
+        )
+        db.add(snap)
+        db.flush()
+        return snap.id
+    except Exception as e:
+        logger.warning("Signal snapshot failed for %s: %s", stock_code, e)
+        return None
+
+
 # ── Stage 2: Review ──────────────────────────────────────
 
 _BETA_REVIEW_PROMPT = """\
@@ -141,23 +194,35 @@ _BETA_REVIEW_PROMPT = """\
 
 
 def create_beta_review(db: Session, review) -> Optional[BetaReview]:
-    """Create structured beta factor review for a completed trade.
+    """Create beta factor review for a completed trade.
 
-    Called after BotTradeReview is created in _create_review().
-    Uses DeepSeek for cost-effective structured evaluation.
+    Always creates a basic BetaReview with is_profitable (for XGBoost training).
+    DeepSeek factor evaluation is attempted but failure is non-fatal.
+    Does NOT commit — caller handles the transaction.
     """
-    # Find entry snapshot
+    # Find entry snapshot — window match (snapshot at signal T, buy at T+1)
+    window_start = review.first_buy_date
+    try:
+        from datetime import date as _d
+        buy_d = _d.fromisoformat(review.first_buy_date)
+        window_start = (buy_d - timedelta(days=3)).isoformat()
+    except (ValueError, TypeError):
+        pass
+
     entry_snap = (
         db.query(BetaSnapshot)
         .filter(
             BetaSnapshot.stock_code == review.stock_code,
-            BetaSnapshot.snapshot_date == review.first_buy_date,
+            BetaSnapshot.snapshot_date >= window_start,
+            BetaSnapshot.snapshot_date <= review.first_buy_date,
             BetaSnapshot.action == "buy",
         )
+        .order_by(BetaSnapshot.snapshot_date.desc())
         .first()
     )
     if not entry_snap:
-        logger.info("No beta snapshot at entry for %s — skipping beta review", review.stock_code)
+        logger.info("No beta snapshot for %s near %s — skipping beta review",
+                     review.stock_code, review.first_buy_date)
         return None
 
     # Infer exit reason from trades
@@ -168,52 +233,58 @@ def create_beta_review(db: Session, review) -> Optional[BetaReview]:
         if sells:
             exit_reason = sells[-1].get("sell_reason", "ai_recommend") or "ai_recommend"
 
-    prompt = _BETA_REVIEW_PROMPT.format(
-        stock_code=review.stock_code,
-        stock_name=review.stock_name,
-        buy_date=review.first_buy_date,
-        sell_date=review.last_sell_date,
-        hold_days=review.holding_days,
-        pnl_pct=review.pnl_pct,
-        exit_reason=exit_reason,
-        regime=entry_snap.market_regime or "unknown",
-        regime_conf=(entry_snap.market_regime_confidence or 0) * 100,
-        market_sentiment=entry_snap.market_sentiment or "N/A",
-        stock_sentiment=entry_snap.stock_sentiment or "N/A",
-        industry=entry_snap.industry or "unknown",
-        sector_heat=entry_snap.sector_heat_score or "N/A",
-        sector_trend=entry_snap.sector_trend or "flat",
-        pe=entry_snap.pe or "N/A",
-        pb=entry_snap.pb or "N/A",
-        turnover=entry_snap.turnover_rate or "N/A",
-        events=json.dumps(entry_snap.active_events or [], ensure_ascii=False)[:500],
-        ai_reasoning=(entry_snap.ai_reasoning or "")[:300],
-    )
+    is_profitable = review.pnl_pct > 0 if review.pnl_pct is not None else None
 
-    result = _call_deepseek(prompt)
-    if not result:
-        logger.warning("DeepSeek beta review failed for %s", review.stock_code)
-        return None
-
+    # Create basic review (always succeeds — XGBoost only needs this)
     beta_review = BetaReview(
         review_id=review.id,
         stock_code=review.stock_code,
         pnl_pct=review.pnl_pct,
         holding_days=review.holding_days,
         exit_reason=exit_reason,
-        regime_accuracy=result.get("regime", {}).get("score", 0),
-        sentiment_accuracy=result.get("sentiment", {}).get("score", 0),
-        sector_heat_accuracy=result.get("sector_heat", {}).get("score", 0),
-        news_event_accuracy=result.get("news_events", {}).get("score", 0),
-        valuation_accuracy=result.get("valuation", {}).get("score", 0),
-        factor_details=result,
-        key_lesson=result.get("key_lesson", ""),
         entry_snapshot_id=entry_snap.id,
+        is_profitable=is_profitable,
     )
     db.add(beta_review)
-    db.commit()
-    logger.info("Beta review created for %s (pnl=%.1f%%): %s",
-                review.stock_code, review.pnl_pct, beta_review.key_lesson[:80])
+    db.flush()
+
+    # Try DeepSeek factor evaluation (non-fatal — enriches review but not required)
+    try:
+        prompt = _BETA_REVIEW_PROMPT.format(
+            stock_code=review.stock_code,
+            stock_name=review.stock_name,
+            buy_date=review.first_buy_date,
+            sell_date=review.last_sell_date,
+            hold_days=review.holding_days,
+            pnl_pct=review.pnl_pct,
+            exit_reason=exit_reason,
+            regime=entry_snap.market_regime or "unknown",
+            regime_conf=(entry_snap.market_regime_confidence or 0) * 100,
+            market_sentiment=entry_snap.market_sentiment or "N/A",
+            stock_sentiment=entry_snap.stock_sentiment or "N/A",
+            industry=entry_snap.industry or "unknown",
+            sector_heat=entry_snap.sector_heat_score or "N/A",
+            sector_trend=entry_snap.sector_trend or "flat",
+            pe=entry_snap.pe or "N/A",
+            pb=entry_snap.pb or "N/A",
+            turnover=entry_snap.turnover_rate or "N/A",
+            events=json.dumps(entry_snap.active_events or [], ensure_ascii=False)[:500],
+            ai_reasoning=(entry_snap.ai_reasoning or "")[:300],
+        )
+        result = _call_deepseek(prompt)
+        if result:
+            beta_review.regime_accuracy = result.get("regime", {}).get("score", 0)
+            beta_review.sentiment_accuracy = result.get("sentiment", {}).get("score", 0)
+            beta_review.sector_heat_accuracy = result.get("sector_heat", {}).get("score", 0)
+            beta_review.news_event_accuracy = result.get("news_events", {}).get("score", 0)
+            beta_review.valuation_accuracy = result.get("valuation", {}).get("score", 0)
+            beta_review.factor_details = result
+            beta_review.key_lesson = result.get("key_lesson", "")
+    except Exception as e:
+        logger.warning("DeepSeek beta review failed for %s (non-fatal): %s", review.stock_code, e)
+
+    logger.info("Beta review: %s pnl=%.1f%% profitable=%s",
+                review.stock_code, review.pnl_pct, is_profitable)
     return beta_review
 
 
@@ -505,7 +576,7 @@ def _get_active_events(db: Session, code: str, industry: str, report_date: str) 
 
 def _compute_ml_features(db: Session, code: str, report_date: str, valuation) -> dict:
     """Compute ML feature columns for a beta snapshot."""
-    from src.data_storage.database import DailyPrice, IndexDaily
+    from api.models.stock import DailyPrice, IndexDaily
     import numpy as np
 
     features: dict = {"day_of_week": datetime.now().weekday()}
@@ -521,10 +592,12 @@ def _compute_ml_features(db: Session, code: str, report_date: str, valuation) ->
         )
 
         if prices:
-            features["entry_price"] = prices[0].close
+            features["entry_price"] = prices[0].close * (prices[0].adj_factor or 1.0)
 
             if len(prices) >= 6:
-                ret_5d = (prices[0].close - prices[5].close) / prices[5].close * 100
+                _c0 = prices[0].close * (prices[0].adj_factor or 1.0)
+                _c5 = prices[5].close * (prices[5].adj_factor or 1.0)
+                ret_5d = (_c0 - _c5) / _c5 * 100
                 features["stock_return_5d"] = round(ret_5d, 4)
 
                 avg_vol_5 = sum(p.volume for p in prices[:5]) / 5
@@ -533,21 +606,29 @@ def _compute_ml_features(db: Session, code: str, report_date: str, valuation) ->
 
             if len(prices) >= 21:
                 returns = [
-                    (prices[i].close - prices[i + 1].close) / prices[i + 1].close
+                    (prices[i].close * (prices[i].adj_factor or 1.0) - prices[i + 1].close * (prices[i + 1].adj_factor or 1.0)) / (prices[i + 1].close * (prices[i + 1].adj_factor or 1.0))
                     for i in range(20)
                     if prices[i + 1].close > 0
                 ]
                 if returns:
                     features["stock_volatility_20d"] = round(float(np.std(returns)) * 100, 4)
 
-        # Get index returns (上证指数 000001)
+        # Get index returns (上证指数 — try both "000001.SH" and "000001")
         idx_prices = (
             db.query(IndexDaily)
-            .filter(IndexDaily.index_code == "000001", IndexDaily.trade_date <= report_date)
+            .filter(IndexDaily.index_code == "000001.SH", IndexDaily.trade_date <= report_date)
             .order_by(IndexDaily.trade_date.desc())
             .limit(21)
             .all()
         )
+        if not idx_prices:
+            idx_prices = (
+                db.query(IndexDaily)
+                .filter(IndexDaily.index_code == "000001", IndexDaily.trade_date <= report_date)
+                .order_by(IndexDaily.trade_date.desc())
+                .limit(21)
+                .all()
+            )
 
         if idx_prices and len(idx_prices) >= 6:
             idx_ret_5d = (idx_prices[0].close - idx_prices[5].close) / idx_prices[5].close * 100

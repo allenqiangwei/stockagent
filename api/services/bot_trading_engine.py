@@ -57,7 +57,7 @@ def _get_prev_close(db: Session, stock_code: str, report_date: str) -> float | N
         .order_by(DailyPrice.trade_date.desc())
         .first()
     )
-    return round(row.close, 2) if row and row.close else None
+    return round(row.close * (row.adj_factor or 1.0), 2) if row and row.close else None
 
 
 def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:  # noqa: C901
@@ -93,9 +93,10 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:  # noqa
         if not ohlcv:
             continue
 
-        open_p = float(ohlcv.open)
-        high = float(ohlcv.high)
-        low = float(ohlcv.low)
+        _adj = float(ohlcv.adj_factor or 1.0)
+        open_p = float(ohlcv.open) * _adj
+        high = float(ohlcv.high) * _adj
+        low = float(ohlcv.low) * _adj
 
         # Previous close for limit prices
         prev_row = (
@@ -106,7 +107,7 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:  # noqa
         )
         if not prev_row:
             continue
-        limit_up, limit_down = calc_limit_prices(h.stock_code, float(prev_row.close))
+        limit_up, limit_down = calc_limit_prices(h.stock_code, float(prev_row.close) * float(prev_row.adj_factor or 1.0))
 
         # T+1: cannot sell stocks bought today
         bought_today = db.query(BotTrade).filter(
@@ -185,7 +186,7 @@ def monitor_exit_conditions(db: Session, trade_date: str) -> list[dict]:  # noqa
                 if next_td:
                     _upsert_plan(
                         db, h.stock_code, h.stock_name, "sell",
-                        float(ohlcv.close), h.quantity, 100.0, next_td,
+                        float(ohlcv.close) * _adj, h.quantity, 100.0, next_td,
                         f"最长持有{mhd}天到期(已持有{hold_days}天)",
                         None, source="max_hold", strategy_id=strat_id,
                     )
@@ -365,9 +366,10 @@ def execute_pending_plans(db: Session, trade_date: str) -> list[dict]:
             logger.info("Plan EXPIRED (no data): %s %s %s", plan.direction, plan.stock_code, plan.stock_name)
             continue
 
-        high = float(ohlcv.high)
-        low = float(ohlcv.low)
-        open_price = float(ohlcv.open)
+        _adj = float(ohlcv.adj_factor or 1.0)
+        high = float(ohlcv.high) * _adj
+        low = float(ohlcv.low) * _adj
+        open_price = float(ohlcv.open) * _adj
 
         if plan.direction == "buy":
             triggered = low <= plan.plan_price
@@ -444,15 +446,61 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
         logger.warning("Bot buy skipped: no valid target_price for %s", code)
         return None
 
-    # Rule: same stock can only be bought once per day
-    already_bought = (
-        db.query(BotTrade)
-        .filter(BotTrade.stock_code == code, BotTrade.action == "buy", BotTrade.trade_date == trade_date)
-        .first()
+    # Rule 1: same (stock, strategy) can only be bought once per day
+    already_bought_q = db.query(BotTrade).filter(
+        BotTrade.stock_code == code, BotTrade.action == "buy", BotTrade.trade_date == trade_date,
     )
-    if already_bought:
-        logger.info("Bot buy skipped: %s already bought on %s", code, trade_date)
+    if strategy_id:
+        already_bought_q = already_bought_q.filter(BotTrade.strategy_id == strategy_id)
+    else:
+        already_bought_q = already_bought_q.filter(BotTrade.strategy_id.is_(None))
+    if already_bought_q.first():
+        logger.info("Bot buy skipped: %s (strategy_id=%s) already bought on %s", code, strategy_id, trade_date)
         return None
+
+    # Rule 2: same indicator family cannot hold the same stock twice.
+    # Two strategies from the same family (e.g. two MACD+RSI variants) produce
+    # essentially the same signal — double-buying wastes capital and doubles risk.
+    # Check BOTH portfolio (committed holdings) AND today's trades (uncommitted in same tx).
+    if strategy_id:
+        from api.models.strategy import Strategy
+        from api.services.strategy_pool import extract_indicator_family
+        strat_obj = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+        if strat_obj:
+            family = strat_obj.indicator_family or extract_indicator_family(strat_obj.buy_conditions)
+
+            # Check 1: existing portfolio holdings (covers committed data)
+            existing_holdings = (
+                db.query(BotPortfolio)
+                .filter(BotPortfolio.stock_code == code, BotPortfolio.quantity > 0)
+                .all()
+            )
+            for h in existing_holdings:
+                if h.strategy_id and h.strategy_id != strategy_id:
+                    other_strat = db.query(Strategy).filter(Strategy.id == h.strategy_id).first()
+                    if other_strat:
+                        other_family = other_strat.indicator_family or extract_indicator_family(other_strat.buy_conditions)
+                        if other_family == family:
+                            logger.info("Bot buy skipped: %s already held by same family '%s' (strategy %d vs %d)",
+                                        code, family, h.strategy_id, strategy_id)
+                            return None
+
+            # Check 2: today's buy trades in same transaction (covers unflushed adds)
+            today_buys = (
+                db.query(BotTrade)
+                .filter(BotTrade.stock_code == code, BotTrade.action == "buy",
+                        BotTrade.trade_date == trade_date)
+                .all()
+            )
+            for tb in today_buys:
+                if tb.strategy_id and tb.strategy_id != strategy_id:
+                    other_strat = db.query(Strategy).filter(Strategy.id == tb.strategy_id).first()
+                    if other_strat:
+                        other_family = other_strat.indicator_family or extract_indicator_family(other_strat.buy_conditions)
+                        if other_family == family:
+                            logger.info("Bot buy skipped: %s already bought today by same family '%s' (strategy %d vs %d)",
+                                        code, family, tb.strategy_id, strategy_id)
+                            return None
 
     quantity = math.floor(BUY_AMOUNT / price / 100) * 100  # Round to lots of 100
     if quantity <= 0:
@@ -466,7 +514,7 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
         from api.models.strategy import Strategy
         strat = db.query(Strategy).filter(Strategy.id == strategy_id).first()
         if strat:
-            strat_name = strat.name
+            strat_name = strat.name[:500] if strat.name else None
             if not exit_config and strat.exit_config:
                 exit_config = strat.exit_config
 
@@ -524,8 +572,10 @@ def _execute_buy(db: Session, code: str, name: str, price: float | None, reason:
         thinking=reason,
         report_id=report_id,
         trade_date=trade_date,
+        strategy_id=strategy_id,
     )
     db.add(trade)
+    db.flush()  # Make holding + trade visible to subsequent Rule 2 checks in same tx
 
     logger.info("Bot BUY: %s %s × %d @ ¥%.2f = ¥%.0f (strategy=%s)", code, name, quantity, price, amount, strat_name or "none")
     return {"action": "buy", "stock_code": code, "quantity": quantity, "price": price, "amount": amount}
@@ -584,6 +634,7 @@ def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_p
         report_id=report_id,
         trade_date=trade_date,
         sell_reason=sell_reason or "ai_recommend",
+        strategy_id=strategy_id,
     )
     db.add(trade)
 
@@ -595,7 +646,13 @@ def _execute_sell(db: Session, code: str, name: str, price: float | None, sell_p
 
     if fully_exited:
         db.flush()  # Ensure the sell trade is visible to _create_review's query
-        _create_review(db, code, name, trade_date, holding_id=holding.id)
+        _create_review(
+            db, code, name, trade_date,
+            holding_id=holding.id,
+            strategy_id=strategy_id,
+            first_buy_date=holding.first_buy_date,
+            exit_reason=sell_reason,
+        )
         db.delete(holding)
 
     return {"action": action, "stock_code": code, "quantity": sell_qty, "price": price, "amount": amount, "fully_exited": fully_exited}
@@ -625,14 +682,24 @@ def _execute_hold(db: Session, code: str, name: str, price: float | None, reason
 
 
 def _create_review(db: Session, code: str, name: str, last_sell_date: str,
-                   *, holding_id: int | None = None):
-    """Create a trade review record after fully exiting a position."""
-    trades = (
-        db.query(BotTrade)
-        .filter(BotTrade.stock_code == code)
-        .order_by(BotTrade.trade_date, BotTrade.id)
-        .all()
-    )
+                   *, holding_id: int | None = None, strategy_id: int | None = None,
+                   first_buy_date: str | None = None, exit_reason: str | None = None):
+    """Create a trade review for ONE complete trade cycle (buy→sell).
+
+    Only includes trades from this holding period (first_buy_date onwards),
+    filtered by strategy_id. Each review = one independent position lifecycle.
+    """
+    trades_q = db.query(BotTrade).filter(BotTrade.stock_code == code)
+    if strategy_id:
+        trades_q = trades_q.filter(BotTrade.strategy_id == strategy_id)
+    else:
+        trades_q = trades_q.filter(BotTrade.strategy_id.is_(None))
+
+    # Only include trades from this holding cycle — not historical ones
+    if first_buy_date:
+        trades_q = trades_q.filter(BotTrade.trade_date >= first_buy_date)
+
+    trades = trades_q.order_by(BotTrade.trade_date, BotTrade.id).all()
     if not trades:
         return
 
@@ -641,14 +708,14 @@ def _create_review(db: Session, code: str, name: str, last_sell_date: str,
     pnl = sell_amount - buy_amount
     pnl_pct = (pnl / buy_amount * 100) if buy_amount > 0 else 0.0
 
-    first_buy = next((t for t in trades if t.action == "buy"), None)
-    first_buy_date = first_buy.trade_date if first_buy else ""
+    actual_first_buy = next((t for t in trades if t.action == "buy"), None)
+    actual_first_buy_date = actual_first_buy.trade_date if actual_first_buy else (first_buy_date or "")
 
     holding_days = 0
-    if first_buy_date and last_sell_date:
+    if actual_first_buy_date and last_sell_date:
         try:
             from datetime import date
-            d1 = date.fromisoformat(first_buy_date)
+            d1 = date.fromisoformat(actual_first_buy_date)
             d2 = date.fromisoformat(last_sell_date)
             holding_days = (d2 - d1).days
         except ValueError:
@@ -663,6 +730,8 @@ def _create_review(db: Session, code: str, name: str, last_sell_date: str,
             "amount": t.amount,
             "thinking": t.thinking,
             "trade_date": t.trade_date,
+            "strategy_id": t.strategy_id,
+            "sell_reason": t.sell_reason,
         }
         for t in trades
     ]
@@ -674,12 +743,14 @@ def _create_review(db: Session, code: str, name: str, last_sell_date: str,
         total_sell_amount=sell_amount,
         pnl=round(pnl, 2),
         pnl_pct=round(pnl_pct, 2),
-        first_buy_date=first_buy_date,
+        first_buy_date=actual_first_buy_date,
         last_sell_date=last_sell_date,
         holding_days=holding_days,
-        review_thinking="",  # Will be filled by Claude review job
+        review_thinking="",
         memory_synced=False,
         trades=trades_snapshot,
+        strategy_id=strategy_id,
+        exit_reason=exit_reason,
     )
     db.add(review)
     db.flush()
@@ -692,3 +763,10 @@ def _create_review(db: Session, code: str, name: str, last_sell_date: str,
             aggregate_trajectory(db, review.id, holding_id, code)
         except Exception as e:
             logger.warning("Beta trajectory aggregation failed for %s: %s", code, e)
+
+    # Create beta review (links snapshot → outcome for XGBoost training)
+    try:
+        from api.services.beta_engine import create_beta_review
+        create_beta_review(db, review)
+    except Exception as e:
+        logger.warning("Beta review creation failed for %s: %s", code, e)

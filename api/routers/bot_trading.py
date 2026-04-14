@@ -41,10 +41,10 @@ def _latest_close(db: Session, code: str) -> tuple[float | None, float | None]:
     )
     if not rows:
         return None, None
-    close = float(rows[0].close)
+    close = float(rows[0].close * (rows[0].adj_factor or 1.0))
     change_pct = None
     if len(rows) >= 2:
-        prev = float(rows[1].close)
+        prev = float(rows[1].close * (rows[1].adj_factor or 1.0))
         if prev > 0:
             change_pct = round((close - prev) / prev * 100, 2)
     return close, change_pct
@@ -250,6 +250,8 @@ def list_reviews(
             holding_days=r.holding_days, review_thinking=r.review_thinking,
             memory_synced=r.memory_synced, memory_note_id=r.memory_note_id,
             trades=r.trades,
+            strategy_id=r.strategy_id,
+            exit_reason=r.exit_reason,
             created_at=r.created_at.isoformat() if r.created_at else "",
         )
         for r in rows
@@ -275,12 +277,15 @@ def _get_today_prices(db: Session, stock_codes: list[str]) -> dict:
     found_codes = set()
     for row in rows:
         if row.close:
-            change_pct = ((row.close - row.open) / row.open * 100) if row.open else 0.0
+            _adj = float(row.adj_factor or 1.0)
+            _close = row.close * _adj
+            _open = row.open * _adj if row.open else 0
+            change_pct = ((_close - _open) / _open * 100) if _open else 0.0
             result[row.stock_code] = {
-                "close": round(row.close, 2),
+                "close": round(_close, 2),
                 "change_pct": round(change_pct, 2),
-                "high": round(row.high, 2) if row.high else None,
-                "low": round(row.low, 2) if row.low else None,
+                "high": round(row.high * _adj, 2) if row.high else None,
+                "low": round(row.low * _adj, 2) if row.low else None,
                 "is_today": True,
             }
             found_codes.add(row.stock_code)
@@ -302,12 +307,15 @@ def _get_today_prices(db: Session, stock_codes: list[str]) -> dict:
         )
         for row in fallback_rows:
             if row.close:
-                change_pct = ((row.close - row.open) / row.open * 100) if row.open else 0.0
+                _adj = float(row.adj_factor or 1.0)
+                _close = row.close * _adj
+                _open = row.open * _adj if row.open else 0
+                change_pct = ((_close - _open) / _open * 100) if _open else 0.0
                 result[row.stock_code] = {
-                    "close": round(row.close, 2),
+                    "close": round(_close, 2),
                     "change_pct": round(change_pct, 2),
-                    "high": round(row.high, 2) if row.high else None,
-                    "low": round(row.low, 2) if row.low else None,
+                    "high": round(row.high * _adj, 2) if row.high else None,
+                    "low": round(row.low * _adj, 2) if row.low else None,
                     "is_today": False,
                     "price_date": row.trade_date.isoformat() if hasattr(row.trade_date, 'isoformat') else str(row.trade_date),
                 }

@@ -1,6 +1,8 @@
 """Signals router — today signals, history, generate, SSE stream."""
 
-from datetime import datetime
+import json
+import logging
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -8,6 +10,8 @@ from sqlalchemy.orm import Session
 
 from api.models.base import get_db
 from api.services.signal_engine import SignalEngine
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/signals", tags=["signals"])
 
@@ -122,9 +126,14 @@ def generate_signals(
 
     engine = SignalEngine(db)
     signals = engine.generate_signals(date, stock_codes, strategy_ids=sid_list)
+
+    # Auto-create trade plans from all buy signals
+    plans_created = _create_plans_from_signals(db, date)
+
     return {
         "trade_date": date,
         "generated": len(signals),
+        "plans_created": plans_created,
         "items": signals,
     }
 
@@ -134,13 +143,25 @@ def generate_signals_stream(
     date: str = Query("", description="YYYY-MM-DD, default today"),
     db: Session = Depends(get_db),
 ):
-    """Trigger signal generation with SSE progress streaming."""
+    """Trigger signal generation with SSE progress streaming.
+
+    After all signals are generated, automatically creates trade plans
+    from buy signals via beta_scorer.
+    """
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
 
     engine = SignalEngine(db)
+
+    def _stream_then_create_plans():
+        for event_str in engine.generate_signals_stream(date):
+            yield event_str
+        # After stream completes, create trade plans from signals
+        plans_created = _create_plans_from_signals(db, date)
+        yield f"data: {json.dumps({'type': 'plans_created', 'count': plans_created})}\n\n"
+
     return StreamingResponse(
-        engine.generate_signals_stream(date),
+        _stream_then_create_plans(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -148,3 +169,114 @@ def generate_signals_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _create_sell_plans_from_signals(db: Session, trade_date: str, plan_date: str) -> int:
+    """Create sell trade plans from sell signals for the given trade_date → plan_date.
+
+    Called by both the route handler and the daily scheduler.
+    Returns the number of new sell plans created.
+    """
+    from datetime import date as _date
+    from api.models.signal import TradingSignal
+    from api.models.bot_trading import BotPortfolio, BotTradePlan
+    from api.models.stock import DailyPrice
+
+    sell_signals = db.query(TradingSignal).filter(
+        TradingSignal.trade_date == trade_date,
+        TradingSignal.market_regime == "sell",
+    ).all()
+    sell_codes = {s.stock_code for s in sell_signals}
+    sig_reasons_raw: dict[str, str] = {s.stock_code: (s.reasons or "[]") for s in sell_signals}
+
+    if not sell_codes:
+        return 0
+
+    price_map = {r.stock_code: float(r.close * (r.adj_factor or 1.0)) for r in db.query(DailyPrice).filter(
+        DailyPrice.trade_date == _date.fromisoformat(trade_date),
+        DailyPrice.stock_code.in_(sell_codes),
+    ).all()}
+
+    holdings = db.query(BotPortfolio).filter(
+        BotPortfolio.stock_code.in_(sell_codes)
+    ).all()
+
+    sell_created = 0
+    for h in holdings:
+        price = price_map.get(h.stock_code, h.avg_cost)
+        if not price or price <= 0:
+            continue
+        q = db.query(BotTradePlan).filter(
+            BotTradePlan.stock_code == h.stock_code,
+            BotTradePlan.direction == "sell",
+            BotTradePlan.status == "pending",
+        )
+        if h.strategy_id:
+            q = q.filter(BotTradePlan.strategy_id == h.strategy_id)
+        if not q.first():
+            reasons_list = json.loads(sig_reasons_raw.get(h.stock_code, "[]")) if sig_reasons_raw else []
+            if reasons_list:
+                count_part = reasons_list[0] if reasons_list else ""
+                cond_parts = "、".join(reasons_list[1:]) if len(reasons_list) > 1 else ""
+                thinking = (
+                    f"[卖出信号] {count_part} | 触发条件: {cond_parts} | trade_date={trade_date}"
+                    if cond_parts else
+                    f"[卖出信号] {count_part} | trade_date={trade_date}"
+                )
+            else:
+                thinking = f"[卖出信号] 策略卖出条件触发 | trade_date={trade_date}"
+            db.add(BotTradePlan(
+                stock_code=h.stock_code,
+                stock_name=h.stock_name,
+                direction="sell",
+                plan_price=price,
+                quantity=h.quantity,
+                sell_pct=100.0,
+                plan_date=plan_date,
+                status="pending",
+                thinking=thinking,
+                source="sell_condition",
+                strategy_id=h.strategy_id,
+            ))
+            sell_created += 1
+    db.commit()
+    logger.info("Auto-created %d sell plans for %s from sell signals on %s", sell_created, plan_date, trade_date)
+    return sell_created
+
+
+def _create_plans_from_signals(db: Session, trade_date: str) -> int:
+    """Create buy + sell trade plans from signals.
+
+    Buy plans: via beta scorer (scored/ranked).
+    Sell plans: one per portfolio position whose sell condition triggered.
+    """
+    from datetime import date as _date
+    plan_date_dt = datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=1)
+    d = _date.fromisoformat(plan_date_dt.strftime("%Y-%m-%d"))
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    plan_date = d.isoformat()
+
+    total = 0
+
+    # ── Buy plans via beta scorer ──
+    try:
+        from api.services.beta_scorer import score_and_create_plans
+        plans = score_and_create_plans(db, trade_date, plan_date)
+        total += len(plans)
+        logger.info("Auto-created %d buy plans for %s from signals on %s", len(plans), plan_date, trade_date)
+    except Exception as e:
+        logger.error("Buy plan creation failed: %s", e)
+
+    # ── Sell plans from sell signals ──
+    try:
+        sell_count = _create_sell_plans_from_signals(db, trade_date, plan_date)
+        total += sell_count
+    except Exception as e:
+        logger.error("Sell plan creation failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    return total
