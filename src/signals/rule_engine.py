@@ -606,54 +606,10 @@ def evaluate_conditions(
         return any_triggered, triggered_labels
 
 
-# ── 已知指标取值范围 ─────────────────────────────────────
-FIELD_RANGES: Dict[str, Tuple[float, float]] = {
-    "RSI": (0, 100),
-    "KDJ_K": (0, 100),
-    "KDJ_D": (0, 100),
-    "KDJ_J": (-20, 120),
-    "STOCHRSI_K": (0, 100),
-    "STOCHRSI_D": (0, 100),
-    "BOLL_pband": (0, 1),
-    "ADX": (0, 100),
-    "ADX_plus_di": (0, 100),
-    "ADX_minus_di": (0, 100),
-    "MFI": (0, 100),
-    "WR": (-100, 0),
-    "CCI": (-500, 500),
-    "ULTOSC": (0, 100),
-    "STOCH_K": (0, 100),
-    "STOCH_D": (0, 100),
-    "NEWS_SENTIMENT_3D": (-1.0, 1.0),
-    "NEWS_SENTIMENT_7D": (-1.0, 1.0),
-    # Quantitative Factors
-    "MOM": (-100, 500),
-    "REALVOL": (0, 30),
-    "REALVOL_skew": (-5, 5),
-    "REALVOL_kurt": (-5, 30),
-    "REALVOL_downside": (0, 30),
-    "KBAR_upper_shadow": (0, 1),
-    "KBAR_lower_shadow": (0, 1),
-    "KBAR_body_ratio": (0, 1),
-    "KBAR_amplitude": (0, 0.3),
-    "KBAR_overnight_ret": (-15, 15),
-    "KBAR_intraday_ret": (-15, 15),
-    "PVOL_corr": (-1, 1),
-    "PVOL_amount_conc": (0, 1),
-    "PVOL_vwap_bias": (-20, 20),
-    "LIQ_amihud": (0, 100),
-    "LIQ_turnover_vol": (0, 5),
-    "LIQ_log_amount": (0, 30),
-    "PPOS_close_pos": (0, 1),
-    "PPOS_high_dist": (-50, 0),
-    "PPOS_low_dist": (0, 200),
-    "PPOS_drawdown": (-50, 0),
-    "PPOS_consec_dir": (-15, 15),
-    "RSTR": (-50, 100),
-    "RSTR_weighted": (-10, 10),
-    "AMPVOL_std": (0, 0.2),
-    "AMPVOL_parkinson": (0, 20),
-}
+# ── 已知指标取值范围（dynamic from factor registry） ─────
+from src.factors.registry import get_all_field_ranges as _get_factor_ranges
+
+FIELD_RANGES: Dict[str, Tuple[float, float]] = _get_factor_ranges()
 
 
 def _get_field_range(field: str) -> Optional[Tuple[float, float]]:
