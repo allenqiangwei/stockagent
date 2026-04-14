@@ -394,6 +394,148 @@ class TdxCollector:
         data = data.reset_index()
         return data
 
+    # ── Daily K-lines with raw prices + adj_factor ─────
+
+    def fetch_daily_raw(
+        self, stock_code: str, start_date: str, end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """Fetch daily raw OHLCV + adj_factor (NOT forward-adjusted).
+
+        Args:
+            stock_code: 6-digit code like "000001"
+            start_date: YYYY-MM-DD
+            end_date: YYYY-MM-DD
+
+        Returns:
+            DataFrame with columns: date, open, high, low, close, volume, adj_factor
+        """
+        market = self._code_to_market(stock_code)
+
+        # Calculate how many pages we need (700 bars per page)
+        try:
+            d_start = datetime.date.fromisoformat(start_date)
+            d_end = datetime.date.fromisoformat(end_date)
+            days = (d_end - d_start).days
+            pages = max(2, ceil(days / 500))  # ~500 trading days per 700 calendar days
+            pages = min(pages, 12)  # Cap at 12 pages (8400 bars)
+        except Exception:
+            pages = 4
+
+        try:
+            with self._connect() as client:
+                # Fetch raw K-line data (paginated)
+                frames = []
+                for i in range(1, pages + 1):
+                    data = client.to_df(
+                        client.get_security_bars(9, market, stock_code, (i - 1) * 700, 700)
+                    )
+                    if data is None or len(data) == 0:
+                        break
+                    frames.append(data)
+
+                if not frames:
+                    return None
+
+                ks = pd.concat(frames, axis=0, sort=False)
+                if len(ks) == 0:
+                    return None
+
+                ks["date"] = pd.to_datetime(ks["datetime"])
+                ks = ks.drop_duplicates(["date"], keep="last").sort_values("date")
+
+                # Fetch xdxr info for adjustment factor computation
+                xdxr = client.to_df(client.get_xdxr_info(market, stock_code))
+                if len(xdxr) > 0:
+                    xdxr["date"] = pd.to_datetime(
+                        xdxr["year"].astype(str) + "-"
+                        + xdxr["month"].astype(str) + "-"
+                        + xdxr["day"].astype(str)
+                    )
+
+                # Compute adjustment factor (without modifying OHLC)
+                adj_series = self._compute_adj_factor(ks, xdxr)
+
+                # Build result with raw prices + adj_factor
+                ks["volume"] = ks["vol"]
+                ks["adj_factor"] = adj_series.values
+                ks["date_str"] = ks["date"].dt.strftime("%Y-%m-%d")
+
+                # Filter to requested date range
+                mask = (ks["date_str"] >= start_date) & (ks["date_str"] <= end_date)
+                result = ks.loc[mask, ["date_str", "open", "high", "low", "close", "volume", "adj_factor"]].copy()
+                result = result.rename(columns={"date_str": "date"})
+                result = result.reset_index(drop=True)
+
+                if len(result) == 0:
+                    return None
+                return result
+
+        except TdxConnectionError:
+            logger.warning("TDX connection error fetching daily_raw for %s", stock_code)
+            self._best_ip = None
+            self._ip_cache_time = 0.0
+            return None
+        except Exception as e:
+            logger.warning("TDX daily_raw fetch failed for %s: %s", stock_code, e)
+            return None
+
+    @staticmethod
+    def _compute_adj_factor(ks: pd.DataFrame, xdxr: pd.DataFrame) -> pd.Series:
+        """Compute forward-adjustment factor without modifying K-line prices.
+
+        Returns a Series of cumulative adjustment factors aligned to ks rows.
+        Multiply raw OHLC by adj_factor to get forward-adjusted (前复权) prices.
+        """
+        ones = pd.Series(1.0, index=ks.index)
+
+        if len(xdxr) == 0:
+            return ones
+
+        info = copy.deepcopy(xdxr.query("category==1"))
+        if len(info) == 0:
+            return ones
+
+        # Set date as index for alignment
+        info = info.set_index("date")
+        ks_tmp = ks.assign(if_trade=1).set_index("date")
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+
+            # Merge xdxr category markers into K-line data
+            data = pd.concat(
+                [ks_tmp, info.loc[ks_tmp.index[0]:ks_tmp.index[-1], ["category"]]],
+                axis=1,
+            )
+            data["if_trade"] = data["if_trade"].fillna(0)
+            data = data.ffill()
+
+            # Merge dividend fields
+            data = pd.concat(
+                [data, info.loc[ks_tmp.index[0]:ks_tmp.index[-1],
+                 ["fenhong", "peigu", "peigujia", "songzhuangu"]]],
+                axis=1,
+            )
+
+        data = data.fillna(0)
+
+        # Calculate pre-close (same formula as _apply_qfq)
+        data["preclose"] = (
+            data["close"].shift(1) * 10
+            - data["fenhong"]
+            + data["peigu"] * data["peigujia"]
+        ) / (10 + data["peigu"] + data["songzhuangu"])
+
+        # Forward adjustment factor
+        data["adj"] = (
+            (data["preclose"].shift(-1) / data["close"]).fillna(1)[::-1].cumprod()
+        )
+
+        # Filter back to trading days and return adj series
+        data = data[data["if_trade"] == 1]
+        data = data.reset_index()
+        return data["adj"].reset_index(drop=True)
+
     # ── Index K-lines ──────────────────────────────────
 
     def fetch_index_daily(

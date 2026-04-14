@@ -36,6 +36,7 @@ class DailyPrice(Base):
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[float] = mapped_column(Float, default=0)
     amount: Mapped[float] = mapped_column(Float, default=0)
+    adj_factor: Mapped[float] = mapped_column(Float, default=1.0)
 
     __table_args__ = (
         UniqueConstraint("stock_code", "trade_date", name="uq_daily_code_date"),

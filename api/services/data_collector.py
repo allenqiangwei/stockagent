@@ -323,17 +323,23 @@ class DataCollector:
             df = self._fetch_daily_from_apis(stock_code, start_date, end_date)
             if df is not None and not df.empty:
                 self._cache_daily(stock_code, df)
-                return df
+                # Return forward-adjusted prices (transparent to caller)
+                result = df.copy()
+                if "adj_factor" in result.columns:
+                    for col in ["open", "high", "low", "close"]:
+                        result[col] = round(result[col] * result["adj_factor"], 2)
+                    result = result.drop(columns=["adj_factor"])
+                return result
             # Fetch failed — fall through to use whatever local data we have
 
-        # Return cached data
+        # Return cached data (apply adj_factor to reconstruct forward-adjusted prices)
         if rows:
             df = pd.DataFrame([{
                 "date": r.trade_date.isoformat() if isinstance(r.trade_date, date) else str(r.trade_date),
-                "open": r.open,
-                "high": r.high,
-                "low": r.low,
-                "close": r.close,
+                "open": round(r.open * (r.adj_factor or 1.0), 2),
+                "high": round(r.high * (r.adj_factor or 1.0), 2),
+                "low": round(r.low * (r.adj_factor or 1.0), 2),
+                "close": round(r.close * (r.adj_factor or 1.0), 2),
                 "volume": r.volume,
             } for r in rows])
             return df
@@ -371,6 +377,8 @@ class DataCollector:
                 else:
                     trade_d = d
 
+                adj = float(row.get("adj_factor", 1.0))
+
                 existing = (
                     self.db.query(DailyPrice)
                     .filter(
@@ -385,6 +393,7 @@ class DataCollector:
                     existing.low = float(row["low"])
                     existing.close = float(row["close"])
                     existing.volume = float(row.get("volume", 0))
+                    existing.adj_factor = adj
                 else:
                     self.db.add(DailyPrice(
                         stock_code=stock_code,
@@ -395,6 +404,7 @@ class DataCollector:
                         close=float(row["close"]),
                         volume=float(row.get("volume", 0)),
                         amount=float(row.get("amount", 0)),
+                        adj_factor=adj,
                     ))
             except Exception as e:
                 logger.debug("Cache daily row error: %s", e)
@@ -500,7 +510,7 @@ class DataCollector:
         self, stock_code: str, start_date: str, end_date: str
     ) -> Optional[pd.DataFrame]:
         try:
-            return self._get_tdx_collector().fetch_daily(stock_code, start_date, end_date)
+            return self._get_tdx_collector().fetch_daily_raw(stock_code, start_date, end_date)
         except Exception as e:
             logger.warning("TDX daily %s failed: %s", stock_code, e)
             return None
@@ -717,6 +727,7 @@ class DataCollector:
                 continue  # Skip non A-share
 
             try:
+                adj = float(row.get("adj_factor", 1.0))
                 if code in existing_codes:
                     # Update existing
                     self.db.query(DailyPrice).filter(
@@ -729,6 +740,7 @@ class DataCollector:
                         DailyPrice.close: float(row["close"]),
                         DailyPrice.volume: float(row.get("vol", 0)),
                         DailyPrice.amount: float(row.get("amount", 0)),
+                        DailyPrice.adj_factor: adj,
                     })
                 else:
                     self.db.add(DailyPrice(
@@ -740,6 +752,7 @@ class DataCollector:
                         close=float(row["close"]),
                         volume=float(row.get("vol", 0)),
                         amount=float(row.get("amount", 0)),
+                        adj_factor=adj,
                     ))
                     inserted += 1
             except Exception as e:
