@@ -55,7 +55,6 @@ _BUY_HIGH_FACTORS = frozenset({
     "PPOS_close_pos",     # high position = strong
     "PPOS_low_dist",      # far from low = strong
     "RSI", "KDJ_K", "KDJ_D", "MFI", "STOCH_K", "STOCHRSI_K",
-    "NEWS_SENTIMENT_3D", "NEWS_SENTIMENT_7D",
     "LIQ_log_amount",     # high volume = good liquidity
 })
 
@@ -66,6 +65,8 @@ _EXCLUDE_FROM_EXPLORATION = frozenset({
     # Known bad (from historical experiments)
     "PPOS_close_pos", "PPOS_consec_dir", "AMPVOL_parkinson",
     "PVOL_vwap_bias", "LIQ_amihud",
+    # Non-alpha (sentiment, not price/volume derived)
+    "NEWS_SENTIMENT_3D", "NEWS_SENTIMENT_7D",
     # Too noisy / always fails
     "KDJ_K", "KDJ_D", "KDJ_J", "MACD", "MACD_signal", "MACD_hist",
     "NVI", "VPT", "CMF", "ADI", "FI", "EMV", "EMV_sma",
