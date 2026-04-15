@@ -1469,8 +1469,14 @@ class ExplorationEngine:
     def _step_promote_check(self):
         """Scan recent experiments for unpromoted StdA+ strategies and promote them."""
         self._set_step("promote_check", "Scanning recent experiments")
-        resp = _api("GET", "lab/experiments?page=1&size=300")
-        items = resp.get("items", [])
+        # API max size=100, scan 3 pages to cover ~300 recent experiments
+        items = []
+        for page in range(1, 4):
+            resp = _api("GET", f"lab/experiments?page={page}&size=100")
+            page_items = resp.get("items", [])
+            items.extend(page_items)
+            if len(page_items) < 100:
+                break
         promoted_count = 0
 
         for exp_item in items:
