@@ -1383,11 +1383,33 @@ class ExplorationEngine:
 
                 elif step_name == "self_heal":
                     self._set_step("self_heal")
+                    # Save original poll stats before self-heal overwrites them
+                    orig_done = self.strategies_done
+                    orig_invalid = self.strategies_invalid
+                    orig_stda = self.stda_count
+                    orig_best = self.best_score
+                    orig_total = self.strategies_total
+
                     healed_ids = self._step_self_heal(exp_ids, configs)
                     if healed_ids:
                         exp_ids.extend(healed_ids)
                         self._set_step("poll_healed", f"Waiting for {len(healed_ids)} healed experiments")
                         self._step_poll(healed_ids)
+
+                        # Merge: accumulate healed stats on top of original
+                        self.strategies_done += orig_done
+                        self.strategies_invalid += orig_invalid
+                        self.stda_count += orig_stda
+                        self.best_score = max(self.best_score, orig_best)
+                        self.strategies_total += orig_total
+                        logger.info(
+                            "Stats merged: done=%d, invalid=%d, StdA+=%d, best=%.4f (original + healed)",
+                            self.strategies_done, self.strategies_invalid,
+                            self.stda_count, self.best_score,
+                        )
+                    else:
+                        # No heal needed — keep original stats
+                        pass
 
                 elif step_name == "promote_and_rebalance":
                     self._set_step("promote_and_rebalance")

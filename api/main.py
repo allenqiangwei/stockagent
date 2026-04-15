@@ -480,6 +480,19 @@ async def lifespan(app: FastAPI):
     start_signal_scheduler()
     logger.info("Data sync scheduler started (15:30 daily).")
 
+    # Auto-resume exploration engine from checkpoint (if server crashed mid-round)
+    try:
+        from api.services.exploration_engine import ExplorationEngine, _CHECKPOINT_PATH
+        if _CHECKPOINT_PATH.exists():
+            logger.info("Exploration checkpoint found — auto-resuming...")
+            engine = ExplorationEngine()
+            result = engine.start()  # start() auto-detects checkpoint
+            logger.info("Exploration auto-resume: %s", result)
+        else:
+            logger.info("No exploration checkpoint — clean start")
+    except Exception as e:
+        logger.warning("Exploration auto-resume failed (non-fatal): %s", e)
+
     yield
 
     stop_signal_scheduler()
