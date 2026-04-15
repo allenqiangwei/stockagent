@@ -482,12 +482,12 @@ async def lifespan(app: FastAPI):
 
     # Auto-resume exploration engine from checkpoint (if server crashed mid-round)
     try:
-        from api.services.exploration_engine import ExplorationEngine, _CHECKPOINT_PATH
+        from api.services.exploration_engine import ExplorationEngine as _ExplEngine, _CHECKPOINT_PATH
         if _CHECKPOINT_PATH.exists():
             logger.info("Exploration checkpoint found — auto-resuming...")
-            engine = ExplorationEngine()
-            result = engine.start()  # start() auto-detects checkpoint
-            logger.info("Exploration auto-resume: %s", result)
+            _expl = _ExplEngine()
+            _resume_result = _expl.start()
+            logger.info("Exploration auto-resume: %s", _resume_result)
         else:
             logger.info("No exploration checkpoint — clean start")
     except Exception as e:
