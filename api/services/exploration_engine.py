@@ -25,6 +25,23 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 # ────────────────────────────────────────────────────────────────
+# 1b. Experience Database — distilled knowledge from 1200+ rounds
+# ────────────────────────────────────────────────────────────────
+
+_EXPERIENCE_PATH = Path(__file__).parent.parent.parent / "config" / "experience.json"
+
+
+def load_experience() -> dict:
+    """Load experience database. Returns empty dict if not found."""
+    if not _EXPERIENCE_PATH.exists():
+        return {}
+    try:
+        return json.loads(_EXPERIENCE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+# ────────────────────────────────────────────────────────────────
 # 2.  Factor Registry — dynamically built from src.factors.registry
 # ────────────────────────────────────────────────────────────────
 
@@ -506,6 +523,9 @@ def _factor_to_condition(factor: str, value: float, for_sell: bool = False) -> d
 
     For buy: uses the factor's registered operator (e.g. "<" for KBAR_amplitude)
     For sell: reverses the operator (e.g. ">" for KBAR_amplitude, meaning sell when amplitude is HIGH)
+
+    If experience has an optimal_range for this factor, clamps to that range
+    instead of the full registry range (P1: experience-guided thresholds).
     """
     meta = VALID_BUY_FACTORS.get(factor)
     if meta is None:
@@ -518,8 +538,18 @@ def _factor_to_condition(factor: str, value: float, for_sell: bool = False) -> d
     else:
         op = meta["op"]
 
-    # Clamp value to valid range
-    clamped = max(meta["min"], min(meta["max"], value))
+    # Determine clamp range: prefer experience optimal_range over registry full range
+    lo, hi = meta["min"], meta["max"]
+    if not for_sell:
+        exp = load_experience()
+        factor_exp = exp.get("factor_scores", {}).get(factor, {})
+        opt = factor_exp.get("optimal_range")
+        if opt and len(opt) == 2:
+            # Use optimal range but stay within registry bounds
+            lo = max(meta["min"], opt[0])
+            hi = min(meta["max"], opt[1])
+
+    clamped = max(lo, min(hi, value))
 
     cond: dict = {
         "field": factor,
@@ -532,12 +562,111 @@ def _factor_to_condition(factor: str, value: float, for_sell: bool = False) -> d
     return cond
 
 
+def _build_experience_section(experience: dict) -> str:
+    """Build the experience section for the LLM prompt (P1)."""
+    if not experience:
+        return ""
+
+    lines: list[str] = []
+    lines.append("## 历史经验数据 (从1200+轮探索中提取)")
+
+    # ── Top proven combos (by StdA+ rate, min 3 experiments) ──
+    combo_scores = experience.get("combo_scores", {})
+    proven = [
+        (k, v) for k, v in combo_scores.items()
+        if v.get("stda_rate_pct", 0) > 0 and v.get("total", 0) >= 3
+    ]
+    proven.sort(key=lambda x: -x[1]["stda_rate_pct"])
+
+    if proven:
+        lines.append("\n已验证高成功率组合:")
+        for combo_key, cs in proven[:5]:
+            lines.append(
+                f"  - {combo_key}: {cs['stda_rate_pct']}% StdA+ rate "
+                f"({cs['total']} experiments, best={cs['best_score']:.4f})"
+            )
+
+    # ── Factor optimal thresholds ──
+    factor_scores = experience.get("factor_scores", {})
+    factors_with_range = [
+        (k, v) for k, v in factor_scores.items()
+        if v.get("optimal_range") and v.get("stda_count", 0) >= 2
+    ]
+    factors_with_range.sort(key=lambda x: -x[1]["stda_rate_pct"])
+
+    if factors_with_range:
+        lines.append("\n各因子最优阈值范围(优先使用这些范围内的值):")
+        for name, fs in factors_with_range[:15]:
+            lo, hi = fs["optimal_range"]
+            lines.append(
+                f"  - {name}: [{lo}, {hi}] ({fs['stda_rate_pct']}% StdA+ rate, "
+                f"{fs['stda_count']}/{fs['total']} experiments)"
+            )
+
+    # ── Combos to avoid (0% StdA+ with 10+ experiments) ──
+    avoid = [
+        (k, v) for k, v in combo_scores.items()
+        if v.get("stda_count", 0) == 0 and v.get("total", 0) >= 10
+    ]
+    avoid.sort(key=lambda x: -x[1]["total"])
+
+    if avoid:
+        lines.append("\n避免这些组合(历史上0% StdA+):")
+        for combo_key, cs in avoid[:10]:
+            lines.append(f"  - {combo_key} ({cs['total']} experiments, 0% StdA+)")
+
+    return "\n".join(lines)
+
+
+def _build_few_shot_from_pool() -> str:
+    """Extract top strategies from pool as few-shot examples (P2)."""
+    try:
+        resp = _api("GET", "strategies?sort_by=score&sort_order=desc&page=1&size=10")
+        items = resp.get("items", [])
+        if not items:
+            return ""
+    except Exception:
+        return ""
+
+    lines: list[str] = ["## 成功策略示例 (从策略池提取)"]
+    for i, s in enumerate(items[:5], 1):
+        bs = s.get("backtest_summary", {}) or {}
+        buy_conds = s.get("buy_conditions", [])
+        if not buy_conds:
+            continue
+
+        # Extract extra factors (skip RSI/ATR)
+        extra = []
+        for cond in buy_conds:
+            field = cond.get("field", "")
+            if field in ("RSI", "ATR", "close", "volume", "high", "low", "open"):
+                continue
+            cv = cond.get("compare_value", "?")
+            op = cond.get("operator", "?")
+            extra.append(f"{field} {op} {cv}")
+
+        if not extra:
+            continue
+
+        score = bs.get("score", s.get("score", 0)) or 0
+        ret = bs.get("total_return_pct", 0) or 0
+        wr = bs.get("win_rate", 0) or 0
+
+        lines.append(
+            f"  {i}. factors=[{', '.join(extra)}] → "
+            f"score={score:.4f}, return={ret:.0f}%, wr={wr:.0f}%"
+        )
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def _build_user_prompt(
     pool_families: list[dict],
     n_experiments: int,
     insights: str,
     suggestions: dict,
     skeleton_candidates: list[str],
+    experience: dict | None = None,
 ) -> str:
     """Build the user prompt with current context."""
     # Summarize pool
@@ -558,6 +687,12 @@ def _build_user_prompt(
     # Novel candidates
     cand_text = ", ".join(skeleton_candidates[:10]) if skeleton_candidates else "(none)"
 
+    # Experience section (P1)
+    exp_section = _build_experience_section(experience or {})
+
+    # Few-shot from pool (P2)
+    few_shot_section = _build_few_shot_from_pool()
+
     return f"""\
 Design {n_experiments} experiment configs for the next exploration round.
 
@@ -569,6 +704,10 @@ Design {n_experiments} experiment configs for the next exploration round.
 
 ## Recent Suggestions
 {sugg_text}
+
+{exp_section}
+
+{few_shot_section}
 
 ## Allocation
 - ~{int(n_experiments * 0.6)} new skeleton experiments
@@ -608,12 +747,14 @@ class LLMPlanner:
         insights: str,
         suggestions: dict,
         skeleton_candidates: list[str],
+        experience: dict | None = None,
     ) -> tuple[list[dict], str]:
         """Try LLM providers in order, fall back to rule-based.
 
         Splits large requests into batches of 10 to avoid token limits.
         Returns (configs, provider_name).
         """
+        self._experience = experience or {}
         system_prompt = _PLANNER_SYSTEM_PROMPT.format(
             factor_table=_build_factor_table(),
             banned_list=", ".join(sorted(BANNED_FIELDS)),
@@ -634,7 +775,8 @@ class LLMPlanner:
                     logger.info("  Batch %d: requesting %d experiments", batch_num, batch_n)
 
                     user_prompt = _build_user_prompt(
-                        pool_families, batch_n, insights, suggestions, skeleton_candidates
+                        pool_families, batch_n, insights, suggestions,
+                        skeleton_candidates, experience=self._experience,
                     )
                     raw = self._call_llm(provider, system_prompt, user_prompt)
                     configs = self._parse_json(raw)
@@ -1032,6 +1174,10 @@ class ExplorationEngine:
                 self._set_step("resolve_problems")
                 self._step_resolve_problems(exp_ids)
 
+                # Step 13: Update experience (P3 feedback loop)
+                self._set_step("update_experience")
+                self._update_experience(exp_ids)
+
                 self.rounds_completed += 1
                 round_elapsed = (datetime.now() - round_start).total_seconds()
                 logger.info(
@@ -1106,13 +1252,17 @@ class ExplorationEngine:
         return families
 
     def _step_plan(self, pool_families: list[dict], n: int) -> tuple[list[dict], str]:
-        """Design experiments using LLM planner."""
+        """Design experiments using LLM planner (P1: experience-guided)."""
         insights = load_historical_insights()
         suggestions = get_latest_round_suggestions()
         candidates = generate_skeleton_candidates(pool_families, max_candidates=n * 2)
+        experience = load_experience()
 
         planner = LLMPlanner()
-        configs, provider = planner.plan(pool_families, n, insights, suggestions, candidates)
+        configs, provider = planner.plan(
+            pool_families, n, insights, suggestions, candidates,
+            experience=experience,
+        )
         return configs, provider
 
     def _step_submit(self, configs: list[dict]) -> list[int]:
@@ -1586,3 +1736,122 @@ class ExplorationEngine:
         summary = "; ".join(issues) if issues else "无问题"
         self.step_detail = summary
         logger.info("Step 10 complete: %s", summary)
+
+    def _update_experience(self, exp_ids: list[int]):
+        """Update experience.json with results from this round (P3 feedback loop).
+
+        Incrementally updates factor_scores and combo_scores with new data
+        from the current round's experiments. Lightweight — only processes
+        this round's strategies, not the full history.
+        """
+        exp_db = load_experience()
+        if not exp_db:
+            # No experience file yet — skip (run init_experience.py first)
+            logger.info("No experience.json found, skipping P3 update")
+            return
+
+        factor_scores = exp_db.get("factor_scores", {})
+        combo_scores = exp_db.get("combo_scores", {})
+
+        base_fields = frozenset({"RSI", "ATR", "close", "volume", "high", "low", "open"})
+        updated_factors = 0
+        updated_combos = 0
+
+        for eid in exp_ids:
+            exp = _api("GET", f"lab/experiments/{eid}")
+            for s in exp.get("strategies", []):
+                if s.get("status") != "done":
+                    continue
+
+                buy_conds = s.get("buy_conditions", [])
+                if not isinstance(buy_conds, list):
+                    continue
+
+                # Extract extra factors
+                factors: list[tuple[str, float]] = []
+                for cond in buy_conds:
+                    field = cond.get("field", "")
+                    if not field or field in base_fields:
+                        continue
+                    cv = cond.get("compare_value")
+                    if cv is not None and isinstance(cv, (int, float)):
+                        factors.append((field, float(cv)))
+
+                if not factors:
+                    continue
+
+                stda = is_stda_plus(
+                    s.get("score", 0),
+                    s.get("total_return_pct", 0),
+                    s.get("max_drawdown_pct", 100),
+                    s.get("total_trades", 0),
+                    s.get("win_rate", 0),
+                )
+                score = s.get("score", 0)
+
+                # Update factor_scores
+                for field, cv in factors:
+                    if field not in factor_scores:
+                        factor_scores[field] = {
+                            "total": 0,
+                            "stda_count": 0,
+                            "stda_rate_pct": 0.0,
+                            "best_score": 0.0,
+                            "optimal_range": None,
+                        }
+                    fs = factor_scores[field]
+                    fs["total"] += 1
+                    if stda:
+                        fs["stda_count"] += 1
+                    if score > fs.get("best_score", 0):
+                        fs["best_score"] = round(score, 4)
+                    # Recompute rate
+                    fs["stda_rate_pct"] = round(
+                        fs["stda_count"] / max(fs["total"], 1) * 100, 1
+                    )
+                    updated_factors += 1
+
+                # Update combo_scores
+                factor_names = sorted(set(f[0] for f in factors))
+                if factor_names:
+                    combo_key = "+".join(factor_names)
+                    if combo_key not in combo_scores:
+                        combo_scores[combo_key] = {
+                            "total": 0,
+                            "stda_count": 0,
+                            "stda_rate_pct": 0.0,
+                            "best_score": 0.0,
+                        }
+                    cs = combo_scores[combo_key]
+                    cs["total"] += 1
+                    if stda:
+                        cs["stda_count"] += 1
+                    if score > cs.get("best_score", 0):
+                        cs["best_score"] = round(score, 4)
+                    cs["stda_rate_pct"] = round(
+                        cs["stda_count"] / max(cs["total"], 1) * 100, 1
+                    )
+                    updated_combos += 1
+
+        if updated_factors == 0 and updated_combos == 0:
+            return
+
+        # Update meta
+        meta = exp_db.get("meta", {})
+        meta["last_updated"] = datetime.now().isoformat()
+        meta["last_round"] = self.current_round
+        exp_db["meta"] = meta
+        exp_db["factor_scores"] = factor_scores
+        exp_db["combo_scores"] = combo_scores
+
+        try:
+            _EXPERIENCE_PATH.write_text(
+                json.dumps(exp_db, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            logger.info(
+                "P3: Updated experience.json — %d factor updates, %d combo updates",
+                updated_factors, updated_combos,
+            )
+        except Exception as e:
+            logger.error("P3: Failed to write experience.json: %s", e)
