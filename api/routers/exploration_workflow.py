@@ -1,10 +1,12 @@
 """Exploration Workflow REST API — control the automated strategy exploration engine."""
 
+import json
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from api.models.base import get_db
-from api.services.exploration_engine import ExplorationEngine
+from api.services.exploration_engine import ExplorationEngine, _CHECKPOINT_PATH
 
 router = APIRouter(prefix="/api/exploration-workflow", tags=["exploration-workflow"])
 
@@ -21,6 +23,12 @@ def start_exploration(
     return _engine.start(rounds, experiments_per_round, source_strategy_id)
 
 
+@router.post("/resume")
+def resume_exploration():
+    """Resume from last checkpoint if available."""
+    return _engine.start()  # start() auto-detects checkpoint
+
+
 @router.post("/stop")
 def stop_exploration():
     """Request graceful stop after current round."""
@@ -30,7 +38,22 @@ def stop_exploration():
 @router.get("/status")
 def get_status():
     """Get real-time workflow status."""
-    return _engine.get_status()
+    status = _engine.get_status()
+    # Add checkpoint info
+    if _CHECKPOINT_PATH.exists():
+        try:
+            cp = json.loads(_CHECKPOINT_PATH.read_text(encoding="utf-8"))
+            status["checkpoint"] = {
+                "exists": True,
+                "round": cp.get("round_number"),
+                "step": cp.get("current_step"),
+                "updated_at": cp.get("updated_at"),
+            }
+        except Exception:
+            status["checkpoint"] = {"exists": True, "error": "unreadable"}
+    else:
+        status["checkpoint"] = {"exists": False}
+    return status
 
 
 @router.get("/history")

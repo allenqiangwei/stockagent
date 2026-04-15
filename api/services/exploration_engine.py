@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────
 
 _EXPERIENCE_PATH = Path(__file__).parent.parent.parent / "config" / "experience.json"
+_CHECKPOINT_PATH = Path(__file__).parent.parent.parent / "config" / "exploration_checkpoint.json"
 
 
 def load_experience() -> dict:
@@ -1091,9 +1092,16 @@ class ExplorationEngine:
         experiments_per_round: int = 8,
         source_strategy_id: int = 0,
     ) -> dict:
-        """Start the exploration loop in a background thread."""
+        """Start the exploration loop in a background thread.
+
+        Auto-detects checkpoint from a previous crash/restart and resumes
+        from the last successful step if one exists.
+        """
         if self.state == "running":
             return {"error": "Already running", "state": self.state}
+
+        # Check for recovery checkpoint
+        checkpoint = self._load_checkpoint()
 
         # Determine next round number from API
         resp = _api("GET", "lab/exploration-rounds?page=1&size=1")
@@ -1103,6 +1111,35 @@ class ExplorationEngine:
         else:
             total = resp.get("total", 0)
             self.current_round = total + 1
+
+        self._exp_per_round = experiments_per_round  # store for checkpoint
+
+        if checkpoint:
+            # Resume from checkpoint
+            self.current_round = checkpoint["round_number"]
+            self.rounds_total = checkpoint.get("rounds_total", rounds)
+            self.rounds_completed = checkpoint.get("rounds_completed", 0)
+            self.experiment_ids = checkpoint.get("experiment_ids", [])
+            self._source_strategy_id = checkpoint.get("source_strategy_id", source_strategy_id)
+            self._exp_per_round = checkpoint.get("experiments_per_round", experiments_per_round)
+            self.llm_provider = checkpoint.get("llm_provider", "")
+
+            resume_step = checkpoint.get("current_step", "")
+            logger.info("Resuming from checkpoint: round=%d, step=%s", self.current_round, resume_step)
+
+            self.state = "running"
+            self.started_at = datetime.now()
+            self.last_error = ""
+            self._stop_event.clear()
+
+            self._thread = threading.Thread(
+                target=self._run_loop_resume,
+                args=(resume_step, checkpoint),
+                daemon=True, name="exploration-engine",
+            )
+            self._thread.start()
+            return {"state": "running", "round_number": self.current_round,
+                    "resumed_from": resume_step, "rounds": self.rounds_total}
 
         self.state = "running"
         self.rounds_total = rounds
@@ -1169,111 +1206,80 @@ class ExplorationEngine:
 
     # ── Internal workflow ──
 
+    _STEP_ORDER = [
+        "promote_check", "sync_rounds", "load_state", "retry_pending",
+        "plan", "submit", "poll", "self_heal",
+        "promote_and_rebalance", "update_memory_doc", "sync_pinecone",
+        "record", "resolve_problems", "update_experience",
+    ]
+
     def _set_step(self, step: str, detail: str = ""):
         self.current_step = step
         self.step_detail = detail
         logger.info("Step: %s — %s", step, detail)
 
+    # ── Checkpoint persistence ──
+
+    def _save_checkpoint(self, step: str, data: dict | None = None):
+        """Save checkpoint after each step completes."""
+        checkpoint = {
+            "round_number": self.current_round,
+            "rounds_total": self.rounds_total,
+            "rounds_completed": self.rounds_completed,
+            "current_step": step,  # The step that JUST COMPLETED
+            "experiment_ids": self.experiment_ids,
+            "source_strategy_id": getattr(self, "_source_strategy_id", 0),
+            "experiments_per_round": getattr(self, "_exp_per_round", 50),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "updated_at": datetime.now().isoformat(),
+            "llm_provider": self.llm_provider,
+            "promoted_count": data.get("promoted", 0) if data else 0,
+            "configs": data.get("configs", []) if data else [],
+        }
+        try:
+            _CHECKPOINT_PATH.write_text(json.dumps(checkpoint, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to save checkpoint: %s", e)
+
+    def _load_checkpoint(self) -> dict | None:
+        """Load checkpoint if exists. Returns None if no checkpoint."""
+        if not _CHECKPOINT_PATH.exists():
+            return None
+        try:
+            data = json.loads(_CHECKPOINT_PATH.read_text(encoding="utf-8"))
+            logger.info("Loaded checkpoint: round=%d, step=%s, updated=%s",
+                        data.get("round_number", 0), data.get("current_step", "?"),
+                        data.get("updated_at", "?"))
+            return data
+        except Exception as e:
+            logger.warning("Failed to load checkpoint: %s", e)
+            return None
+
+    def _clear_checkpoint(self):
+        """Remove checkpoint file after round completes successfully."""
+        try:
+            if _CHECKPOINT_PATH.exists():
+                _CHECKPOINT_PATH.unlink()
+                logger.info("Checkpoint cleared")
+        except Exception:
+            pass
+
+    # ── Main workflow ──
+
     def _run_loop(self, rounds: int, exp_per_round: int):
         """Main workflow loop."""
+        self._exp_per_round = exp_per_round
         try:
             for i in range(rounds):
                 if self._stop_event.is_set():
                     break
 
-                round_start = datetime.now()
-                self.current_round = self.current_round if i == 0 else self.current_round + 1
-                self._set_step("promote_check", f"Round {self.current_round}")
+                if i > 0:
+                    self.current_round += 1
 
-                # Step 1: Promote check
-                self._step_promote_check()
-                if self._stop_event.is_set():
-                    break
-
-                # Step 2: Sync unsynced rounds
-                self._set_step("sync_rounds")
-                self._step_sync_unsynced_rounds()
-                if self._stop_event.is_set():
-                    break
-
-                # Step 3: Load state
-                self._set_step("load_state")
-                pool_families = self._step_load_state()
-                if self._stop_event.is_set():
-                    break
-
-                # Step 3.5: Retry pending
-                self._set_step("retry_pending")
-                _api("POST", "lab/experiments/retry-pending")
-                if self._stop_event.is_set():
-                    break
-
-                # Step 4: Plan
-                self._set_step("plan", f"Designing {exp_per_round} experiments")
-                configs, provider = self._step_plan(pool_families, exp_per_round)
-                self.llm_provider = provider
-                if self._stop_event.is_set():
-                    break
-
-                # Step 5: Submit
-                self._set_step("submit", f"Submitting {len(configs)} experiments")
-                exp_ids = self._step_submit(configs)
-                self.experiment_ids = exp_ids
-                if self._stop_event.is_set():
-                    break
-
-                # Step 6: Poll
-                self._set_step("poll", f"Waiting for {len(exp_ids)} experiments")
-                self._step_poll(exp_ids)
-                if self._stop_event.is_set():
-                    break
-
-                # Step 7: Self-heal
-                self._set_step("self_heal")
-                healed_ids = self._step_self_heal(exp_ids, configs)
-                if healed_ids:
-                    exp_ids.extend(healed_ids)
-                    self._set_step("poll_healed", f"Waiting for {len(healed_ids)} healed experiments")
-                    self._step_poll(healed_ids)
-                if self._stop_event.is_set():
-                    break
-
-                # Step 8: Promote and rebalance
-                self._set_step("promote_and_rebalance")
-                promoted = self._step_promote_and_rebalance(exp_ids)
-                if self._stop_event.is_set():
-                    break
-
-                # Step 9: Update memory doc
-                self._set_step("update_memory_doc")
-                self._step_update_memory_doc(promoted)
-                if self._stop_event.is_set():
-                    break
-
-                # Step 10: Sync Pinecone
-                self._set_step("sync_pinecone")
-                self._step_sync_pinecone()
-                if self._stop_event.is_set():
-                    break
-
-                # Step 11: Record round
-                self._set_step("record")
-                self._step_record(exp_ids, promoted)
-
-                # Step 12: Resolve problems
-                self._set_step("resolve_problems")
-                self._step_resolve_problems(exp_ids)
-
-                # Step 13: Update experience (P3 feedback loop)
-                self._set_step("update_experience")
-                self._update_experience(exp_ids)
-
+                self._execute_round(exp_per_round)
                 self.rounds_completed += 1
-                round_elapsed = (datetime.now() - round_start).total_seconds()
-                logger.info(
-                    "Round %d complete in %.0fs — %d StdA+, best=%.4f",
-                    self.current_round, round_elapsed, self.stda_count, self.best_score,
-                )
+                self._clear_checkpoint()
 
             self.state = "idle"
             self._set_step("done", f"Completed {self.rounds_completed}/{self.rounds_total} rounds")
@@ -1282,6 +1288,159 @@ class ExplorationEngine:
             self.state = "error"
             self.last_error = str(e)
             logger.exception("Exploration engine error: %s", e)
+
+    def _run_loop_resume(self, resume_step: str, checkpoint: dict):
+        """Resume a round from a checkpoint, then continue remaining rounds."""
+        try:
+            # Find where to resume from (the step AFTER the completed one)
+            if resume_step in self._STEP_ORDER:
+                resume_idx = self._STEP_ORDER.index(resume_step) + 1
+            else:
+                resume_idx = 0  # unknown step, start from beginning
+
+            logger.info("Resuming round %d from step %d/%d (%s)",
+                        self.current_round, resume_idx, len(self._STEP_ORDER),
+                        self._STEP_ORDER[resume_idx] if resume_idx < len(self._STEP_ORDER) else "done")
+
+            # Restore state from checkpoint
+            exp_ids = checkpoint.get("experiment_ids", [])
+            configs = checkpoint.get("configs", [])
+            promoted = checkpoint.get("promoted_count", 0)
+            exp_per_round = checkpoint.get("experiments_per_round", 50)
+
+            # Execute remaining steps of the interrupted round
+            self._execute_round_from(resume_idx, exp_ids, configs, promoted, exp_per_round)
+
+            self.rounds_completed += 1
+            self._clear_checkpoint()
+
+            # Continue with remaining rounds
+            remaining = self.rounds_total - self.rounds_completed
+            if remaining > 0 and not self._stop_event.is_set():
+                self.current_round += 1
+                self._run_loop(remaining, exp_per_round)
+            else:
+                self.state = "idle"
+                self._set_step("done", f"Completed {self.rounds_completed}/{self.rounds_total} rounds")
+
+        except Exception as e:
+            self.state = "error"
+            self.last_error = str(e)
+            logger.exception("Resume error: %s", e)
+
+    def _execute_round(self, exp_per_round: int):
+        """Execute one full round with checkpoint at each step."""
+        return self._execute_round_from(0, [], [], 0, exp_per_round)
+
+    def _execute_round_from(self, start_idx: int, exp_ids: list[int],
+                            configs: list[dict], promoted: int,
+                            exp_per_round: int):
+        """Execute round steps starting from start_idx. Each step saves checkpoint."""
+        pool_families: list[dict] = []
+        round_start = datetime.now()
+
+        # Steps that are safe to skip on failure
+        SKIPPABLE = {"promote_check", "sync_rounds", "retry_pending",
+                     "update_memory_doc", "sync_pinecone", "resolve_problems",
+                     "update_experience"}
+
+        for idx in range(start_idx, len(self._STEP_ORDER)):
+            if self._stop_event.is_set():
+                break
+
+            step_name = self._STEP_ORDER[idx]
+
+            try:
+                if step_name == "promote_check":
+                    self._set_step("promote_check", f"Round {self.current_round}")
+                    self._step_promote_check()
+
+                elif step_name == "sync_rounds":
+                    self._set_step("sync_rounds")
+                    self._step_sync_unsynced_rounds()
+
+                elif step_name == "load_state":
+                    self._set_step("load_state")
+                    pool_families = self._step_load_state()
+
+                elif step_name == "retry_pending":
+                    self._set_step("retry_pending")
+                    _api("POST", "lab/experiments/retry-pending")
+
+                elif step_name == "plan":
+                    self._set_step("plan", f"Designing {exp_per_round} experiments")
+                    configs, provider = self._step_plan(pool_families, exp_per_round)
+                    self.llm_provider = provider
+
+                elif step_name == "submit":
+                    self._set_step("submit", f"Submitting {len(configs)} experiments")
+                    exp_ids = self._step_submit(configs)
+                    self.experiment_ids = exp_ids
+
+                elif step_name == "poll":
+                    self._set_step("poll", f"Waiting for {len(exp_ids)} experiments")
+                    self._step_poll(exp_ids)
+
+                elif step_name == "self_heal":
+                    self._set_step("self_heal")
+                    healed_ids = self._step_self_heal(exp_ids, configs)
+                    if healed_ids:
+                        exp_ids.extend(healed_ids)
+                        self._set_step("poll_healed", f"Waiting for {len(healed_ids)} healed experiments")
+                        self._step_poll(healed_ids)
+
+                elif step_name == "promote_and_rebalance":
+                    self._set_step("promote_and_rebalance")
+                    promoted = self._step_promote_and_rebalance(exp_ids)
+
+                elif step_name == "update_memory_doc":
+                    self._set_step("update_memory_doc")
+                    self._step_update_memory_doc(promoted)
+
+                elif step_name == "sync_pinecone":
+                    self._set_step("sync_pinecone")
+                    self._step_sync_pinecone()
+
+                elif step_name == "record":
+                    self._set_step("record")
+                    self._step_record(exp_ids, promoted)
+
+                elif step_name == "resolve_problems":
+                    self._set_step("resolve_problems")
+                    self._step_resolve_problems(exp_ids)
+
+                elif step_name == "update_experience":
+                    self._set_step("update_experience")
+                    self._update_experience(exp_ids)
+
+                # Save checkpoint after EVERY successful step
+                self._save_checkpoint(step_name, {
+                    "configs": configs if step_name in ("plan", "submit") else [],
+                    "promoted": promoted,
+                })
+
+            except Exception as e:
+                logger.error("Step '%s' failed: %s", step_name, e)
+                # Save checkpoint at the PREVIOUS step (the last successful one)
+                if idx > 0:
+                    self._save_checkpoint(self._STEP_ORDER[idx - 1], {
+                        "configs": configs,
+                        "promoted": promoted,
+                    })
+
+                if step_name in SKIPPABLE:
+                    logger.warning("Skipping failed step '%s' and continuing", step_name)
+                    continue
+                else:
+                    # Critical step failed — abort round
+                    logger.error("Critical step '%s' failed, aborting round", step_name)
+                    raise
+
+        round_elapsed = (datetime.now() - round_start).total_seconds()
+        logger.info(
+            "Round %d complete in %.0fs — %d StdA+, best=%.4f",
+            self.current_round, round_elapsed, self.stda_count, self.best_score,
+        )
 
     # ── Step implementations ──
 
