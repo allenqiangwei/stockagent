@@ -410,56 +410,145 @@ def get_latest_round_suggestions() -> dict:
 
 def generate_skeleton_candidates(
     existing_families: list[dict],
-    max_candidates: int = 10,
+    max_candidates: int = 30,
 ) -> list[str]:
     """Generate novel factor combination candidates not yet in the pool.
 
-    Parameters
-    ----------
-    existing_families : list[dict]
-        Each dict must have a "family" key (e.g. "ATR+RSI").
-    max_candidates : int
-        Maximum number of candidates to return.
+    Covers 2/3/4/5-factor combos, ranked by experience-based scoring:
+    - Factors with high historical StdA+ rate get priority
+    - Combos already tested with 0% rate are excluded
+    - 4-5 factor combos only use proven factors (experience rate > 15%)
 
-    Returns
-    -------
-    list[str]
-        Factor combination strings like "KBAR_amplitude + W_REALVOL".
+    Returns list of strings like "KBAR_amplitude + W_REALVOL".
     """
-    # Parse existing families into sets of indicators
-    existing_sets: list[frozenset[str]] = []
+    # ── Parse existing pool families ──
+    existing_sets: set[frozenset[str]] = set()
     for fam in existing_families:
         name = fam.get("family", "")
         parts = frozenset(p.strip() for p in name.split("+") if p.strip())
         if parts:
-            existing_sets.append(parts)
+            existing_sets.add(parts)
 
-    factors = sorted(VALID_BUY_FACTORS.keys())
-    candidates: list[str] = []
+    # ── Load experience for scoring + filtering ──
+    exp = load_experience()
+    factor_scores = exp.get("factor_scores", {})
+    combo_scores = exp.get("combo_scores", {})
 
-    # Generate 2-factor combos first, then 3-factor
-    for r in (2, 3):
-        for combo in itertools.combinations(factors, r):
-            combo_set = frozenset(combo)
-            # Build the comparison set: the combo plus ATR+RSI (since base always includes them)
-            comparison_set = frozenset(
-                p.upper().split("_")[0] if not p.startswith(("W_", "M_")) else p
-                for p in combo
-            ) | frozenset(["ATR", "RSI"])
-            # Check if this combo (with ATR+RSI) is already in the pool
-            already_exists = False
-            for ex_set in existing_sets:
-                if comparison_set == ex_set or comparison_set.issubset(ex_set):
-                    already_exists = True
-                    break
-            if not already_exists:
-                candidates.append(" + ".join(combo))
-            if len(candidates) >= max_candidates:
-                break
-        if len(candidates) >= max_candidates:
+    # Build set of known-bad combos (0% StdA+ with >=10 experiments)
+    bad_combos: set[frozenset[str]] = set()
+    for combo_name, data in combo_scores.items():
+        if data.get("total", 0) >= 10 and data.get("stda_count", 0) == 0:
+            bad_combos.add(frozenset(combo_name.split("+")))
+
+    # ── Score each factor by historical performance ──
+    def _factor_score(name: str) -> float:
+        """Higher = better. Balances exploitation (proven) vs exploration (unknown)."""
+        data = factor_scores.get(name, {})
+        total = data.get("total", 0)
+        stda = data.get("stda_count", 0)
+        if total == 0:
+            return 0.20  # small exploration bonus (below proven factors)
+        rate = stda / max(1, total)
+        # Confidence-weighted: more experiments = more trust in the rate
+        confidence = min(1.0, total / 50)  # ramp up to full confidence at 50 experiments
+        return rate * confidence
+
+    all_factors = sorted(VALID_BUY_FACTORS.keys())
+
+    # Proven factors for 4-5 combos (rate > 15% or untested)
+    proven_factors = [f for f in all_factors if _factor_score(f) > 0.15]
+
+    # ── Check if combo is novel (not in pool) ──
+    def _is_novel(combo: tuple[str, ...]) -> bool:
+        # Normalize to family-level names (KBAR_amplitude → KBAR, W_REALVOL → W_REALVOL)
+        family_parts = set()
+        for p in combo:
+            if p.startswith(("W_", "M_")):
+                family_parts.add(p)
+            else:
+                family_parts.add(p.upper().split("_")[0])
+        family_parts |= {"ATR", "RSI"}
+        comparison = frozenset(family_parts)
+
+        for ex_set in existing_sets:
+            if comparison == ex_set or comparison.issubset(ex_set):
+                return False
+        return True
+
+    def _is_bad(combo: tuple[str, ...]) -> bool:
+        return frozenset(combo) in bad_combos
+
+    # ── Generate candidates with scores ──
+    scored: list[tuple[float, str]] = []  # (score, "A + B + C")
+
+    # 2-factor combos
+    for combo in itertools.combinations(all_factors, 2):
+        if not _is_novel(combo) or _is_bad(combo):
+            continue
+        score = sum(_factor_score(f) for f in combo) / len(combo)
+        scored.append((score, " + ".join(combo)))
+
+    # 3-factor combos
+    for combo in itertools.combinations(all_factors, 3):
+        if not _is_novel(combo) or _is_bad(combo):
+            continue
+        score = sum(_factor_score(f) for f in combo) / len(combo)
+        scored.append((score, " + ".join(combo)))
+
+    # 4-factor combos (only proven factors, cap at 500 combos checked)
+    count_4 = 0
+    for combo in itertools.combinations(proven_factors, 4):
+        if count_4 > 500:
             break
+        count_4 += 1
+        if not _is_novel(combo) or _is_bad(combo):
+            continue
+        score = sum(_factor_score(f) for f in combo) / len(combo)
+        scored.append((score, " + ".join(combo)))
 
-    return candidates[:max_candidates]
+    # 5-factor combos (only top proven factors, cap at 200 combos checked)
+    top_proven = [f for f in proven_factors if _factor_score(f) > 0.25][:15]
+    count_5 = 0
+    for combo in itertools.combinations(top_proven, 5):
+        if count_5 > 200:
+            break
+        count_5 += 1
+        if not _is_novel(combo) or _is_bad(combo):
+            continue
+        score = sum(_factor_score(f) for f in combo) / len(combo)
+        scored.append((score, " + ".join(combo)))
+
+    # ── Allocate slots per factor-count tier ──
+    # Reserve slots: 20% two-factor, 30% three-factor, 30% four-factor, 20% five-factor
+    by_tier: dict[int, list[tuple[float, str]]] = {}
+    for score, name in scored:
+        n = len(name.split(" + "))
+        by_tier.setdefault(n, []).append((score, name))
+
+    # Sort each tier by score
+    for tier_list in by_tier.values():
+        tier_list.sort(key=lambda x: -x[0])
+
+    # Allocate proportionally
+    tier_quotas = {2: 0.20, 3: 0.30, 4: 0.30, 5: 0.20}
+    result: list[str] = []
+    for tier, pct in tier_quotas.items():
+        n_slots = max(2, int(max_candidates * pct))
+        tier_candidates = by_tier.get(tier, [])
+        for _, name in tier_candidates[:n_slots]:
+            result.append(name)
+
+    # Fill remaining slots from any tier
+    all_remaining = []
+    used = set(result)
+    for tier_list in by_tier.values():
+        for _, name in tier_list:
+            if name not in used:
+                all_remaining.append(name)
+    all_remaining.sort(key=lambda x: -dict(scored).get(x, 0))
+    result.extend(all_remaining[:max(0, max_candidates - len(result))])
+
+    return result[:max_candidates]
 
 
 # ────────────────────────────────────────────────────────────────
