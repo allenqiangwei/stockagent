@@ -25,44 +25,104 @@ from openai import OpenAI
 logger = logging.getLogger(__name__)
 
 # ────────────────────────────────────────────────────────────────
-# 2.  Factor Registry
+# 2.  Factor Registry — dynamically built from src.factors.registry
 # ────────────────────────────────────────────────────────────────
 
-VALID_BUY_FACTORS: dict[str, dict] = {
-    # ── K-bar factors ──
-    "KBAR_amplitude":    {"op": "<", "params": None,              "min": 0.01, "max": 0.10},
-    "KBAR_body_ratio":   {"op": ">", "params": None,              "min": 0.3,  "max": 0.9},
-    "KBAR_lower_shadow": {"op": ">", "params": None,              "min": 0.01, "max": 0.10},
-    "W_KBAR_amplitude":  {"op": "<", "params": None,              "min": 0.02, "max": 0.15},
-    # ── Volatility ──
-    "W_REALVOL":         {"op": "<", "params": {"period": 20},    "min": 5,    "max": 50},
-    "REALVOL":           {"op": "<", "params": {"period": 20},    "min": 5,    "max": 50},
-    "REALVOL_kurt":      {"op": ">", "params": {"period": 20},    "min": 1,    "max": 10},
-    "REALVOL_downside":  {"op": "<", "params": {"period": 20},    "min": 3,    "max": 40},
-    "REALVOL_skew":      {"op": "<", "params": {"period": 20},    "min": -2.0, "max": 2.0},
-    "M_REALVOL":         {"op": "<", "params": {"period": 20},    "min": 10,   "max": 80},
-    # ── Amplitude volatility ──
-    "AMPVOL_std":        {"op": "<", "params": {"period": 5},     "min": 0.005, "max": 0.05},
-    "W_AMPVOL_std":      {"op": "<", "params": {"period": 5},     "min": 0.01,  "max": 0.08},
-    # ── Relative strength ──
-    "RSTR_weighted":     {"op": ">", "params": {"period": 20},    "min": -10,   "max": 10},
-    "W_RSTR_weighted":   {"op": ">", "params": {"period": 20},    "min": -20,   "max": 20},
-    # ── Price-volume ──
-    "PVOL_corr":         {"op": "<", "params": {"period": 20},    "min": -1.0,  "max": 1.0},
-    "W_PVOL_corr":       {"op": "<", "params": {"period": 20},    "min": -1.0,  "max": 1.0},
-    "PVOL_amount_conc":  {"op": "<", "params": {"period": 20},    "min": 0.1,   "max": 0.9},
-    # ── Momentum ──
-    "MOM":               {"op": ">", "params": {"period": 20},    "min": -15,   "max": 15},
-    # ── Liquidity ──
-    "LIQ_turnover_vol":  {"op": "<", "params": {"period": 20},    "min": 0.1,   "max": 5.0},
-    # ── Weekly ATR ──
-    "W_ATR":             {"op": "<", "params": {"period": 14},    "min": 0.01,  "max": 0.20},
-    # ── Price position ──
-    "PPOS_high_dist":    {"op": ">", "params": {"period": 20},    "min": -50,   "max": 0},
-    "PPOS_drawdown":     {"op": "<", "params": {"period": 20},    "min": 0,     "max": 30},
-    # ── Trend strength ──
-    "W_ADX":             {"op": ">", "params": {"period": 14},    "min": 10,    "max": 50},
-}
+# Factors whose operator should be ">" (buy when value is HIGH)
+# Everything else defaults to "<" (buy when value is LOW)
+_BUY_HIGH_FACTORS = frozenset({
+    "MOM", "RSTR", "RSTR_weighted", "W_RSTR_weighted",
+    "PVOL_corr", "W_PVOL_corr",
+    "ADX", "W_ADX", "ADX_plus_di",
+    "KBAR_lower_shadow",  # long lower shadow = buying pressure
+    "PPOS_close_pos",     # high position = strong
+    "PPOS_low_dist",      # far from low = strong
+    "RSI", "KDJ_K", "KDJ_D", "MFI", "STOCH_K", "STOCHRSI_K",
+    "NEWS_SENTIMENT_3D", "NEWS_SENTIMENT_7D",
+    "LIQ_log_amount",     # high volume = good liquidity
+})
+
+# Factors to exclude from exploration (known bad / too noisy)
+_EXCLUDE_FROM_EXPLORATION = frozenset({
+    # Builtin base factors (already in BASE_BUY/SELL)
+    "RSI", "ATR", "MA", "EMA", "OBV", "volume_ma",
+    # Known bad (from historical experiments)
+    "PPOS_close_pos", "PPOS_consec_dir", "AMPVOL_parkinson",
+    "PVOL_vwap_bias", "LIQ_amihud",
+    # Too noisy / always fails
+    "KDJ_K", "KDJ_D", "KDJ_J", "MACD", "MACD_signal", "MACD_hist",
+    "NVI", "VPT", "CMF", "ADI", "FI", "EMV", "EMV_sma",
+    "PPO", "PPO_signal", "PPO_hist", "PVO", "PVO_signal", "PVO_hist",
+    "AO", "TSI", "TRIX", "DPO", "MASS", "KST", "KST_sig", "KST_diff",
+    "AROON_up", "AROON_down", "AROON_osc",
+    "VORTEX_pos", "VORTEX_neg", "VORTEX_diff",
+    "ICHIMOKU_conv", "ICHIMOKU_base", "ICHIMOKU_a", "ICHIMOKU_b",
+    "DONCHIAN_upper", "DONCHIAN_lower", "DONCHIAN_middle",
+    "STC", "WR", "ROC",
+    # Redundant with other fields
+    "ADX_minus_di", "STOCH_D", "STOCHRSI_D",
+    "BOLL_upper", "BOLL_lower", "BOLL_middle",
+    "KELTNER_upper", "KELTNER_lower", "KELTNER_middle",
+})
+
+
+def _build_valid_factors() -> dict[str, dict]:
+    """Build VALID_BUY_FACTORS dynamically from src.factors.registry.
+
+    Auto-discovers all factors with field_ranges, assigns operator,
+    extracts params. New factors added via @register_factor appear
+    automatically — zero code changes needed.
+    """
+    # Import triggers auto-discovery of all factor modules
+    import src.factors  # noqa: F401
+    from src.factors.registry import FACTORS, get_all_field_ranges
+
+    ranges = get_all_field_ranges()
+    result: dict[str, dict] = {}
+
+    for name, fdef in FACTORS.items():
+        # Get default params for this factor group
+        params = None
+        if fdef.params:
+            params = {k: v["default"] for k, v in fdef.params.items()}
+
+        for field_name, _label in fdef.sub_fields:
+            if field_name in _EXCLUDE_FROM_EXPLORATION:
+                continue
+            if field_name not in ranges:
+                continue  # No range defined → skip
+
+            lo, hi = ranges[field_name]
+            op = ">" if field_name in _BUY_HIGH_FACTORS else "<"
+
+            result[field_name] = {
+                "op": op,
+                "params": params,
+                "min": lo,
+                "max": hi,
+            }
+
+    # Also add W_ (weekly) variants for key factors
+    weekly_candidates = [
+        "REALVOL", "ATR", "AMPVOL_std", "RSTR_weighted",
+        "PVOL_corr", "KBAR_amplitude", "ADX",
+    ]
+    for base_field in weekly_candidates:
+        w_field = f"W_{base_field}"
+        if w_field not in result and base_field in result:
+            base = result[base_field]
+            result[w_field] = {
+                "op": base["op"],
+                "params": base["params"],
+                "min": base["min"],
+                "max": base["max"] * 1.5,  # weekly values tend to be larger
+            }
+
+    return result
+
+
+# Build at import time
+VALID_BUY_FACTORS = _build_valid_factors()
 
 # ────────────────────────────────────────────────────────────────
 # 3.  Banned / sell-only / base conditions / StdA+ constants
