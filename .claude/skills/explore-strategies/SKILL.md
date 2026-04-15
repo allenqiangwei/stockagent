@@ -7,6 +7,27 @@ description: Iterative strategy discovery — analyze experiments, plan new ones
 
 You are a quantitative strategy researcher for the Chinese A-share market. Your job is to systematically discover profitable strategies through iterative experimentation using the AI Lab system.
 
+## Automated Engine (Alternative)
+
+An automated Exploration Workflow Engine is available at `POST /api/exploration-workflow/`. It implements the same 11-step pipeline as this skill but runs autonomously with LLM planning (Qwen/DeepSeek).
+
+```bash
+# Start automated exploration (no Claude session needed)
+curl -X POST "localhost:8050/api/exploration-workflow/start?rounds=3&experiments_per_round=50"
+
+# Monitor status
+curl "localhost:8050/api/exploration-workflow/status"
+
+# Stop gracefully
+curl -X POST "localhost:8050/api/exploration-workflow/stop"
+```
+
+Engine code: `api/services/exploration_engine.py`. Factor registry: `src/factors/registry.py` (37 factors auto-discovered via `@register_factor`).
+
+**When to use this skill vs the engine:**
+- This skill: complex analysis, memory updates, code fixes, new feature implementation, manual direction control
+- Engine API: routine exploration rounds, unattended batch runs, overnight execution
+
 ## Mode
 
 - **Default** (no args): Semi-auto — present plan, wait for user approval, then execute
@@ -123,47 +144,6 @@ If any strategies were missing from the promote list, output:
 Promote补漏: N个策略未被promote, 已修复
 ```
 
-### 1c: Enable ALL Promoted Strategies in Strategy Management
-
-All promoted strategies should be enabled so they can be used for signal generation and combo strategies. Query the strategy library and enable any that are currently disabled.
-
-```bash
-NO_PROXY=localhost,127.0.0.1 python3 -c "
-import subprocess, json
-
-def api_get(path):
-    r = subprocess.run(['curl','-s',f'http://127.0.0.1:8050/api/{path}'],
-                       capture_output=True, text=True, env={'NO_PROXY':'localhost,127.0.0.1','PATH':'/usr/bin:/bin'})
-    return json.loads(r.stdout)
-
-def api_put(path, data):
-    r = subprocess.run(['curl','-s','-X','PUT',f'http://127.0.0.1:8050/api/{path}',
-                        '-H','Content-Type: application/json','-d',json.dumps(data)],
-                       capture_output=True, text=True, env={'NO_PROXY':'localhost,127.0.0.1','PATH':'/usr/bin:/bin'})
-    return json.loads(r.stdout)
-
-# Get all strategies in strategy management
-strategies = api_get('strategies')
-disabled = [s for s in strategies if not s.get('enabled', False)]
-enabled_count = 0
-
-for s in disabled:
-    api_put(f'strategies/{s[\"id\"]}', {'enabled': True})
-    enabled_count += 1
-    print(f'  ENABLED: S{s[\"id\"]} {s.get(\"name\",\"?\")[:60]}')
-
-print(f'策略启用完成: {len(strategies)}个策略总计, {enabled_count}个已启用, {len(strategies)-len(disabled)}个原已启用')
-"
-```
-
-Output summary:
-```
-策略管理状态:
-- Promote补漏: X个 (已修复)
-- 策略启用: Y个disabled→enabled
-- 当前策略库: Z个策略全部enabled
-```
-
 ### 1d: Sync Completed Background Rounds
 
 Background auto_finish scripts may complete between sessions. Check for exploration rounds where `memory_synced=false` and sync their results into memory.
@@ -197,6 +177,245 @@ If unsynced rounds are found:
 5. Run StdA+ cleanup: `POST /api/strategies/cleanup` to remove any strategies promoted by the background script that don't meet current StdA+ criteria
 
 **This step is BLOCKING**: Do NOT proceed until all unsynced rounds are fully synced.
+
+### 1e: Indicator Family Status Check (3-Tier Taxonomy)
+
+**在规划新实验之前，查询当前指标家族（Level 1）的填充状态，确定资源分配方向。**
+
+指标家族（Indicator Family）= 买入条件中使用的核心指标集合（如 `ATR+RSI`、`KDJ+PSAR+VPT`）。
+每个家族根据其所有冠军策略的平均得分获得动态配额（quota）：
+- avg_score >= 0.87 -> quota = 200
+- avg_score >= 0.85 -> quota = 150
+- avg_score >= 0.83 -> quota = 100
+- avg_score >= 0.81 -> quota = 50
+- avg_score < 0.81 -> quota = 20
+
+```bash
+NO_PROXY=localhost,127.0.0.1 python3 -c "
+import subprocess, json
+
+def api(path):
+    r = subprocess.run(['curl','-s',f'http://127.0.0.1:8050/api/{path}'],
+                       capture_output=True, text=True, env={'NO_PROXY':'localhost,127.0.0.1','PATH':'/usr/bin:/bin'})
+    return json.loads(r.stdout)
+
+status = api('strategies/pool/status')
+families = status.get('family_summary', [])
+
+unfull_families = [f for f in families if f.get('gap', 0) > 0]
+full_families = [f for f in families if f.get('gap', 0) == 0]
+
+print(f'=== 指标家族状态 (Level 1) ===')
+print(f'总家族数: {len(families)}  (未满: {len(unfull_families)}, 已满: {len(full_families)})')
+print()
+
+print('未满家族 (gap>0，补充填充，30%资源):')
+for f in sorted(unfull_families, key=lambda x: -x.get('gap', 0))[:10]:
+    print(f'  {f[\"family\"]:30s} | {f[\"active_count\"]}/{f[\"quota\"]} (gap={f[\"gap\"]}) avg={f[\"avg_score\"]:.4f} fp={f[\"fingerprint_count\"]}')
+
+print()
+print('已满家族 (gap=0，优胜劣汰，10%资源):')
+for f in sorted(full_families, key=lambda x: x.get('avg_score', 0))[:5]:
+    print(f'  {f[\"family\"]:30s} | {f[\"active_count\"]}/{f[\"quota\"]} avg={f[\"avg_score\"]:.4f}')
+"
+```
+
+**结果解读（将三类骨架列表带入 Step 3a）：**
+
+- 🟡 **未满骨架** (`current < quota`)：骨架已有冠军但数量未达配额。继续探索这一骨架的参数变体、不同指标组合，可提升覆盖度。
+- 🔴 **已满骨架** (`current >= quota`)：骨架配额已满，只有超越当前最弱冠军分数的新策略才能进入。优先探索改良方向，淘汰弱者。
+
+> **⚠️ 注意**: Step 1e 只检查已有骨架的填充状态。**新骨架候选**由下方 Step 1f 生成，不在此步骤中出现。如果 Step 1e 显示"新骨架=0"，这是正常的——新骨架方向来自 Step 1f。
+
+### 1f: New Skeleton Candidate Generator (MANDATORY)
+
+**这是每轮探索最重要的步骤。** Step 1e 只检查池里已有的骨架，而本步骤主动枚举**池中不存在、但值得尝试的全新指标组合**。60%资源分配的"新骨架"来源于此步骤的输出，而非 Step 1e。
+
+**核心原则**: 探索必须持续扩展信号空间的多样性，不能退化为纯参数优化。
+
+#### 候选生成方法
+
+**方法1: 指标组合矩阵**
+
+从 Indicator Exploration Tracker（Step 3a-extra）中选取所有有效指标（非"已弃"），生成**两两组合 + 三元组合**的候选矩阵，然后排除已在池中存在的组合。
+
+有效指标池（从 Tracker 中非"已弃"的指标）:
+- 震荡类: KDJ, RSI, STOCH, STOCHRSI, ULTOSC, MFI(弱)
+- 趋势类: MACD, PSAR, EMA, KAMA, ADX
+- 波动类: ATR, BOLL, KELTNER, ULCER
+- 量价类: VPT
+- 多时间框架: W_RSI, W_EMA, W_ATR, W_KDJ (全部未探索!)
+
+```bash
+NO_PROXY=localhost,127.0.0.1 python3 -c "
+import subprocess, json, re, itertools
+from collections import defaultdict
+
+def api(path):
+    r = subprocess.run(['curl','-s',f'http://127.0.0.1:8050/api/{path}'],
+                       capture_output=True, text=True, env={'NO_PROXY':'localhost,127.0.0.1','PATH':'/usr/bin:/bin'})
+    return json.loads(r.stdout)
+
+# Step 1: Get existing pool skeleton indicator sets
+status = api('strategies/pool/status')
+families = status.get('families_summary', [])
+
+existing_indicator_sets = set()
+for f in families:
+    name = f.get('representative_name', '')
+    if f.get('active_count', 0) == 0: continue
+    # Extract indicator names from strategy name
+    indicators = set()
+    for ind in ['KDJ','MACD','RSI','PSAR','BOLL','VPT','ATR','EMA','KAMA','ULTOSC','ULCER','KELTNER','STOCH','STOCHRSI','ADX','CCI','MFI','ROC','NVI','W_']:
+        if ind in name.upper() or ind in name:
+            indicators.add(ind)
+    if indicators:
+        existing_indicator_sets.add(frozenset(indicators))
+
+print(f'现有池中指标组合数: {len(existing_indicator_sets)}')
+for s in sorted(existing_indicator_sets, key=lambda x: len(x)):
+    print(f'  {sorted(s)}')
+
+# Step 2: Generate candidate new combinations
+# Effective indicators (non-abandoned)
+effective = ['KDJ', 'RSI', 'MACD', 'PSAR', 'BOLL', 'ATR', 'EMA', 'KAMA', 'ULTOSC', 'ULCER', 'KELTNER', 'STOCH', 'STOCHRSI', 'VPT', 'ADX']
+weekly = ['W_RSI', 'W_EMA', 'W_ATR', 'W_KDJ']
+
+# Generate 2-indicator combos
+candidates_2 = []
+for a, b in itertools.combinations(effective, 2):
+    combo = frozenset([a, b])
+    if combo not in existing_indicator_sets:
+        candidates_2.append(sorted([a, b]))
+
+# Generate weekly + daily combos (always new since W_ never tested)
+candidates_w = []
+for w in weekly:
+    for d in effective[:8]:  # top 8 daily indicators
+        candidates_w.append([w, d])
+
+# Generate 3-indicator combos (only with proven base indicators)
+proven_base = ['KDJ', 'PSAR', 'MACD', 'RSI']
+candidates_3 = []
+for base in proven_base:
+    for a, b in itertools.combinations(effective, 2):
+        if base in (a, b): continue
+        combo = frozenset([base, a, b])
+        if combo not in existing_indicator_sets:
+            candidates_3.append(sorted([base, a, b]))
+
+print(f'\\n=== 新骨架候选 ===')
+print(f'两指标组合 (池中不存在): {len(candidates_2)}')
+for c in candidates_2[:10]:
+    print(f'  {c}')
+if len(candidates_2) > 10: print(f'  ... 共{len(candidates_2)}个')
+
+print(f'\\n周线+日线组合 (全部未探索): {len(candidates_w)}')
+for c in candidates_w[:8]:
+    print(f'  {c}')
+
+print(f'\\n三指标组合 (池中不存在): {len(candidates_3)}')
+for c in candidates_3[:8]:
+    print(f'  ... 共{len(candidates_3)}个')
+
+total_candidates = len(candidates_2) + len(candidates_w) + len(candidates_3)
+print(f'\\n🆕 总候选新骨架数: {total_candidates}')
+print(f'   (两指标: {len(candidates_2)}, 周线: {len(candidates_w)}, 三指标: {len(candidates_3)})')
+"
+```
+
+**方法2: 条件结构变异**
+
+即使使用相同指标，不同的条件逻辑结构也可以创造新骨架：
+- **交叉条件**: `KDJ_K > KDJ_D`（金叉）vs `KDJ_K < 20`（绝对阈值）— 不同逻辑
+- **多时间框架过滤**: 日线 KDJ + `W_RSI_14 < 70`（周线超买过滤）
+- **复合条件**: `ATR pct_change` + `volume consecutive` — 波动率+量能双确认
+- **反向条件**: 做空信号作为卖出条件（如 `RSI > 80` 作为平仓触发）
+
+**方法3: 从实验历史中发现遗漏**
+
+查询所有已完成实验中产出过 StdA+ 策略、但从未被 promote 到池中的指标组合：
+
+```bash
+NO_PROXY=localhost,127.0.0.1 python3 -c "
+# Check if there are StdA+ experiment strategies with indicator combos not in the pool
+# This finds 'proven but unrepresented' skeletons
+import subprocess, json
+
+def api(path):
+    r = subprocess.run(['curl','-s',f'http://127.0.0.1:8050/api/{path}'],
+                       capture_output=True, text=True, env={'NO_PROXY':'localhost,127.0.0.1','PATH':'/usr/bin:/bin'})
+    try: return json.loads(r.stdout)
+    except: return {}
+
+# Sample recent experiments for high-scoring strategies not yet in pool patterns
+# (This is a heuristic — full scan would be too slow)
+print('Checking recent experiments for underrepresented skeletons...')
+found = {}
+for page in range(1, 5):
+    exps = api(f'lab/experiments?page={page}&size=50')
+    for exp in exps.get('items', []):
+        theme = exp.get('theme', '')
+        if exp.get('best_score', 0) and exp['best_score'] >= 0.80:
+            # Extract indicator combo from theme
+            key = theme.split('×')[0].strip()[:40] if '×' in theme else theme[:40]
+            if key not in found or exp['best_score'] > found[key]:
+                found[key] = exp['best_score']
+
+for k, v in sorted(found.items(), key=lambda x: -x[1])[:10]:
+    print(f'  {k} → best score {v:.4f}')
+"
+```
+
+#### 输出格式
+
+Step 1f 必须输出**至少10个具体的新骨架候选方向**，按优先级排序：
+
+```
+🆕 新骨架候选 (Step 1f):
+优先级1: [W_RSI + KDJ] — 周线超买过滤+日线超卖信号，多时间框架完全未探索
+优先级2: [KELTNER + KDJ] — Keltner通道+KDJ，Keltner已验证37.5%盈利率但未进池
+优先级3: [ULCER + PSAR] — 低波动+趋势反转，三重过滤曾71%盈利率
+优先级4: [STOCHRSI + PSAR] — 灵敏震荡+趋势，StochRSI已达StdA
+优先级5: [W_EMA + RSI + ATR] — 周线趋势+日线动量+波动过滤
+...
+```
+
+**硬性约束**: 如果 Step 1f 输出候选数 < 5，说明指标空间已接近穷尽，应切换到"条件结构变异"或"多时间框架"方向，而非放弃新骨架探索。
+
+#### 失败记录与候选淘汰
+
+Step 1f 必须读取 `docs/lab-experiment-analysis.md` 中的 **新骨架探索记录** 表，排除已标记"已弃"的组合。每轮 Step 8（Update Memory）必须更新此表。
+
+**表格格式**（在 `docs/lab-experiment-analysis.md` 中维护）:
+
+```markdown
+## 新骨架探索记录
+
+| 指标组合 | 首次尝试轮次 | 实验数 | 最佳score | 最佳StdA+数 | 状态 |
+|---------|------------|--------|----------|------------|------|
+| KELTNER+KDJ | R1190 | 5 | 0.72 | 0 | 浅探索 |
+| W_RSI+KDJ | R1190 | 8 | 0.85 | 3 | ✅已进池 |
+| ULCER+PSAR | R1190 | 5 | 0.65 | 0 | 已弃(2轮0 StdA+) |
+```
+
+**状态流转规则**:
+- **未探索** → 首次出现在 Step 1f 候选列表中
+- **浅探索** → 已测试 < 10 个实验，结果不确定（有盈利但未达StdA+），下轮可再测
+- **✅已进池** → 产出 ≥ 1 个 StdA+ 且已 promote 到策略池，Step 1f 不再推荐（池中已有）
+- **已弃** → 累计 ≥ 2 轮探索、≥ 10 个实验、0 个 StdA+。Step 1f 永久排除此组合
+
+**Step 1f 生成候选时必须**:
+1. 读取此表，排除状态为"已弃"和"✅已进池"的组合
+2. 优先推荐状态为"浅探索"的组合（已有初步数据，值得深入）
+3. 其次推荐"未探索"的全新组合
+
+**Step 8 更新此表时必须**:
+1. 本轮新尝试的组合 → 新增行或更新实验数/最佳score
+2. 累计 ≥ 2 轮 + ≥ 10 实验 + 0 StdA+ → 标记"已弃"
+3. 产出 StdA+ 并 promote → 标记"✅已进池"
+
+这样候选池会随着探索**自然收缩**（失败的被淘汰、成功的进入池），同时通过三指标组合和多时间框架**持续补充新候选**，确保探索不会停滞也不会原地打转。
 
 ## Step 1.5: Resolve Outstanding Issues (BLOCKING GATE)
 
@@ -246,36 +465,71 @@ Based on the accumulated insights from **核心洞察**, **探索状态**, **最
 
 **In `time` mode**: Target ~300 strategies per round. Since each experiment produces ~4-6 strategies, plan ~50-75 experiments per round. The exact count should be dynamically adjusted based on the experiment types being used (grid search produces more strategies per experiment than DeepSeek).
 
-### 3a: Decision Framework — Dynamic Allocation
+### 3a: Decision Framework — Skeleton-Driven Three-Tier Allocation
 
-Synthesize all available evidence to decide the next exploration directions **and how many experiments to allocate to each**. There is NO fixed ratio — the AI decides allocation based on what memory says is most promising.
-
-1. **Review what worked**: Which indicator combinations, parameter ranges, and market hypotheses produced profitable strategies? Allocate more experiments to proven high-yield directions.
-2. **Review what failed**: Which directions are "已弃"? Do NOT retry them unless a code fix (from Step 1.5) has removed the original blocker. Allocate ZERO to dead ends.
-3. **Check 下一步建议**: Previous sessions' recommendations are high-priority inputs — convert each actionable suggestion into 1-3 experiment plans.
-4. **Identify gaps**: Are there promising indicator combinations not yet tested? Are there parameter ranges for top strategies not yet grid-searched?
-5. **Assess method effectiveness**: Check historical success rates of each experiment type (DeepSeek generation, grid search, variant testing, etc.) and allocate proportionally. For example, if DeepSeek has >50% invalid rate, allocate few or zero to it; if grid search has >90% success rate, allocate heavily.
-6. **🆕 NEW INDICATOR EXPLORATION (MANDATORY)**: Every round MUST allocate **at least 5 experiments** (or 5% of N, whichever is larger) to testing a new or under-explored indicator. See the **Indicator Exploration Tracker** below.
-7. **Decide allocation**: Present a brief allocation rationale before listing experiments:
+根据 **Step 1f 的新骨架候选** + **Step 1e 的骨架填充状态**，使用**固定三层比例**分配本轮实验资源：
 
 ```
 本轮分配 (共N个实验):
-- Grid search (clone-backtest): X个 — 理由: [why]
-- Variant testing: Y个 — 理由: [why]
-- 🆕 New indicator exploration: Z个 — 目标指标: [indicator name] — 理由: [why this indicator]
-- Other new direction: W个 — 理由: [why]
-(X + Y + Z + W = N)
+┌───────────────────────────────────────────────────────────────────────────┐
+│ 🆕 新骨架探索    60% (N×0.6 个) — 来自 Step 1f 的候选新指标组合          │
+│ 🟡 未满骨架填充  30% (N×0.3 个) — Step 1e 中 current < quota 的骨架      │
+│ 🔴 已满骨架优化  10% (N×0.1 个) — 针对最弱 champion 的定向改良           │
+└───────────────────────────────────────────────────────────────────────────┘
+⚠️ 60%是硬约束：即使 Step 1f 候选全部失败也不得挪用给填充/优化层。
+⚠️ 新骨架来源是 Step 1f（候选生成器），NOT Step 1e（已有池检查）。
 ```
 
-Available experiment categories (use any subset, allocate any amount including 0):
+**三层目标说明：**
 
-| Category | Description |
-|----------|-------------|
-| **Grid search (clone-backtest)** | Parameter optimization of proven strategies (SL/TP/hold days) |
-| **Variant testing** | Modify top strategies with small changes (add/remove 1 condition, adjust thresholds) |
-| **DeepSeek exploration** | New indicator/strategy ideas via DeepSeek generation |
-| **🆕 New indicator exploration** | **MANDATORY every round.** Test indicators from the tracker below that are 未探索 or 浅探索 |
-| **New direction** | Untested hypotheses or newly enabled features (e.g. new condition types) |
+**🆕 新骨架探索 (60%)**
+目标：从 **Step 1f 的候选列表**中选取方向，创造策略池中不存在的全新信号结构。
+- **来源**: Step 1f 输出的候选新骨架列表（NOT Step 1e 的 current=0 列表）
+- 按 Step 1f 的优先级排序，每个候选方向分配 3-8 个实验（不同参数配置 + 不同卖出条件）
+- 对每个候选方向：先用 **batch-clone-backtest + buy_conditions override** 构造条件（绕过 DeepSeek），只有无法构造时才用 DeepSeek
+- 多时间框架（W_ 前缀）候选享有最高优先级，因为这是完全未探索的新维度
+- 成功标准：实验产生至少一个通过 StdA+ 的策略，即视为新骨架探索成功
+- **硬性约束**: 即使所有 Step 1f 候选的实验都失败（0 StdA+），也不得将此60%资源挪给未满骨架填充。宁可在失败的候选上做二次变体测试（更宽阈值、不同参数），也要保持60%的新骨架探索比例
+
+**🟡 未满骨架填充 (30%)**
+目标：在已验证有效的骨架结构中，补充覆盖缺失的参数空间。
+- 从 Step 1e 的 `unfull_skeletons` 中选取 `gap` 最大的骨架优先填充
+- 分析该骨架已有冠军的参数范围（SL/TP/MHD），找出尚未覆盖的参数区间
+- 使用 `batch-clone-backtest` 针对已有冠军 ES_ID 进行参数网格搜索
+- 若骨架有多个 fingerprint 家族，重点对分数靠前但参数覆盖不全的家族做变体
+
+**🔴 已满骨架优化 (10%)**
+目标：在配额已满的骨架中，针对最弱 champion 进行定向改良，实现优胜劣汰。
+- 从 Step 1e 的 `full_skeletons` 中选取 `avg_score` 最低的骨架
+- 查询该骨架最弱 champion 的具体参数和失分原因（drawdown/win_rate/return 哪项最弱）
+- 设计针对性改良：若 win_rate 低 → 调整 TP 阈值；若 drawdown 大 → 收紧 SL；若 return 低 → 增大 MHD
+- 新策略必须超过该骨架当前最弱 champion 分数才能进入 pool（见 promote 竞争门槛）
+
+**约束规则：**
+- 已弃方向（"已弃"标记）：分配 ZERO，除非 Step 1.5 修复了原始阻断问题
+- 下一步建议：上轮遗留的高优先级建议转化为实验，优先归入对应骨架层
+- **60%硬约束**: 新骨架探索的60%比例不可挪用。如果 Step 1f 候选不足，必须通过"条件结构变异"或"多时间框架"方向补足，而非将资源分给填充/优化层
+- **禁止退化为纯参数优化**: 如果本轮全部实验都是对已有骨架的 SL/TP/MHD 网格搜索，视为违反 skill 设计意图。至少60%实验必须包含**不同的 buy_conditions 指标组合**
+- **新骨架 ≠ 池中 current=0**: "新骨架"定义为 Step 1f 生成的**策略池中不存在该指标组合**的候选，不是 Step 1e 的 current=0 分类
+
+**分配汇总输出（在列出实验前必须展示）：**
+
+```
+本轮三层分配 (共N个实验):
+- 🆕 新骨架探索: X个 (目标骨架: [骨架名称/新指标组合]) — [简要理由]
+- 🟡 未满骨架填充: Y个 (目标骨架: [骨架名称], gap=[N]) — [简要理由]
+- 🔴 已满骨架优化: Z个 (目标骨架: [骨架名称], 最弱score=[N]) — [简要理由]
+(X + Y + Z = N)
+```
+
+Available experiment methods (可用于任意层):
+
+| Method | Description | 适合层 |
+|--------|-------------|--------|
+| **DeepSeek exploration** | 生成新骨架策略（指定新指标组合） | 🆕 新骨架 |
+| **批量克隆回测 (clone-backtest)** | 对现有 ES_ID 做参数网格搜索 | 🟡 未满/🔴 已满 |
+| **Variant testing** | 对冠军策略做条件微调（加/减一个条件） | 🟡 未满/🔴 已满 |
+| **New direction** | 尚未测试的市场假设或新条件类型 | 🆕 新骨架 |
 
 ### 3a-extra: Indicator Exploration Tracker
 
@@ -348,11 +602,56 @@ Available experiment categories (use any subset, allocate any amount including 0
 | 🟢低 | CMF | ✅ 已弃 | CMF_{length} | A股几乎永远为负 |
 | 🟢低 | VWAP | ⚠️ 受限 | VWAP | 需field比较, DeepSeek不支持 |
 
-**When all 未探索 indicators are exhausted:**
-- Revisit 浅探索 indicators (STC, MFI, WR, ROC) with new combinations
-- Try **cross-family pairings** not yet tested (e.g., ULTOSC+PSAR, KELTNER+MACD)
-- Try **new parameter configurations** for explored indicators (non-default periods)
-- Try **re-testing 已弃 indicators** with clone-backtest approach (bypasses DeepSeek failures that may have caused original failures)
+**Alpha Factors (8 groups, 26+ sub-fields) — updated from R1208-R1221 exploration:**
+
+| Priority | Factor | Status | Sub-fields | Exploration Results |
+|----------|--------|--------|------------|---------------------|
+| 🔴高 | **PPOS** | ⚠️ 部分有效 | PPOS_close_pos, PPOS_high_dist, PPOS_low_dist, PPOS_drawdown, PPOS_consec_dir | close_pos ❌已弃(wr<45%), consec_dir ❌已弃. **high_dist ✅有效**(0.8676), **drawdown ✅有效**(0.8196). low_dist ❌无效 |
+| 🔴高 | **KBAR** | ✅ 深度探索 | KBAR_upper_shadow, KBAR_lower_shadow, KBAR_body_ratio, KBAR_amplitude, KBAR_overnight_ret, KBAR_intraday_ret | **amplitude ✅最强**(0.8790, 40-50% StdA+率). body_ratio ✅有效(0.8635). lower_shadow ✅有效. upper_shadow/overnight/intraday ❌无效(wr<60%) |
+| 🔴高 | **REALVOL** | ✅ 深度探索 | REALVOL, REALVOL_skew, REALVOL_kurt, REALVOL_downside | **REALVOL ✅**(50%率, 0.8775). **kurt ✅**(36%, 0.8784). **downside ✅**(20%, 0.8778). skew ✅(10%, 0.8552). Ultra-low TP解决wr: REALVOL 15/15=100% |
+| 🔴高 | **MOM** | ✅ 已探索 | MOM | MOM>0 ✅有效(20%, 0.8401). 与KBAR/RSTR combo有效 |
+| 🟡中 | **PVOL** | ✅ 已探索 | PVOL_corr, PVOL_amount_conc, PVOL_vwap_bias | **corr ✅有效**(0.8665). **amount_conc ✅有效**(50%, 0.8781). vwap_bias ❌已弃 |
+| 🟡中 | **LIQ** | ⚠️ 部分有效 | LIQ_amihud, LIQ_turnover_vol, LIQ_log_amount | amihud ❌已弃(太restrictive). turnover_vol ✅有效. log_amount ✅新增(未充分测试) |
+| 🟡中 | **RSTR** | ✅ 已探索 | RSTR, RSTR_weighted | **weighted ✅有效**(61.5%, 0.8737). RSTR ✅有效 |
+| 🟡中 | **AMPVOL** | ✅ 深度探索 | AMPVOL_std, AMPVOL_parkinson | **std ✅最强之一**(58.6%, 0.8730). parkinson ❌已弃(太restrictive, 8 trades) |
+| 🟢新 | **NEWS_SENTIMENT** | ❌ 未探索 | NEWS_SENTIMENT_3D, NEWS_SENTIMENT_7D | 新闻情绪因子, 3日/7日聚合. 可与任何骨架组合. **高优先级新方向** |
+
+**因子系统已重构**: 所有因子通过 `@register_factor` 装饰器注册在 `src/factors/` 目录下。新增因子自动出现在探索引擎中（`api/services/exploration_engine.py` 从 registry 动态构建因子列表）。
+
+**当前可用因子**: 37 个（从 registry 自动构建），包含 W_ 周线变体。查看完整列表:
+```bash
+python3 -c "from api.services.exploration_engine import VALID_BUY_FACTORS; print(len(VALID_BUY_FACTORS), 'factors'); [print(f'  {k}') for k in sorted(VALID_BUY_FACTORS)]"
+```
+
+**Factor condition format (P36: MUST use compare_value!):**
+```json
+{"field": "PPOS_high_dist", "operator": "<", "compare_type": "value", "compare_value": -5, "params": {"period": 20}}
+{"field": "KBAR_amplitude", "operator": "<", "compare_type": "value", "compare_value": 0.03}
+{"field": "REALVOL", "operator": "<", "compare_type": "value", "compare_value": 25, "params": {"period": 20}}
+{"field": "NEWS_SENTIMENT_3D", "operator": ">", "compare_type": "value", "compare_value": 0.3}
+{"field": "AMPVOL_std", "operator": "<", "compare_type": "value", "compare_value": 0.02, "params": {"period": 5}}
+```
+
+**Multi-Timeframe indicators (W_ / M_ prefix):**
+
+Any indicator above can be prefixed with `W_` (weekly) or `M_` (monthly). Weekly data is resampled from daily, forward-filled. **R1208-R1217验证: 6/8 W_指标产出StdA+(75%成功率)**
+
+| Prefix | Timeframe | 已验证有效 |
+|--------|-----------|-----------|
+| W_ | 周线 | W_REALVOL✅, W_KBAR✅, W_AMPVOL_std✅, W_RSTR_weighted✅, W_ATR✅, W_PVOL_corr✅, W_ADX✅, W_MOM✅ |
+| M_ | 月线 | M_REALVOL✅ |
+
+**Proven effective combinations (from R1208-R1221):**
+- **单因子最强**: KBAR_amplitude(0.8790), REALVOL_kurt(0.8784), AMPVOL_std(0.8730)
+- **双因子最强**: KBAR_amp+W_REALVOL(42%), AMPVOL_std+KBAR_amp(50%), RSTR_w+KBAR(57%)
+- **5因子combo**: ATR+RSI+RVkurt+KBAR+W_REALVOL = 0.8791(session最高)
+- **Ultra-low TP通用修复**: 任何高score低wr因子用TP=0.3-1.0可达100% StdA+率
+
+**When all indicators are explored:**
+- Try **NEWS_SENTIMENT** — 全新维度，未测试
+- Try **multi-factor combos** with 3-5 proven factors
+- Try **ultra-low TP** for high-score factors with wr<60%
+- Use **exploration engine API** for automated execution: `POST /api/exploration-workflow/start?rounds=3&experiments_per_round=50`
 
 ### 3b: Plan Generation Rules
 
