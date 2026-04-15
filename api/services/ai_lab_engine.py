@@ -1075,12 +1075,17 @@ class AILabEngine:
     ) -> bool:
         """Quick pre-scan: sample stocks and check if any buy signal fires.
 
+        Supports W_ (weekly) and M_ (monthly) multi-timeframe indicators —
+        uses the same separate_mtf_params + compute_mtf_indicators pipeline
+        as PortfolioBacktestEngine to ensure consistent signal detection.
+
         Returns True if at least one signal found (strategy is viable).
         Returns False if zero signals across all samples (likely zero-trade).
         """
         import random
         import pandas as pd
         from src.signals.rule_engine import evaluate_conditions
+        from src.indicators.multi_timeframe import separate_mtf_params, compute_mtf_indicators
 
         buy_conditions = strat.buy_conditions or []
         if not buy_conditions:
@@ -1092,8 +1097,15 @@ class AILabEngine:
 
         all_rules = buy_conditions + (strat.sell_conditions or [])
         collected = collect_indicator_params(all_rules)
-        config = IndicatorConfig.from_collected_params(collected)
+
+        # Separate daily / weekly / monthly params (same as portfolio engine)
+        daily_params, weekly_params, monthly_params = separate_mtf_params(collected)
+
+        config = IndicatorConfig.from_collected_params(daily_params)
         calculator = IndicatorCalculator(config)
+
+        weekly_config = IndicatorConfig.from_collected_params(weekly_params) if weekly_params else None
+        monthly_config = IndicatorConfig.from_collected_params(monthly_params) if monthly_params else None
 
         for code in codes:
             df = stock_data.get(code)
@@ -1105,11 +1117,27 @@ class AILabEngine:
                 continue
 
             try:
+                # Daily indicators
                 indicators = calculator.calculate_all(df_tail)
                 df_full = pd.concat(
                     [df_tail.reset_index(drop=True), indicators.reset_index(drop=True)],
                     axis=1,
                 )
+
+                # Weekly indicators (W_ prefix)
+                if weekly_config:
+                    w_df = compute_mtf_indicators(df_tail, weekly_config, "W")
+                    if w_df is not None:
+                        for col in w_df.columns:
+                            df_full[col] = w_df[col].values
+
+                # Monthly indicators (M_ prefix)
+                if monthly_config:
+                    m_df = compute_mtf_indicators(df_tail, monthly_config, "M")
+                    if m_df is not None:
+                        for col in m_df.columns:
+                            df_full[col] = m_df[col].values
+
                 for i in range(max(0, len(df_full) - self._PRESCAN_DAYS), len(df_full)):
                     df_slice = df_full.iloc[: i + 1]
                     triggered, _ = evaluate_conditions(buy_conditions, df_slice, mode="AND")
