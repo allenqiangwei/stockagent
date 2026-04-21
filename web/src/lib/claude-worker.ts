@@ -225,7 +225,6 @@ export function startClaudeJob(
     "--model", CHAT_MODEL,
     "--append-system-prompt", SYSTEM_PROMPT,
     "--permission-mode", "bypassPermissions",
-    "--max-budget-usd", "2.0",
   ];
 
   if (claudeSessionId) {
@@ -654,7 +653,6 @@ export function startAnalysisJob(jobId: string, reportDate: string): void {
     "--model", MODEL,
     "--append-system-prompt", ANALYSIS_SYSTEM_PROMPT,
     "--permission-mode", "bypassPermissions",
-    "--max-budget-usd", "3.0",
   ];
 
   let child: ChildProcess;

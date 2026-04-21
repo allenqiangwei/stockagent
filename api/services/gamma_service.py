@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 _session = requests.Session()
 _logged_in = False
 _CHANLUN_BASE = "http://127.0.0.1:9900"
-_TIMEOUT = 5
+_TIMEOUT = 15
 _consecutive_failures = 0
-_CIRCUIT_BREAKER_THRESHOLD = 10
+_CIRCUIT_BREAKER_THRESHOLD = 20
 
 
 # ---------------------------------------------------------------------------
@@ -353,9 +353,9 @@ def compute_gamma(stock_code: str, trade_date: str) -> dict | None:
     to_ts = int(dt.timestamp()) + 86400  # end of day
     from_ts = to_ts - 365 * 86400  # 1 year back
 
-    # Fetch daily and weekly data
-    daily_data = _fetch_history(symbol, "D", from_ts, to_ts)
-    weekly_data = _fetch_history(symbol, "W", from_ts, to_ts)
+    # Fetch daily and weekly data (chanlun-pro uses "1D"/"1W", not "D"/"W")
+    daily_data = _fetch_history(symbol, "1D", from_ts, to_ts)
+    weekly_data = _fetch_history(symbol, "1W", from_ts, to_ts)
 
     if not daily_data or daily_data.get("s") == "no_data":
         logger.info("No daily data for %s on %s", stock_code, trade_date)

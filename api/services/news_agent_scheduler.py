@@ -17,7 +17,7 @@ class NewsAgentScheduler:
 
     SCHEDULE = [
         (8, 0, "pre_market"),
-        (18, 0, "evening"),
+        (15, 45, "evening"),    # After market close (15:00), before data sync (15:30)
     ]
 
     def __init__(self):
@@ -36,7 +36,7 @@ class NewsAgentScheduler:
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        logger.info("News agent scheduler started (08:00 pre_market, 18:00 evening)")
+        logger.info("News agent scheduler started (08:00 pre_market, 15:45 evening)")
 
     def stop(self):
         self._running = False
@@ -75,6 +75,10 @@ class NewsAgentScheduler:
 
     def _do_pipeline(self, period_type: str, key: str):
         self._is_running_pipeline = True
+        from api.services.job_manager import get_job_manager
+        jm = get_job_manager()
+        job_id = jm.create("news_agent", f"News agent {period_type}", triggered_by="scheduler")
+        jm.start(job_id)
         try:
             db = SessionLocal()
             try:
@@ -82,11 +86,13 @@ class NewsAgentScheduler:
                 result = engine.run_analysis(period_type)
                 logger.info("News agent %s done: %s", period_type, result)
                 self._today_completed.add(key)
+                jm.succeed(job_id, f"{period_type} done")
             finally:
                 db.close()
         except Exception as e:
             logger.error("News agent %s failed: %s", period_type, e)
             self._today_completed.add(key)
+            jm.fail(job_id, str(e)[:500])
         finally:
             self._is_running_pipeline = False
 

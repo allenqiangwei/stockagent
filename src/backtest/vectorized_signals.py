@@ -207,7 +207,7 @@ def _vec_consecutive(
 
     # rolling sum of N consecutive steps all being True
     consecutive_sum = step_ok.rolling(window=n, min_periods=n).sum()
-    mask = (consecutive_sum >= n).values
+    mask = (consecutive_sum >= n).values.copy()
 
     # Handle NaN in original series: if any value in the window is NaN, result is False
     nan_mask = series.isna().rolling(window=n + 1, min_periods=1).sum() > 0

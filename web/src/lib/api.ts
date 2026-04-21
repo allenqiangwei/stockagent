@@ -155,6 +155,8 @@ export const strategies = {
     }),
   families: () =>
     request<FamilySummary[]>("/strategies/families"),
+  familyStrategies: (fingerprint: string) =>
+    request<Strategy[]>(`/strategies/families/${encodeURIComponent(fingerprint)}`),
   unarchive: (id: number) =>
     post<{ message: string }>(`/strategies/${id}/unarchive`, {}),
 };
@@ -205,9 +207,31 @@ export const lab = {
   updateTemplate: (id: number, data: { name?: string; category?: string; description?: string }) =>
     put<LabTemplate>(`/lab/templates/${id}`, data),
   deleteTemplate: (id: number) => del<{ deleted: number }>(`/lab/templates/${id}`),
-  experiments: (page = 1, size = 20) =>
+  stats: () =>
+    request<{
+      total_experiments: number;
+      in_progress: number;
+      total_promoted: number;
+      latest_round: number;
+      current_round: {
+        round_number: number;
+        step: string;
+        step_detail: string;
+        experiments: number;
+        experiments_done: number;
+        strategies: number;
+        strategies_done: number;
+        strategies_pending: number;
+        stda_count: number;
+        best_score: number;
+        promoted: number;
+        elapsed_seconds: number;
+        llm_provider: string;
+      } | null;
+    }>("/lab/stats"),
+  experiments: (page = 1, size = 20, status?: string) =>
     request<{ total: number; items: LabExperimentListItem[] }>(
-      `/lab/experiments?page=${page}&size=${size}`
+      `/lab/experiments?page=${page}&size=${size}${status ? `&status=${encodeURIComponent(status)}` : ""}`
     ),
   experiment: (id: number) => request<LabExperiment>(`/lab/experiments/${id}`),
   deleteExperiment: (id: number) => del<{ deleted: number }>(`/lab/experiments/${id}`),
@@ -256,6 +280,27 @@ export const lab = {
         avg_hold_days: number; is_stda_plus: boolean;
       }>;
     }>(`/lab/strategies/${strategyId}/grid-results`),
+};
+
+// ── Exploration Workflow ────────────────────────────────
+export const exploration = {
+  status: () =>
+    request<{
+      state: string; current_round: number; current_step: string;
+      step_detail: string; strategies_total: number; strategies_done: number;
+      strategies_invalid: number; strategies_pending: number;
+      stda_count: number; best_score: number; elapsed_seconds: number;
+      llm_provider: string; last_error: string;
+      cron: { enabled: boolean; interval_minutes: number };
+    }>("/exploration-workflow/status"),
+  start: (rounds = 1, experiments = 50) =>
+    post<{ state: string; round_number: number }>(`/exploration-workflow/start?rounds=${rounds}&experiments_per_round=${experiments}`, {}),
+  stop: () =>
+    post<{ state: string }>("/exploration-workflow/stop", {}),
+  cronStart: (interval = 15) =>
+    post<{ status: string; interval: number }>(`/exploration-workflow/cron/start?interval_minutes=${interval}`, {}),
+  cronStop: () =>
+    post<{ status: string }>("/exploration-workflow/cron/stop", {}),
 };
 
 // ── Backtest ──────────────────────────────────────────
@@ -382,4 +427,15 @@ export const newsSignals = {
     request<{ status: string; result: Record<string, unknown> | null; error: string | null }>(
       `/news-signals/analyze/poll?job_id=${jobId}`
     ),
+};
+
+// ── Ops (confidence model health) ──────────────────────
+export const ops = {
+  confidenceReport: () =>
+    request<{
+      status: string; version: number; auc_score: number; brier_score: number;
+      training_samples: number; positive_rate: number;
+      coefficients: Record<string, number>;
+      calibration?: Array<{ bin: string; count: number; predicted: number; actual: number }>;
+    }>("/beta/confidence/model"),
 };

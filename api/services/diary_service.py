@@ -38,6 +38,7 @@ _SELL_REASON_LABELS = {
     "max_hold": "超期",
     "ai_recommend": "AI",
     "signal": "信号",
+    "sell_condition": "信号",
 }
 
 
@@ -303,6 +304,7 @@ def _build_execution(db: Session, diary_date: str) -> DiaryExecution:
         sells_sl=sells_by_reason.get("stop_loss", 0),
         sells_mhd=sells_by_reason.get("max_hold", 0),
         sells_ai=sells_by_reason.get("ai_recommend", 0),
+        sells_signal=sells_by_reason.get("sell_condition", 0),
     )
 
     return DiaryExecution(

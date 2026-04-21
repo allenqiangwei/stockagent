@@ -37,6 +37,8 @@ class DailyPrice(Base):
     volume: Mapped[float] = mapped_column(Float, default=0)
     amount: Mapped[float] = mapped_column(Float, default=0)
     adj_factor: Mapped[float] = mapped_column(Float, default=1.0)
+    snapshot_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    adjust_mode: Mapped[str | None] = mapped_column(String(4), nullable=True)  # raw/qfq/hfq
 
     __table_args__ = (
         UniqueConstraint("stock_code", "trade_date", name="uq_daily_code_date"),

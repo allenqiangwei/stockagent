@@ -29,6 +29,7 @@ class IndicatorConfig:
     adx_periods: list[int] = field(default_factory=lambda: [14])
     atr_periods: list[int] = field(default_factory=lambda: [14])
     calc_obv: bool = True
+    volume_ma_periods: list[int] = field(default_factory=list)
     # Extended indicators: group_name → list of param dicts
     extended: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
@@ -89,6 +90,10 @@ class IndicatorConfig:
                 ))
             elif key == "obv":
                 config.calc_obv = True
+            elif key == "volume_ma":
+                config.volume_ma_periods = sorted(set(
+                    p.get("period", 5) for p in param_sets
+                ))
             else:
                 # Extended indicator (boll, cci, mfi, vwap, etc.)
                 config.extended[key] = param_sets
@@ -103,7 +108,7 @@ class IndicatorCalculator:
       RSI_14, RSI_7, MACD_12_26_9, MACD_hist_12_26_9, MA_5, MA_20, etc.
     """
 
-    AVAILABLE_INDICATORS = ["ma", "ema", "rsi", "macd", "kdj", "adx", "obv", "atr"]
+    AVAILABLE_INDICATORS = ["ma", "ema", "rsi", "macd", "kdj", "adx", "obv", "atr", "volume_ma"]
 
     def __init__(self, config: Optional[IndicatorConfig] = None):
         self.config = config or IndicatorConfig()
@@ -143,6 +148,8 @@ class IndicatorCalculator:
                 self._add_obv(df, result)
             elif indicator == "atr":
                 self._add_atr(df, result)
+            elif indicator == "volume_ma":
+                self._add_volume_ma(df, result)
             else:
                 # Try extended indicator registry
                 self._add_extended(df, result, indicator)
@@ -235,3 +242,9 @@ class IndicatorCalculator:
             atr = ATRIndicator(period=period)
             ind_result = atr(df)
             result[f"ATR_{period}"] = ind_result.values
+
+    def _add_volume_ma(self, df: pd.DataFrame, result: pd.DataFrame) -> None:
+        if "volume" not in df.columns:
+            return
+        for period in self.config.volume_ma_periods:
+            result[f"volume_ma_{period}"] = df["volume"].rolling(window=period, min_periods=period).mean()

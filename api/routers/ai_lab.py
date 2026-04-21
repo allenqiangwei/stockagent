@@ -1,6 +1,8 @@
 """AI Lab router — experiments, templates, strategy promotion."""
 
 import json
+import logging
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -17,6 +19,8 @@ from api.schemas.ai_lab import (
     ExplorationRoundCreate, ExplorationRoundResponse,
     GridSearchRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/lab", tags=["ai-lab"])
 
@@ -78,16 +82,76 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
 
 # ── Experiments ───────────────────────────────────
 
+@router.get("/stats")
+def lab_stats(db: Session = Depends(get_db)):
+    """Lightweight stats for experiment dashboard."""
+    from sqlalchemy import func
+    total = db.query(func.count(Experiment.id)).scalar() or 0
+    in_progress = (
+        db.query(func.count(Experiment.id))
+        .filter(Experiment.status.in_(["pending", "generating", "backtesting"]))
+        .scalar() or 0
+    )
+    promoted = (
+        db.query(func.count(ExperimentStrategy.id))
+        .filter(ExperimentStrategy.promoted == True)
+        .scalar() or 0
+    )
+    latest = (
+        db.query(ExplorationRound.round_number)
+        .order_by(ExplorationRound.round_number.desc())
+        .limit(1)
+        .scalar() or 0
+    )
+    # Current round: read directly from exploration engine (most reliable)
+    current_round = None
+    try:
+        from api.services.exploration_engine import ExplorationEngine
+        engine = ExplorationEngine()
+        status = engine.get_status()
+        if status.get("state") == "running":
+            current_round = {
+                "round_number": status.get("current_round", latest + 1),
+                "step": status.get("current_step", ""),
+                "step_detail": status.get("step_detail", ""),
+                "experiments": status.get("rounds_total", 0),
+                "experiments_done": status.get("rounds_completed", 0),
+                "strategies": status.get("strategies_total", 0),
+                "strategies_done": status.get("strategies_done", 0),
+                "strategies_pending": status.get("strategies_pending", 0),
+                "stda_count": status.get("stda_count", 0),
+                "best_score": status.get("best_score", 0),
+                "promoted": 0,
+                "elapsed_seconds": status.get("elapsed_seconds", 0),
+                "llm_provider": status.get("llm_provider", ""),
+            }
+    except Exception:
+        pass
+
+    return {
+        "total_experiments": total,
+        "in_progress": in_progress,
+        "total_promoted": promoted,
+        "latest_round": latest,
+        "current_round": current_round,
+    }
+
+
 @router.get("/experiments")
 def list_experiments(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
+    status: Optional[str] = Query(None, description="Comma-separated status filter"),
     db: Session = Depends(get_db),
 ):
-    total = db.query(Experiment).count()
+    q = db.query(Experiment)
+    if status:
+        status_list = [s.strip() for s in status.split(",") if s.strip()]
+        if status_list:
+            q = q.filter(Experiment.status.in_(status_list))
+    total = q.count()
     rows = (
-        db.query(Experiment)
-        .order_by(Experiment.created_at.desc())
+        q.order_by(Experiment.created_at.desc())
         .offset((page - 1) * size)
         .limit(size)
         .all()
@@ -103,12 +167,21 @@ def list_experiments(
             .order_by(ExperimentStrategy.score.desc())
             .first()
         )
+        done_count = (
+            db.query(ExperimentStrategy)
+            .filter(
+                ExperimentStrategy.experiment_id == exp.id,
+                ExperimentStrategy.status.in_(["done", "invalid", "failed"]),
+            )
+            .count()
+        )
         items.append({
             "id": exp.id,
             "theme": exp.theme,
             "source_type": exp.source_type,
             "status": exp.status,
             "strategy_count": exp.strategy_count,
+            "done_count": done_count,
             "best_score": best.score if best else 0.0,
             "best_name": best.name if best else "",
             "created_at": exp.created_at.strftime("%Y-%m-%d %H:%M") if exp.created_at else "",
@@ -313,6 +386,7 @@ def update_experiment_strategy(
         "status", "score", "total_return_pct", "max_drawdown_pct",
         "total_trades", "win_rate", "sharpe_ratio", "avg_hold_days",
         "avg_pnl_pct", "regime_stats", "error_message", "profit_loss_ratio",
+        "promoted",
     }
     for key, val in data.items():
         if key in allowed:
@@ -353,9 +427,9 @@ def _run_walk_forward_check(exp_strat, db) -> dict | None:
     """
     from datetime import timedelta
     from src.backtest.walk_forward import run_walk_forward
-    from src.data_storage.database import DataCollector
+    from api.services.data_collector import DataCollector
 
-    collector = DataCollector()
+    collector = DataCollector(db)
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=5 * 365)).strftime("%Y-%m-%d")
 
@@ -401,6 +475,7 @@ def _run_walk_forward_check(exp_strat, db) -> dict | None:
         "test_avg_max_dd": wf.test_avg_max_dd,
         "train_avg_return": wf.train_avg_return,
         "overfit_ratio": wf.overfit_ratio,
+        "wfe_pct": wf.wfe_pct,
         "consistency_pct": wf.consistency_pct,
         "profitable_rounds": wf.profitable_rounds,
         "test_total_trades": wf.test_total_trades,
@@ -412,6 +487,7 @@ def promote_strategy(
     strategy_id: int,
     label: str = Query("[AI]", description="Name prefix label, e.g. [AI], [AI-牛市], [AI-震荡]"),
     category: str = Query("", description="Category override (全能/牛市/熊市/震荡). Inferred from label if empty."),
+    skip_wf: str = Query("", description="Skip walk-forward validation (global early termination)"),
     db: Session = Depends(get_db),
 ):
     """Copy an experiment strategy to the formal strategy library."""
@@ -484,35 +560,74 @@ def promote_strategy(
     # ── Walk-Forward Validation Gate ──────────────────────────────
     # Only for strategies that would enter the pool (can_compete=True).
     # Runs walk-forward to detect overfitting before activation.
+    # WF cache: if 3+ consecutive FAILs from same experiment, skip WF
+    # (all clones from same source share similar overfit characteristics).
     wf_result = None
     wf_passed = True  # default: pass if walk-forward is skipped
 
     if can_compete:
-        try:
-            wf_result = _run_walk_forward_check(exp_strat, db)
-            if wf_result:
-                # Fail if overfit or inconsistent
-                if wf_result.get("overfit_ratio", 0) > 2.5:
-                    wf_passed = False
-                    logger.info(
-                        "Walk-forward FAIL (overfit): S%d overfit_ratio=%.1f",
-                        exp_strat.id, wf_result["overfit_ratio"],
-                    )
-                elif wf_result.get("consistency_pct", 100) < 40:
-                    wf_passed = False
-                    logger.info(
-                        "Walk-forward FAIL (inconsistent): S%d consistency=%.1f%%",
-                        exp_strat.id, wf_result["consistency_pct"],
-                    )
-                else:
-                    logger.info(
-                        "Walk-forward PASS: S%d overfit=%.1f consistency=%.1f%%",
-                        exp_strat.id, wf_result["overfit_ratio"],
-                        wf_result["consistency_pct"],
-                    )
-        except Exception as e:
-            # Walk-forward failure should not block promote
-            logger.warning("Walk-forward error for S%d, skipping: %s", exp_strat.id, e)
+        exp_id = exp_strat.experiment_id
+        wf_cache = getattr(promote_strategy, "_wf_fail_cache", {})
+        promote_strategy._wf_fail_cache = wf_cache  # type: ignore[attr-defined]
+        fail_count = wf_cache.get(exp_id, 0)
+
+        # Also check fingerprint-level WF cache: same buy+sell signals → same WF result
+        fp_wf_cache = getattr(promote_strategy, "_fp_wf_cache", {})
+        promote_strategy._fp_wf_cache = fp_wf_cache  # type: ignore[attr-defined]
+
+        if skip_wf:
+            # Global early termination — caller determined WF will fail
+            wf_passed = False
+            wf_result = {"wfe_pct": 0, "overfit_ratio": 99, "consistency_pct": 0,
+                         "skipped": True, "reason": "global WF early termination"}
+            logger.info("Walk-forward SKIPPED (global early term): S%d", exp_strat.id)
+        elif fingerprint in fp_wf_cache:
+            # Same buy+sell signals already validated — reuse result
+            wf_result = fp_wf_cache[fingerprint]
+            if wf_result.get("wfe_pct", 0) < 50:
+                wf_passed = False
+            logger.info("Walk-forward REUSED (fingerprint cache): S%d WFE=%.1f%%",
+                        exp_strat.id, wf_result.get("wfe_pct", 0))
+        elif fail_count >= 3:
+            # Skip WF — this experiment's strategies consistently fail
+            wf_passed = False
+            wf_result = {"wfe_pct": 0, "overfit_ratio": 99, "consistency_pct": 0,
+                         "skipped": True, "reason": f"experiment {exp_id} has {fail_count} consecutive WF failures"}
+            logger.info("Walk-forward SKIPPED (cached fail): S%d (exp %d, %d prior fails)",
+                        exp_strat.id, exp_id, fail_count)
+        else:
+            try:
+                wf_result = _run_walk_forward_check(exp_strat, db)
+                if wf_result:
+                    wfe = wf_result.get("wfe_pct", 0)
+                    consist = wf_result.get("consistency_pct", 100)
+
+                    if wfe < 50:
+                        wf_passed = False
+                        wf_cache[exp_id] = fail_count + 1
+                        logger.info(
+                            "Walk-forward FAIL (WFE<50%%): S%d WFE=%.1f%% overfit=%.1fx",
+                            exp_strat.id, wfe, wf_result.get("overfit_ratio", 0),
+                        )
+                    elif consist < 40:
+                        wf_passed = False
+                        wf_cache[exp_id] = fail_count + 1
+                        logger.info(
+                            "Walk-forward FAIL (inconsistent): S%d consistency=%.1f%% WFE=%.1f%%",
+                            exp_strat.id, consist, wfe,
+                        )
+                    else:
+                        # PASS — reset fail counter for this experiment
+                        wf_cache[exp_id] = 0
+                        logger.info(
+                            "Walk-forward PASS: S%d WFE=%.1f%% overfit=%.1fx consistency=%.1f%%",
+                            exp_strat.id, wfe, wf_result.get("overfit_ratio", 0), consist,
+                        )
+                    # Store in fingerprint cache for same-signal reuse
+                    if wf_result and fingerprint:
+                        fp_wf_cache[fingerprint] = wf_result
+            except Exception as e:
+                logger.warning("Walk-forward error for S%d, skipping: %s", exp_strat.id, e)
 
     # If walk-forward failed, archive instead of activating
     if not wf_passed:
@@ -761,6 +876,59 @@ def clone_and_backtest(
     }
 
 
+# ── Stock Data Cache (process-level, shared across batches) ──
+
+import time as _time_module
+
+class _StockDataCache:
+    """Process-level cache for stock data. Avoids reloading 5000+ stocks per batch.
+
+    Uses a Condition to prevent stampede: when multiple threads find cache empty,
+    only the first one loads data; others wait for it to finish.
+    """
+    def __init__(self):
+        self._data: dict | None = None
+        self._expires: float = 0
+        self._lock = threading.Lock()
+        self._loading = threading.Event()  # set when NOT loading
+        self._loading.set()
+        self.TTL = 600  # 10 minutes
+
+    def get_or_load(self, loader_fn) -> dict:
+        # Fast path: cache valid
+        with self._lock:
+            if self._data is not None and _time_module.time() < self._expires:
+                logger.info("Stock data cache HIT (%d stocks)", len(self._data))
+                return self._data
+
+        # Wait if another thread is already loading
+        if not self._loading.is_set():
+            logger.info("Stock data cache WAIT (another thread loading)")
+            self._loading.wait(timeout=300)
+            with self._lock:
+                if self._data is not None and _time_module.time() < self._expires:
+                    logger.info("Stock data cache HIT after wait (%d stocks)", len(self._data))
+                    return self._data
+
+        # This thread does the loading
+        self._loading.clear()  # signal: loading in progress
+        try:
+            data = loader_fn()
+            with self._lock:
+                self._data = data
+                self._expires = _time_module.time() + self.TTL
+                logger.info("Stock data cache MISS → loaded %d stocks (TTL=%ds)", len(data), self.TTL)
+            return data
+        finally:
+            self._loading.set()  # signal: loading done
+
+    def clear(self):
+        with self._lock:
+            self._data = None
+            self._expires = 0
+
+_stock_cache = _StockDataCache()
+
 # ── Batch Clone & Backtest ────────────────────────
 
 @router.post("/strategies/{strategy_id}/batch-clone-backtest")
@@ -845,15 +1013,20 @@ def batch_clone_and_backtest(
             engine = AILabEngine(session)
             experiment = session.query(Experiment).get(exp_id)
 
-            # ── Load data ONCE ──
+            # ── Load data (cached across batches) ──
             end_date = datetime.now().strftime("%Y-%m-%d")
             start_date = (datetime.now() - timedelta(days=3 * 365)).strftime("%Y-%m-%d")
-            stock_codes = engine.collector.get_stocks_with_data(min_rows=60)
-            stock_data = {}
-            for code in stock_codes:
-                df = engine.collector.get_daily_df(code, start_date, end_date, local_only=True)
-                if df is not None and not df.empty and len(df) >= 60:
-                    stock_data[code] = df
+
+            def _load_stock_data():
+                codes = engine.collector.get_stocks_with_data(min_rows=60)
+                data = {}
+                for code in codes:
+                    df = engine.collector.get_daily_df(code, start_date, end_date, local_only=True)
+                    if df is not None and not df.empty and len(df) >= 60:
+                        data[code] = df
+                return data
+
+            stock_data = _stock_cache.get_or_load(_load_stock_data)
 
             if not stock_data:
                 for sid in cloned_ids:
@@ -967,85 +1140,117 @@ def batch_clone_and_backtest(
             # Cache re-vectorized results by condition hash to avoid redundant work
             _cond_cache = {}
 
-            # ── Run Phase 3 for each exit_config using shared data ──
-            for i, sid in enumerate(cloned_ids):
+            # ── Phase A: Build work items (serial, needs DB reads) ──
+            work_items = []  # [(sid, name, exit_cfg, precomputed_ref)]
+            for sid in cloned_ids:
                 strat = session.query(ExperimentStrategy).get(sid)
                 if not strat:
                     continue
-                try:
-                    strat.status = "backtesting"
-                    session.commit()
-
-                    # Check if this clone has different conditions
-                    strat_buy = strat.buy_conditions or []
-                    strat_sell = strat.sell_conditions or []
-                    conds_match = (json.dumps(strat_buy, sort_keys=True) == json.dumps(source_buy, sort_keys=True)
-                                   and json.dumps(strat_sell, sort_keys=True) == json.dumps(source_sell, sort_keys=True))
-
-                    if conds_match:
-                        run_precomputed = precomputed
-                    else:
-                        cond_key = json.dumps(strat_buy, sort_keys=True) + "|||" + json.dumps(strat_sell, sort_keys=True)
-                        if cond_key not in _cond_cache:
-                            t1 = _time.time()
-                            _cond_cache[cond_key] = _revectorize(strat_buy, strat_sell, precomputed)
-                            _log.info("Re-vectorized signals for %s: %.1fs", strat.name[:50], _time.time() - t1)
-                        run_precomputed = _cond_cache[cond_key]
-
-                    exit_cfg = strat.exit_config or {}
-                    cancel_event = threading.Event()
-                    timer = threading.Timer(300, cancel_event.set)
-                    timer.daemon = True
-                    timer.start()
-
-                    try:
-                        result = pe.run_with_prepared(
-                            strategy_name=strat.name,
-                            exit_config=exit_cfg,
-                            precomputed=run_precomputed,
-                            regime_map=regime_map,
-                            cancel_event=cancel_event,
-                        )
-                    except (SignalExplosionError, BacktestTimeoutError) as e:
-                        strat.status = "invalid"
-                        strat.error_message = str(e)[:500]
-                        strat.score = 0.0
-                        session.commit()
-                        continue
-                    finally:
-                        timer.cancel()
-
-                    # Score the result
-                    strat.total_trades = result.total_trades
-                    strat.win_rate = result.win_rate
-                    strat.total_return_pct = result.total_return_pct
-                    strat.max_drawdown_pct = result.max_drawdown_pct
-                    strat.avg_hold_days = result.avg_hold_days
-                    strat.avg_pnl_pct = result.avg_pnl_pct
-                    strat.regime_stats = result.regime_stats if result.regime_stats else None
-
-                    if result.total_trades == 0:
-                        strat.score = 0.0
-                        strat.status = "invalid"
-                        strat.error_message = "零交易"
-                    else:
-                        from api.config import get_settings
-                        lab_cfg = get_settings().ai_lab
-                        weights = {
-                            "weight_return": lab_cfg.weight_return,
-                            "weight_drawdown": lab_cfg.weight_drawdown,
-                            "weight_sharpe": lab_cfg.weight_sharpe,
-                            "weight_plr": lab_cfg.weight_plr,
-                        }
-                        strat.score = round(_compute_score(result, weights), 4)
-                        strat.status = "done"
-
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    strat.status = "failed"
-                    strat.error_message = str(e)[:500]
+                strat.status = "backtesting"
                 session.commit()
+
+                strat_buy = strat.buy_conditions or []
+                strat_sell = strat.sell_conditions or []
+                conds_match = (json.dumps(strat_buy, sort_keys=True) == json.dumps(source_buy, sort_keys=True)
+                               and json.dumps(strat_sell, sort_keys=True) == json.dumps(source_sell, sort_keys=True))
+
+                if conds_match:
+                    run_precomputed = precomputed
+                else:
+                    cond_key = json.dumps(strat_buy, sort_keys=True) + "|||" + json.dumps(strat_sell, sort_keys=True)
+                    if cond_key not in _cond_cache:
+                        t1 = _time.time()
+                        _cond_cache[cond_key] = _revectorize(strat_buy, strat_sell, precomputed)
+                        _log.info("Re-vectorized signals for %s: %.1fs", strat.name[:50], _time.time() - t1)
+                    run_precomputed = _cond_cache[cond_key]
+
+                work_items.append((strat.id, strat.name, strat.exit_config or {}, run_precomputed))
+
+            _log.info("Built %d work items (%d unique condition sets)",
+                      len(work_items), 1 + len(_cond_cache))
+
+            # ── Phase B: Run simulations in parallel (pure compute, no DB) ──
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _simulate_one(item):
+                sid, strat_name, exit_cfg, run_pre = item
+                cancel_ev = threading.Event()
+                timer = threading.Timer(300, cancel_ev.set)
+                timer.daemon = True
+                timer.start()
+                try:
+                    result = pe.run_with_prepared(
+                        strategy_name=strat_name,
+                        exit_config=exit_cfg,
+                        precomputed=run_pre,
+                        regime_map=regime_map,
+                        cancel_event=cancel_ev,
+                    )
+                    return (sid, "ok", result)
+                except (SignalExplosionError, BacktestTimeoutError) as e:
+                    return (sid, "invalid", str(e)[:500])
+                except Exception as e:
+                    return (sid, "failed", str(e)[:500])
+                finally:
+                    timer.cancel()
+
+            # ── Phase B+C: Simulate in parallel, write each result to DB immediately ──
+            # Writing per-strategy lets poll see real-time progress (no stall detection).
+            from api.config import get_settings
+            lab_cfg = get_settings().ai_lab
+            weights = {
+                "weight_return": lab_cfg.weight_return,
+                "weight_drawdown": lab_cfg.weight_drawdown,
+                "weight_sharpe": lab_cfg.weight_sharpe,
+                "weight_plr": lab_cfg.weight_plr,
+            }
+
+            n_sim_workers = min(4, os.cpu_count() or 4)
+            completed_count = 0
+            t_sim = _time.time()
+            with ThreadPoolExecutor(max_workers=n_sim_workers) as sim_pool:
+                futures = {sim_pool.submit(_simulate_one, item): item[0] for item in work_items}
+                for fut in as_completed(futures):
+                    sid = futures[fut]
+                    try:
+                        sid, status, payload = fut.result()
+                    except Exception as e:
+                        sid, status, payload = sid, "failed", str(e)[:500]
+
+                    # Write to DB immediately
+                    strat = session.query(ExperimentStrategy).get(sid)
+                    if not strat:
+                        continue
+
+                    if status == "invalid":
+                        strat.status = "invalid"
+                        strat.error_message = payload
+                        strat.score = 0.0
+                    elif status == "failed":
+                        strat.status = "failed"
+                        strat.error_message = payload
+                    else:
+                        result = payload
+                        strat.total_trades = result.total_trades
+                        strat.win_rate = result.win_rate
+                        strat.total_return_pct = result.total_return_pct
+                        strat.max_drawdown_pct = result.max_drawdown_pct
+                        strat.avg_hold_days = result.avg_hold_days
+                        strat.avg_pnl_pct = result.avg_pnl_pct
+                        strat.regime_stats = result.regime_stats if result.regime_stats else None
+
+                        if result.total_trades == 0:
+                            strat.score = 0.0
+                            strat.status = "invalid"
+                            strat.error_message = "零交易"
+                        else:
+                            strat.score = round(_compute_score(result, weights), 4)
+                            strat.status = "done"
+                    session.commit()
+                    completed_count += 1
+
+            _log.info("Parallel simulation: %d strategies in %.1fs (%d workers)",
+                      completed_count, _time.time() - t_sim, n_sim_workers)
 
             experiment.status = "done"
             session.commit()

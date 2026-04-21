@@ -27,6 +27,7 @@ class Strategy(Base):
     source_experiment_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     # ── Strategy Pool fields ──
     signal_fingerprint: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True, default=None)
+    indicator_family: Mapped[str | None] = mapped_column(String(80), index=True, nullable=True, default=None)
     family_rank: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     family_role: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)

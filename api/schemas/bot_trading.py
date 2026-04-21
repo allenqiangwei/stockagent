@@ -63,6 +63,8 @@ class BotTradeReviewItem(BaseModel):
     memory_synced: bool = False
     memory_note_id: Optional[str] = None
     trades: Optional[list] = None
+    strategy_id: Optional[int] = None
+    exit_reason: Optional[str] = None
     created_at: str = ""
 
     model_config = {"from_attributes": True}

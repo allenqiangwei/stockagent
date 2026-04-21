@@ -153,6 +153,21 @@ export function usePoolStatus() {
   });
 }
 
+export function useFamilies() {
+  return useQuery({
+    queryKey: ["strategies", "families"],
+    queryFn: () => strategies.families(),
+  });
+}
+
+export function useFamilyStrategies(fingerprint: string) {
+  return useQuery({
+    queryKey: ["strategies", "family", fingerprint],
+    queryFn: () => strategies.familyStrategies(fingerprint),
+    enabled: !!fingerprint,
+  });
+}
+
 // ── Signals ──────────────────────────────────────
 export function useSignalMeta() {
   return useQuery({
@@ -279,10 +294,23 @@ export function useLabTemplates() {
   });
 }
 
-export function useLabExperiments(page = 1, size = 20) {
+export function useLabStats() {
   return useQuery({
-    queryKey: ["lab", "experiments", page, size],
-    queryFn: () => lab.experiments(page, size),
+    queryKey: ["lab", "stats"],
+    queryFn: () => lab.stats(),
+    staleTime: 10 * 1000,
+    refetchInterval: (query) => {
+      // Poll every 10s when engine is running
+      const data = query.state.data as { current_round?: unknown } | undefined;
+      return data?.current_round ? 10 * 1000 : 60 * 1000;
+    },
+  });
+}
+
+export function useLabExperiments(page = 1, size = 20, status?: string) {
+  return useQuery({
+    queryKey: ["lab", "experiments", page, size, status],
+    queryFn: () => lab.experiments(page, size, status),
   });
 }
 

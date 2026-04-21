@@ -46,7 +46,7 @@ import {
   useAISchedulerStatus,
   useDiary,
 } from "@/hooks/use-queries";
-import { ai, bot } from "@/lib/api";
+import { ai, bot, ops } from "@/lib/api";
 import type { AIReport, AIReportListItem, BotTradeItem, BotStockTimeline, BotTradePlanItem } from "@/types";
 
 // ── helpers ────────────────────────────────────────────
@@ -590,11 +590,11 @@ function ChatWidget() {
 
 // ── BotTradingPanel ─────────────────────────────────────
 
-function BotTradingPanel() {
+function BotTradingPanel({ modelVersion }: { modelVersion: number | null }) {
   const { data: summary } = useBotSummary();
   const { data: portfolio } = useBotPortfolio();
   const { data: reviews } = useBotReviews();
-  const { data: plans } = useBotPlans();
+  const { data: plans } = useBotPlans("pending");
   const [subTab, setSubTab] = useState<"holding" | "plans" | "closed" | "diary">("holding");
   const [diaryDate, setDiaryDate] = useState(() => new Date().toISOString().slice(0, 10));
   const { data: diary } = useDiary(subTab === "diary" ? diaryDate : "");
@@ -916,23 +916,28 @@ function BotTradingPanel() {
                     {/* Row 1: Grade + Stock + Price + Score */}
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums ${
-                          plan.confidence != null && plan.confidence >= 60 ? "bg-emerald-500/15 text-emerald-500" :
-                          plan.confidence != null && plan.confidence >= 40 ? "bg-amber-500/15 text-amber-500" :
-                          plan.confidence != null ? "bg-red-500/15 text-red-500" :
-                          plan.source === "stop_loss" ? "bg-red-500/15 text-red-500" :
-                          plan.source === "take_profit" ? "bg-green-500/15 text-green-500" :
-                          plan.source === "beta" ? "bg-blue-500/15 text-blue-500" :
-                          plan.direction === "buy" ? "bg-emerald-500/15 text-emerald-500" :
-                          "bg-red-500/15 text-red-500"
-                        }`}>
-                          {plan.confidence != null ? `${plan.confidence.toFixed(0)}%` :
-                           plan.source === "stop_loss" ? "止损" :
-                           plan.source === "take_profit" ? "止盈" :
-                           plan.source === "max_hold" ? "超期" :
-                           plan.source === "beta" ? "Beta" :
-                           plan.direction === "buy" ? "买入" : "卖出"}
-                        </span>
+                        <div className="flex items-center gap-0.5">
+                          <span className={`shrink-0 text-[10px] font-bold px-1.5 py-0.5 rounded tabular-nums ${
+                            plan.confidence != null && plan.confidence >= 60 ? "bg-emerald-500/15 text-emerald-500" :
+                            plan.confidence != null && plan.confidence >= 40 ? "bg-amber-500/15 text-amber-500" :
+                            plan.confidence != null ? "bg-red-500/15 text-red-500" :
+                            plan.source === "stop_loss" ? "bg-red-500/15 text-red-500" :
+                            plan.source === "take_profit" ? "bg-green-500/15 text-green-500" :
+                            plan.source === "beta" ? "bg-blue-500/15 text-blue-500" :
+                            plan.direction === "buy" ? "bg-emerald-500/15 text-emerald-500" :
+                            "bg-red-500/15 text-red-500"
+                          }`}>
+                            {plan.confidence != null ? `${plan.confidence.toFixed(0)}%` :
+                             plan.source === "stop_loss" ? "止损" :
+                             plan.source === "take_profit" ? "止盈" :
+                             plan.source === "max_hold" ? "超期" :
+                             plan.source === "beta" ? "Beta" :
+                             plan.direction === "buy" ? "买入" : "卖出"}
+                          </span>
+                          {plan.confidence != null && modelVersion != null && (
+                            <span className="text-[9px] text-zinc-500 shrink-0">v{modelVersion}</span>
+                          )}
+                        </div>
                         <span className="font-mono font-bold text-sm">{plan.stock_code}</span>
                         <span className="text-sm truncate">{plan.stock_name || "—"}</span>
                         {plan.today_close != null && (
@@ -1176,68 +1181,59 @@ function BotTradingPanel() {
                 className="w-full text-left p-3 hover:bg-accent/30 transition-colors"
               >
                 <div className="flex items-center justify-between">
-                  <div>
-                    <span className="font-medium text-sm">{r.stock_name}</span>
-                    <span className="text-xs text-muted-foreground ml-2">{r.stock_code}</span>
-                    <span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded ${r.pnl > 0 ? "bg-red-500/10 text-red-400" : "bg-green-500/10 text-green-400"}`}>
-                      {r.pnl > 0 ? "盈利" : "亏损"}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                      r.exit_reason === "take_profit" ? "bg-emerald-500/15 text-emerald-500" :
+                      r.exit_reason === "stop_loss" ? "bg-red-500/15 text-red-500" :
+                      r.exit_reason === "max_hold" ? "bg-amber-500/15 text-amber-500" :
+                      r.pnl > 0 ? "bg-red-500/10 text-red-400" : "bg-green-500/10 text-green-400"
+                    }`}>
+                      {r.exit_reason === "take_profit" ? "止盈" :
+                       r.exit_reason === "stop_loss" ? "止损" :
+                       r.exit_reason === "max_hold" ? "超期" :
+                       r.exit_reason === "sell_condition" ? "信号" :
+                       r.pnl > 0 ? "盈利" : "亏损"}
                     </span>
-                    {r.memory_synced && (
-                      <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">记忆已同步</span>
-                    )}
+                    <span className="font-mono font-medium text-sm">{r.stock_code}</span>
+                    <span className="text-sm">{r.stock_name}</span>
                   </div>
                   <div className={`text-sm font-mono ${pnlColor(r.pnl)}`}>
-                    {pnlSign(r.pnl)}¥{Math.abs(r.pnl).toLocaleString()} ({pnlSign(r.pnl_pct)}{r.pnl_pct.toFixed(1)}%)
+                    {pnlSign(r.pnl_pct)}{r.pnl_pct.toFixed(1)}%
                   </div>
                 </div>
                 <div className="flex gap-4 mt-1 text-[10px] text-muted-foreground">
-                  <span>持有 {r.holding_days}天</span>
-                  <span>{r.first_buy_date} → {r.last_sell_date}</span>
+                  <span>{r.first_buy_date} → {r.last_sell_date} ({r.holding_days}天)</span>
+                  <span>¥{r.total_buy_amount.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+                  {r.strategy_id && <span className="truncate max-w-[100px]">策略#{r.strategy_id}</span>}
                 </div>
               </button>
 
-              {/* Expanded timeline + review */}
-              {expandedCode === r.stock_code && timelines[r.stock_code] && (
-                <div className="border-t border-border/30 p-3 space-y-3">
-                  <div className="text-[10px] text-muted-foreground font-medium">交易记录</div>
-                  {timelines[r.stock_code].trades.map((t: BotTradeItem) => (
-                    <div key={t.id} className="flex items-start gap-2 text-xs">
-                      <span className={`mt-0.5 ${t.action === "buy" ? "text-red-400" : t.action === "hold" ? "text-muted-foreground" : "text-green-400"}`}>
-                        {t.action === "buy" ? "+" : t.action === "hold" ? "=" : "-"}
+              {/* Expanded: show this review's own trades from JSON (not stock-level timeline) */}
+              {r.trades && r.trades.length > 0 && expandedCode === r.stock_code && (
+                <div className="border-t border-border/30 p-3 space-y-2">
+                  {r.trades.map((t: Record<string, unknown>, i: number) => (
+                    <div key={i} className="flex items-center gap-2 text-xs">
+                      <span className={t.action === "buy" ? "text-red-400" : "text-green-400"}>
+                        {t.action === "buy" ? "买入" : "卖出"}
                       </span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-muted-foreground">{t.trade_date}</span>
-                          <span className="font-medium">
-                            {t.action === "buy" ? "买入" : t.action === "sell" ? "卖出" : t.action === "reduce" ? "减仓" : "持有"}
-                          </span>
-                          {t.sell_reason && t.action !== "buy" && t.action !== "hold" && (
-                            <span className={`text-[10px] px-1 py-0.5 rounded ${
-                              t.sell_reason === "stop_loss" ? "bg-red-500/10 text-red-400" :
-                              t.sell_reason === "take_profit" ? "bg-green-500/10 text-green-400" :
-                              t.sell_reason === "max_hold" ? "bg-amber-500/10 text-amber-400" :
-                              "bg-blue-500/10 text-blue-400"
-                            }`}>
-                              {t.sell_reason === "stop_loss" ? "止损" :
-                               t.sell_reason === "take_profit" ? "止盈" :
-                               t.sell_reason === "max_hold" ? "超期" : "AI"}
-                            </span>
-                          )}
-                          {t.quantity > 0 && <span className="font-mono">{t.quantity}股 @¥{t.price.toFixed(2)}</span>}
-                        </div>
-                        {t.thinking && (
-                          <div className="text-muted-foreground mt-0.5 line-clamp-2">{t.thinking}</div>
-                        )}
-                      </div>
+                      <span className="text-muted-foreground">{String(t.trade_date || "")}</span>
+                      <span className="font-mono">{String(t.quantity || "")}股 @¥{Number(t.price || 0).toFixed(2)}</span>
+                      {t.sell_reason && (
+                        <span className={`text-[10px] px-1 py-0.5 rounded ${
+                          t.sell_reason === "take_profit" ? "bg-emerald-500/10 text-emerald-400" :
+                          t.sell_reason === "stop_loss" ? "bg-red-500/10 text-red-400" :
+                          t.sell_reason === "max_hold" ? "bg-amber-500/10 text-amber-400" :
+                          "bg-blue-500/10 text-blue-400"
+                        }`}>
+                          {t.sell_reason === "take_profit" ? "止盈" :
+                           t.sell_reason === "stop_loss" ? "止损" :
+                           t.sell_reason === "max_hold" ? "超期" : "信号"}
+                        </span>
+                      )}
                     </div>
                   ))}
-
-                  {/* Review content */}
                   {r.review_thinking && (
-                    <div className="mt-3 pt-3 border-t border-border/30">
-                      <div className="text-[10px] text-muted-foreground font-medium mb-1">复盘分析</div>
-                      <div className="text-xs text-muted-foreground whitespace-pre-line">{r.review_thinking}</div>
-                    </div>
+                    <div className="mt-2 pt-2 border-t border-border/30 text-xs text-muted-foreground whitespace-pre-line">{r.review_thinking}</div>
                   )}
                 </div>
               )}
@@ -1564,6 +1560,7 @@ export default function AIPage() {
   const [mobileView, setMobileView] = useState<"reports" | "content" | "chat">("reports");
   // Tablet: show/hide chat overlay
   const [showChat, setShowChat] = useState(false);
+  const [modelVersion, setModelVersion] = useState<number | null>(null);
   const queryClient = useQueryClient();
 
   const reportsQuery = useAIReports();
@@ -1587,6 +1584,17 @@ export default function AIPage() {
       setAnalysisJobId(saved.jobId);
       setAnalysisReportDate(saved.reportDate);
     }
+  }, []);
+
+  // Fetch confidence model health on mount
+  useEffect(() => {
+    ops.confidenceReport()
+      .then((data) => {
+        setModelVersion(data.version);
+      })
+      .catch(() => {
+        // Silently fail if endpoint not available
+      });
   }, []);
 
   // Auto-select first report
@@ -1826,7 +1834,7 @@ export default function AIPage() {
         </>
       ) : (
         <ScrollArea className="flex-1">
-          <BotTradingPanel />
+          <BotTradingPanel modelVersion={modelVersion} />
         </ScrollArea>
       )}
     </>

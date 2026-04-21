@@ -533,7 +533,7 @@ class SignalEngine:
 
         # Alpha scoring — only for buy signals
         alpha_score = 0.0
-        score_breakdown = {"count": 0.0, "quality": 0.0, "diversity": 0.0}
+        score_breakdown = {"count": 0.0, "quality": 0.0, "simplicity": 0.0}
         if action == "buy":
             alpha_score, score_breakdown = self._compute_alpha_score(
                 buy_strategy_objects
@@ -550,49 +550,106 @@ class SignalEngine:
             "score_breakdown": score_breakdown,
         }
 
-    # ── Alpha scoring ─────────────────────────────────────
+    # ── Alpha scoring (v2 — family-based) ───────────────
+
+    @staticmethod
+    def _get_indicator_family(strategy: Strategy) -> str:
+        """Parse indicator family name from a strategy's buy_conditions.
+
+        Extracts indicator names from field/compare_field, sorts and joins.
+        E.g. ATR+RSI, ATR+KAMA+RSI, ATR+RSI+W_RSI
+        """
+        buy = strategy.buy_conditions or []
+        indicators: set[str] = set()
+        # Ordered from longest to shortest to avoid partial matches
+        KNOWN = [
+            'W_RSI', 'W_EMA', 'W_ATR', 'W_KDJ_K', 'W_MACD', 'W_BOLL',
+            'W_PSAR', 'W_ULCER', 'W_ADX',
+            'M_RSI', 'M_EMA', 'M_ATR', 'M_BOLL', 'M_PSAR', 'M_KDJ_K',
+            'M_KAMA', 'M_MACD',
+            'KDJ', 'MACD', 'RSI', 'PSAR', 'BOLL', 'VPT', 'ATR', 'EMA',
+            'KAMA', 'ULTOSC', 'ULCER', 'KELTNER', 'STOCH', 'STOCHRSI',
+            'ADX', 'CCI', 'MFI', 'ROC',
+        ]
+        for cond in buy:
+            for key in ('field', 'compare_field'):
+                f = cond.get(key, '')
+                if not f:
+                    continue
+                for ind in KNOWN:
+                    if f.startswith(ind) or f == ind:
+                        indicators.add(ind)
+                        break
+        return '+'.join(sorted(indicators)) if indicators else 'unknown'
 
     def _compute_alpha_score(
         self,
         buy_strategy_objects: list[Strategy],
     ) -> tuple[float, dict]:
-        """Compute Alpha score based on strategy activation strength.
+        """Alpha v2: score based on indicator-family voting, not raw strategy count.
 
         Three dimensions (0-100 total):
-        - Count  (0-30): How many strategies triggered buy (log scale)
-        - Quality(0-40): Average backtest score of triggering strategies
-        - Diversity(0-30): How many unique signal fingerprint families triggered
+        - Family Vote (0-35): How many distinct indicator families triggered buy
+        - Signal Quality (0-35): Avg of per-family best backtest scores
+        - Simplicity Bonus (0-30): Fewer buy conditions = more robust, less overfitting
+
+        One family = one vote, regardless of how many exit-param variants exist.
+        This prevents inflated scores from duplicate strategies sharing the same
+        buy conditions (e.g. 165 ATR+RSI variants all counting separately).
 
         Returns:
-            (total_score, {"count": x, "quality": y, "diversity": z})
+            (total_score, {"count": family_vote, "quality": quality, "simplicity": simplicity})
         """
         if not buy_strategy_objects:
-            return 0.0, {"count": 0.0, "quality": 0.0, "diversity": 0.0}
+            return 0.0, {"count": 0.0, "quality": 0.0, "simplicity": 0.0}
 
-        # ── 1. Strategy count (0-30) — log scale ──
-        n = len(buy_strategy_objects)
-        count_score = min(30.0, 6.0 * math.log2(n + 1))
-
-        # ── 2. Strategy quality (0-40) — average backtest score ──
-        scores = []
+        # ── Group strategies by indicator family ──
+        from collections import defaultdict
+        families: dict[str, list[Strategy]] = defaultdict(list)
         for s in buy_strategy_objects:
-            bs = s.backtest_summary or {}
-            sc = bs.get("score")
-            if sc is not None:
-                scores.append(float(sc))
-        avg_score = sum(scores) / len(scores) if scores else 0.0
-        quality_score = avg_score * 40.0
+            family = self._get_indicator_family(s)
+            families[family].append(s)
 
-        # ── 3. Skeleton diversity (0-30) — unique fingerprint families ──
-        fingerprints = {s.signal_fingerprint for s in buy_strategy_objects if s.signal_fingerprint}
-        fp_count = len(fingerprints)
-        diversity_score = min(30.0, 10.0 * math.log2(fp_count + 1)) if fp_count > 0 else 0.0
+        n_families = len(families)
 
-        total = float(round(count_score + quality_score + diversity_score, 1))
+        # ── 1. Family Vote (0-35): distinct families that triggered ──
+        # 1 family=12, 2=19, 3=24, 5=31, 8+=35
+        count_score = min(35.0, 12.0 * math.log2(n_families + 1))
+
+        # ── 2. Signal Quality (0-35): per-family best score, then average ──
+        # Probation discount: strategies on decay probation have their score
+        # contribution reduced (default 0.7x) so they rank lower until rehabilitated.
+        from api.services.strategy_pool import StrategyPoolManager
+        family_bests: list[float] = []
+        for family, strats in families.items():
+            best = 0.0
+            for s in strats:
+                bs = s.backtest_summary or {}
+                sc = bs.get("score")
+                if sc is not None:
+                    discount = StrategyPoolManager.get_probation_discount(s)
+                    adjusted = float(sc) * discount
+                    if adjusted > best:
+                        best = adjusted
+            if best > 0:
+                family_bests.append(best)
+        avg_best = sum(family_bests) / len(family_bests) if family_bests else 0.0
+        quality_score = avg_best * 35.0
+
+        # ── 3. Simplicity bonus (0-30): fewer conditions = more robust ──
+        # 3 conditions (base RSI+ATR) = 30 (maximum), 4 = 20, 5 = 10, 6+ = 0
+        max_conds = 0
+        for s in buy_strategy_objects:
+            n_conds = len(s.buy_conditions or [])
+            if n_conds > max_conds:
+                max_conds = n_conds
+        simplicity_score = max(0.0, 30.0 - max(0, (max_conds - 3)) * 10.0)
+
+        total = float(round(count_score + quality_score + simplicity_score, 1))
         breakdown = {
             "count": float(round(count_score, 1)),
             "quality": float(round(quality_score, 1)),
-            "diversity": float(round(diversity_score, 1)),
+            "simplicity": float(round(simplicity_score, 1)),
         }
         return total, breakdown
 
@@ -729,19 +786,25 @@ class SignalEngine:
         alpha_score = row.final_score or 0.0
         count_score = row.swing_score or 0.0
         quality_score = row.trend_score or 0.0
-        diversity_score = round(max(0.0, alpha_score - count_score - quality_score), 1)
+        simplicity_score = round(max(0.0, alpha_score - count_score - quality_score), 1)
 
         # Gamma fields (default to 0/null when no snapshot)
         gamma_score = row.gamma_score or 0.0
 
-        # Combined score for display purposes.
-        # Uses cold-start weights (80/20) as a static approximation.
+        # Combined score for display purposes (static cold-start approximation).
         # The actual decision-time combined_score lives in BotTradePlan
-        # and uses dynamic phase-based weights from _get_gamma_phase().
+        # and uses dynamic phase-based weights with real beta values.
+        _BETA_NEUTRAL = 0.5  # neutral beta for display when not yet computed
         if row.gamma_score is not None:
-            combined = round((alpha_score / 100.0) * 0.8 + (row.gamma_score / 100.0) * 0.2, 4)
+            combined = round(
+                (alpha_score / 100.0) * 0.70 + (row.gamma_score / 100.0) * 0.15 + _BETA_NEUTRAL * 0.15,
+                4,
+            )
         else:
-            combined = round(alpha_score / 100.0, 4)
+            combined = round(
+                (alpha_score / 100.0) * 0.85 + _BETA_NEUTRAL * 0.15,
+                4,
+            )
 
         return {
             "stock_code": row.stock_code,
@@ -751,7 +814,7 @@ class SignalEngine:
             "alpha_score": alpha_score,
             "count_score": count_score,
             "quality_score": quality_score,
-            "diversity_score": diversity_score,
+            "simplicity_score": simplicity_score,
             "signal_level": row.signal_level,
             "signal_level_name": row.signal_level_name,
             "action": row.market_regime or "hold",

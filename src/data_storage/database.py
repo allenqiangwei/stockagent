@@ -695,6 +695,7 @@ class Database:
 
                 title_hash = self._compute_title_hash(title)
 
+                now = datetime.now()
                 params = (
                     title_hash,
                     title,
@@ -704,14 +705,15 @@ class Database:
                     news.get("url", ""),
                     news.get("publish_time", ""),
                     news.get("content", ""),
-                    fetch_date
+                    fetch_date,
+                    now
                 )
                 if self._use_pg:
                     cursor.execute("""
                         INSERT INTO news_archive
                         (title_hash, title, source, sentiment_score, keywords,
-                         url, publish_time, content, fetch_date)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         url, publish_time, content, fetch_date, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (title_hash) DO NOTHING
                     """, params)
                     if cursor.rowcount > 0:
@@ -723,8 +725,8 @@ class Database:
                         cursor.execute("""
                             INSERT INTO news_archive
                             (title_hash, title, source, sentiment_score, keywords,
-                             url, publish_time, content, fetch_date)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             url, publish_time, content, fetch_date, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, params)
                         inserted += 1
                     except sqlite3.IntegrityError:

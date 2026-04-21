@@ -17,9 +17,7 @@ import {
   Zap,
   Newspaper,
   FlaskConical,
-  Settings2,
   Wrench,
-  BrainCircuit,
   Menu,
   Sparkles,
   Flame,
@@ -32,10 +30,8 @@ const navItems = [
   { href: "/signals", label: "信号", icon: Zap },
   { href: "/sectors", label: "板块", icon: Flame },
   { href: "/news", label: "资讯", icon: Newspaper },
-  { href: "/backtest", label: "回测", icon: FlaskConical },
-  { href: "/lab", label: "实验室", icon: BrainCircuit },
+  { href: "/lab", label: "量化工作台", icon: FlaskConical },
   { href: "/ai", label: "AI分析", icon: Sparkles },
-  { href: "/strategies", label: "策略管理", icon: Settings2 },
   { href: "/settings", label: "设置", icon: Wrench },
 ];
 

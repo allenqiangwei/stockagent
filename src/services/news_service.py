@@ -108,6 +108,13 @@ class NewsService:
             # 获取所有新闻
             all_news = self.crawler.fetch_all(max_count=self.max_news)
 
+            # LLM rescore (replaces keyword-based scores with Qwen analysis)
+            try:
+                rescored = self.crawler.rescore_with_llm(all_news)
+                logger.info("LLM rescored %d/%d news", rescored, len(all_news))
+            except Exception as e:
+                logger.warning("LLM rescore skipped: %s", e)
+
             # 计算统计信息
             by_source = {"cls": [], "eastmoney": [], "sina": []}
             for news in all_news:

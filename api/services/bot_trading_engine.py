@@ -770,3 +770,17 @@ def _create_review(db: Session, code: str, name: str, last_sell_date: str,
         create_beta_review(db, review)
     except Exception as e:
         logger.warning("Beta review creation failed for %s: %s", code, e)
+
+    # Update decay probation state (if strategy is on probation)
+    if strategy_id:
+        try:
+            from api.services.strategy_pool import StrategyPoolManager
+            from api.models.strategy import Strategy
+            strat = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+            if strat and StrategyPoolManager.is_on_probation(strat):
+                is_win = (pnl_pct or 0) > 0
+                cleared = StrategyPoolManager.update_decay_probation(strat, is_win)
+                if cleared:
+                    logger.info("Probation cleared for S%d after trade on %s", strategy_id, code)
+        except Exception as e:
+            logger.warning("Decay probation update failed for S%d: %s", strategy_id, e)

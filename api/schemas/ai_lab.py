@@ -126,10 +126,27 @@ class BatchCloneBacktestRequest(BaseModel):
     N individual clone-backtest calls.
     """
     source_strategy_id: int
-    exit_configs: list[dict]  # [{"name_suffix": "SL8_TP1", "exit_config": {...}}, ...]
+    exit_configs: list[dict]  # [{"name_suffix": "SL8_TP1", "exit_config": {...}, "buy_conditions": [...], "sell_conditions": [...]}, ...]
     initial_capital: float = 100000.0
     max_positions: int = 10
     max_position_pct: float = 30.0
+
+
+# ── Grid Search ──────────────────────────────────
+
+class GridSearchRequest(BaseModel):
+    """Parameter grid search for a strategy's exit config.
+
+    Generates all combinations of SL/TP/MHD from the given ranges,
+    runs batch backtest, returns a results matrix.
+    """
+    stop_loss_values: list[float] = [-5, -8, -10, -15]
+    take_profit_values: list[float] = [0.5, 1.0, 1.5, 2.0, 3.0]
+    max_hold_days_values: list[int] = [2, 5, 7, 10, 15]
+    initial_capital: float = 100000.0
+    max_positions: int = 10
+    max_position_pct: float = 30.0
+    auto_promote: bool = False  # Auto-promote StdA+ results to strategy library
 
 
 # ── Exploration Rounds ───────────────────────────

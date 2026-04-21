@@ -41,7 +41,6 @@ def list_strategies(
 
 class _RebalanceRequest(BaseModel):
     dry_run: bool = False
-    max_per_family: int = 3
 
 
 @router.post("/pool/rebalance")
@@ -49,10 +48,20 @@ def rebalance_pool(
     body: _RebalanceRequest = _RebalanceRequest(),
     db: Session = Depends(get_db),
 ):
-    """Rebalance strategy pool: archive redundant strategies, keep top-N per family."""
+    """Rebalance strategy pool by skeleton: quota per skeleton based on avg champion score."""
     from api.services.strategy_pool import StrategyPoolManager
     mgr = StrategyPoolManager(db)
-    return mgr.rebalance(max_per_family=body.max_per_family, dry_run=body.dry_run)
+    return mgr.rebalance_by_skeleton(dry_run=body.dry_run)
+
+
+@router.post("/pool/check-decay")
+def check_champion_decay(db: Session = Depends(get_db)):
+    """Run champion decay check — demote dormant or losing champions."""
+    from api.services.strategy_pool import StrategyPoolManager
+
+    mgr = StrategyPoolManager(db)
+    demoted = mgr.check_champion_decay()
+    return {"demoted_count": len(demoted), "demoted": demoted}
 
 
 @router.get("/pool/status")
@@ -74,16 +83,30 @@ def list_families(db: Session = Depends(get_db)):
 
 @router.get("/families/{fingerprint}")
 def get_family(fingerprint: str, db: Session = Depends(get_db)):
-    """Get all strategies in a specific signal family (including archived)."""
+    """Get active strategies in a specific signal family (excludes archived)."""
     strategies = (
         db.query(Strategy)
-        .filter(Strategy.signal_fingerprint == fingerprint)
+        .filter(
+            Strategy.signal_fingerprint == fingerprint,
+            Strategy.archived_at.is_(None),
+        )
         .order_by(Strategy.family_rank.nullslast(), Strategy.id)
         .all()
     )
     if not strategies:
         raise HTTPException(404, "Family not found")
     return [StrategyResponse.model_validate(s) for s in strategies]
+
+
+@router.post("/pool/deduplicate")
+def deduplicate_pool(
+    threshold: float = Query(0.95, description="Correlation threshold"),
+    dry_run: bool = Query(True, description="If true, only report without archiving"),
+    db: Session = Depends(get_db),
+):
+    """Find and archive strategies with highly correlated returns."""
+    from api.services.strategy_correlation import deduplicate_correlated
+    return deduplicate_correlated(db, threshold=threshold, dry_run=dry_run)
 
 
 @router.post("/cleanup")
@@ -93,6 +116,7 @@ def cleanup_strategies(
     max_drawdown_pct: float = Query(18.0, description="Maximum drawdown % to keep"),
     min_trades: int = Query(50, description="Minimum trades to keep"),
     min_win_rate: float = Query(60.0, description="Minimum win rate % to keep"),
+    min_plr: float = Query(1.2, description="Minimum profit/loss ratio to keep"),
     dry_run: bool = Query(False, description="If true, only count without deleting"),
     db: Session = Depends(get_db),
 ):
@@ -109,8 +133,9 @@ def cleanup_strategies(
         dd = abs(bs.get("max_drawdown_pct", 0) or 0)
         trades = bs.get("total_trades", 0) or 0
         win_rate = bs.get("win_rate", 0) or 0
+        plr = bs.get("profit_loss_ratio", 0) or 0
         # Keep if meets ALL criteria; delete if fails ANY
-        if score < min_score or ret <= min_return_pct or dd >= max_drawdown_pct or trades < min_trades or win_rate <= min_win_rate:
+        if score < min_score or ret <= min_return_pct or dd >= max_drawdown_pct or trades < min_trades or win_rate <= min_win_rate or plr < min_plr:
             to_delete.append(s)
 
     if dry_run:

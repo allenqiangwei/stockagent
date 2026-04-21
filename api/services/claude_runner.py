@@ -29,7 +29,7 @@ You have access to a local API at http://localhost:8050 with these endpoints:
 - GET /api/strategies — list of active strategies
 - GET /api/market/kline?code=XXXXXX&period=daily&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD — K-line data
 - GET /api/market/quote?code=XXXXXX — real-time quote
-- GET /api/news/archive?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&keyword=X&limit=N — query historical news from database (YOU decide the date range). Returns total_count + returned. Default limit=500, max 2000. If total_count > returned, re-fetch with higher limit.
+- GET /api/news/archive?limit=N — query the most recent news from database. Returns returned (number actually fetched). Use FIXED limits: weekdays (Mon-Sat) limit=3000, Sunday limit=5000. Do NOT use start_date/end_date — always fetch by limit only (most recent N articles).
 - GET /api/news/sentiment/latest — latest DeepSeek sentiment analysis summary
 - POST /api/news/sentiment/analyze?hours_back=N — trigger fresh DeepSeek sentiment analysis (N=hours to look back, default 24, max 168)
 - GET /api/stocks/watchlist — user's watchlist
@@ -43,11 +43,9 @@ IMPORTANT: When calling curl, always use: NO_PROXY=localhost,127.0.0.1 curl ...
 
 CRITICAL WORKFLOW:
 1. FIRST fetch current holdings via /api/bot/portfolio and pending plans via /api/bot/plans/pending
-2. Fetch news from the DATABASE via /api/news/archive — YOU decide the date range based on market context:
-   - Normal days: last 1-2 days (start_date=yesterday, end_date=today)
-   - After weekends/holidays: cover the full gap (e.g. start_date=Friday, end_date=Monday)
-   - Major events or volatility: extend to 3-7 days for deeper context
-   - Use keyword= to search for specific topics if needed
+2. Fetch news from the DATABASE via /api/news/archive — use FIXED limit by weekday (do NOT use date range):
+   - Monday to Saturday: GET /api/news/archive?limit=3000
+   - Sunday: GET /api/news/archive?limit=5000
    - Summarize the key news themes and their potential market impact in your report
 3. Then fetch signals, sentiment, and market data
 4. Base your recommendations on ACTUAL holdings — do NOT recommend "hold" for stocks you don't hold
@@ -60,7 +58,15 @@ Your task is to produce a daily market analysis report with:
 2. Key signal highlights — which stocks have strong buy/sell signals and why
 3. Strategy performance — which strategies are firing and their recent track record
 4. Risk warnings — any concerning patterns
-5. Actionable recommendations — specific stocks to watch with entry/exit levels
+5. Top 5 trade plan highlights — read from /api/bot/plans/pending and present the top 5 by combined_score
+
+IMPORTANT — Trade plans are PRE-CREATED by the signal system:
+The system automatically creates trade plans from ALL buy signals using the Beta scorer.
+You do NOT need to decide what to buy — plans already exist at /api/bot/plans/pending.
+Your job is to:
+1. Read the pending plans and present the TOP 5 (by combined_score) in your recommendations
+2. Provide market context, risk analysis, and news sentiment for each
+3. For existing holdings (/api/bot/portfolio), recommend "hold" or "sell" based on news/fundamentals
 
 IMPORTANT — Automatic Exit Monitoring:
 The system has automatic exit monitoring for all bot positions:
@@ -71,30 +77,11 @@ These exits happen BEFORE your analysis runs. You do NOT need to recommend "sell
 Your sell recommendations should focus on: fundamental changes, negative news events, or situations
 where you believe a position should exit BEFORE the automatic triggers fire.
 
-BETA FACTOR — Non-technical analysis:
-After identifying buy candidates from signals, query their Beta scorecard:
-  GET /api/beta/scorecard?stock_codes=CODE1,CODE2
-The scorecard provides: industry historical win rate, regime match, valuation risk, sentiment reliability.
-Each stock gets a beta_score (0-100). Use it alongside alpha_score:
-- alpha高+beta高: strongly recommend
-- alpha高+beta低: recommend with caution, explain risk_flags
-- alpha低+beta高: worth watching
-- alpha低+beta低: skip
-Include beta_score in your recommendation output.
-
 Recommendation action rules:
-- "buy": Only for stocks NOT currently held that you want to open a new position. Must include entry_price.
+- "buy": Pick the top 5 distinct stocks from /api/bot/plans/pending (sorted by combined_score desc, one entry per stock_code). Use the alpha_score and beta_score from that plan entry directly — do NOT look up signals/today for these values.
 - "hold": ONLY for stocks the bot currently holds and should keep. Never use "hold" for stocks not in portfolio.
-- "sell" / "reduce": ONLY for stocks currently held that should be exited or reduced. Must include entry_price (the price you want to sell at).
-- Do NOT include stocks that require no action. If a signal fires but you don't recommend acting, skip it.
-
-CRITICAL — entry_price rules:
-- entry_price is the REALISTIC price you expect to execute at on the NEXT TRADING DAY.
-- For "buy": set entry_price within 0-2% BELOW today's close (a slight discount for a limit buy order).
-- For "sell"/"reduce": set entry_price within 0-2% ABOVE today's close (a slight premium for a limit sell order).
-- The system uses entry_price as a limit order trigger. If the price is unrealistically far from the current market, the trade will NEVER execute.
-- Do NOT use long-term target prices or dream prices as entry_price. Use what's achievable tomorrow.
-- entry_price is REQUIRED for all buy/sell/reduce recommendations. Never omit it.
+- "sell" / "reduce": ONLY for stocks currently held that should be exited or reduced based on news/fundamentals.
+- Do NOT invent buy recommendations — only include plans that already exist in /api/bot/plans/pending.
 
 Output your analysis as a JSON object with these fields:
 - report_type: "daily"
@@ -103,8 +90,8 @@ Output your analysis as a JSON object with these fields:
 - recommendations: list of {stock_code, stock_name, action, reason, entry_price, stop_loss, target, alpha_score, beta_score}
   - entry_price: REQUIRED — the realistic next-day execution price (see rules above)
   - target: your price target after the position is opened (for tracking, not execution)
-  - alpha_score: copy directly from /api/signals/today response for this stock (the "alpha_score" field). If the stock has no signal or no alpha_score, use 0.
-  - beta_score: from /api/beta/scorecard for this stock. If not available, use 50 (neutral).
+  - alpha_score: copy directly from /api/bot/plans/pending for this stock (the "alpha_score" field). Do NOT use /api/signals/today for alpha_score.
+  - beta_score: environment factor (0-1) reflecting market regime, sector heat, valuation, and sentiment. Already factored into combined_score. 0.5=neutral, >0.6=favorable, <0.4=unfavorable.
 - strategy_actions: list of {strategy_name, signal_count, top_stocks}
 - thinking_process: your detailed reasoning (string)
 - summary: 2-3 sentence executive summary (string)
@@ -143,7 +130,7 @@ Your job is to assess the current A-share market regime and select the best 3-5 
 for today's signal generation.
 
 You have access to a local API at http://localhost:8050 with these endpoints:
-- GET /api/news/archive?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&limit=N — query historical news from database (you decide the date range)
+- GET /api/news/archive?limit=N — query the most recent news. Returns returned (number actually fetched). Use limit=3000 (Mon-Sat) or limit=5000 (Sun). Do NOT use date range parameters.
 - GET /api/news/sentiment/latest — latest DeepSeek sentiment analysis summary
 - GET /api/market/quote?code=000001 — Shanghai Composite index quote (proxy for market state)
 - GET /api/bot/portfolio — current bot holdings
@@ -268,6 +255,11 @@ def _run_cli(args: list[str], timeout: int = 180) -> dict:
 
 def run_daily_analysis(trade_date: str) -> Optional[dict]:
     """Run Claude to produce a daily analysis report."""
+    from api.services.job_manager import get_job_manager
+    jm = get_job_manager()
+    job_id = jm.create("ai_analysis", f"AI analysis {trade_date}", triggered_by="system")
+    jm.start(job_id)
+
     prompt = (
         f"Today is {trade_date}. Please analyze today's A-share market situation "
         f"using the available APIs. Fetch today's signals, check the watchlist, "
@@ -281,18 +273,19 @@ def run_daily_analysis(trade_date: str) -> Optional[dict]:
         "--model", _MODEL,
         "--append-system-prompt", _ANALYSIS_SYSTEM_PROMPT,
         "--permission-mode", "bypassPermissions",
-        "--max-budget-usd", "1.0",
     ]
 
     try:
         output = _run_cli(args, timeout=300)
     except Exception as e:
         logger.error("AI daily analysis failed: %s", e)
+        jm.fail(job_id, str(e)[:500])
         return None
 
     result_text = output.get("result", "")
     if not result_text:
         logger.warning("AI analysis returned empty result")
+        jm.fail(job_id, "Empty result from Claude CLI")
         return None
 
     # Parse inner JSON from result text
@@ -318,6 +311,7 @@ def run_daily_analysis(trade_date: str) -> Optional[dict]:
     # Ensure required fields
     result.setdefault("report_type", "daily")
     result.setdefault("summary", "")
+    jm.succeed(job_id, f"Analysis complete for {trade_date}")
     return result
 
 
@@ -335,7 +329,6 @@ def run_chat(
         "--model", _MODEL,
         "--append-system-prompt", _CHAT_SYSTEM_PROMPT,
         "--permission-mode", "bypassPermissions",
-        "--max-budget-usd", "0.5",
     ]
 
     if claude_session_id:

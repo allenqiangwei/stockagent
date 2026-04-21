@@ -4,9 +4,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from api.config import get_settings
+from api.deps import require_role
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -47,12 +48,15 @@ def get_config():
 
     return {
         "data_sources": {
-            "realtime_quotes": ds.get("realtime_quotes", "tushare"),
-            "historical_daily": ds.get("historical_daily", "tushare"),
-            "index_data": ds.get("index_data", "tushare"),
-            "sector_data": ds.get("sector_data", "tushare"),
+            "realtime_quotes": ds.get("realtime_quotes", "tdx"),
+            "historical_daily": ds.get("historical_daily", "tdx"),
+            "index_data": ds.get("index_data", "tdx"),
+            "sector_data": ds.get("sector_data", "tdx"),
             "money_flow": ds.get("money_flow", "tushare"),
-            "stock_list": ds.get("stock_list", "tushare"),
+            "stock_list": ds.get("stock_list", "tdx"),
+            "daily_batch": ds.get("daily_batch", "tushare"),
+            "fundamentals": ds.get("fundamentals", "tushare"),
+            "trade_calendar": ds.get("trade_calendar", "tushare"),
             "fallback_enabled": ds.get("fallback_enabled", True),
             "tushare_token_masked": _mask_token(ts_cfg.get("token", "")),
             "tushare_rate_limit": ts_cfg.get("rate_limit", 190),
@@ -82,7 +86,7 @@ def get_config():
     }
 
 
-@router.put("")
+@router.put("", dependencies=[Depends(require_role("admin"))])
 def update_config(body: dict[str, Any]):
     """Partially update config.yaml and reload settings.
 

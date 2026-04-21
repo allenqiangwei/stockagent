@@ -151,17 +151,17 @@ class NewsAgentEngine:
     def __init__(self, db: Session):
         self.db = db
         settings = get_settings()
-        self._ds_config = settings.deepseek
-        self._ds_client: Optional[OpenAI] = None
+        self._llm_config = settings.qwen  # Local Qwen (was: settings.deepseek)
+        self._llm_client: Optional[OpenAI] = None
 
     @property
-    def ds_client(self) -> OpenAI:
-        if self._ds_client is None:
-            self._ds_client = OpenAI(
-                api_key=self._ds_config.api_key,
-                base_url=self._ds_config.base_url,
+    def llm_client(self) -> OpenAI:
+        if self._llm_client is None:
+            self._llm_client = OpenAI(
+                api_key=self._llm_config.api_key,
+                base_url=self._llm_config.base_url,
             )
-        return self._ds_client
+        return self._llm_client
 
     # ── Public API ─────────────────────────────────────
 
@@ -174,6 +174,13 @@ class NewsAgentEngine:
         if not news_rows:
             logger.info("No news to analyze for %s", period_type)
             return {"status": "no_news", "events": 0, "sectors": 0, "signals": 0}
+
+        # Layer 0: rule-based pre-filter (reject ads, irrelevant, too short)
+        from api.services.news_filter import filter_batch
+        news_rows, _filter_stats = filter_batch(news_rows, title_key="title", content_key="content")
+        if not news_rows:
+            logger.info("All news filtered out for %s", period_type)
+            return {"status": "all_filtered", "events": 0, "sectors": 0, "signals": 0}
 
         logger.info("News agent pipeline starting: %d articles, period=%s",
                      len(news_rows), period_type)
@@ -373,35 +380,72 @@ class NewsAgentEngine:
 
     # ── DeepSeek API ───────────────────────────────────
 
-    def _call_deepseek(self, system_prompt: str, user_prompt: str) -> Optional[dict | list]:
-        """Call DeepSeek API with retry. Returns parsed JSON."""
-        from api.utils.network import no_proxy
+    @staticmethod
+    def _extract_json(text: str) -> str:
+        """Extract JSON from LLM output, handling common issues.
 
+        Handles: markdown fences, thinking tags, trailing garbage, truncated arrays.
+        """
+        t = text.strip()
+        # Strip <think>...</think> tags (Qwen thinking mode)
+        if "<think>" in t:
+            idx = t.rfind("</think>")
+            if idx >= 0:
+                t = t[idx + 8:].strip()
+            else:
+                # No closing tag — take everything after <think>
+                t = t.split("<think>")[-1].strip()
+        # Strip markdown fences
+        if t.startswith("```"):
+            t = t.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        # Find first [ or { to skip any preamble text
+        for i, ch in enumerate(t):
+            if ch in "[{":
+                t = t[i:]
+                break
+        # Fix truncated JSON: if ends mid-string/object, try to close it
+        if t and t[-1] not in "]}" and (t[0] in "[{"):
+            # Truncated — try to find last complete item
+            last_brace = max(t.rfind("}"), t.rfind("]"))
+            if last_brace > 0:
+                t = t[:last_brace + 1]
+                # Close unclosed array/object
+                if t[0] == "[" and t[-1] == "}":
+                    t += "]"
+        return t
+
+    def _call_deepseek(self, system_prompt: str, user_prompt: str) -> Optional[dict | list]:
+        """Call LLM API with retry. Returns parsed JSON.
+
+        Uses local Qwen via OpenAI-compatible endpoint (configurable in settings.qwen).
+        Includes JSON repair for common Qwen output issues.
+        """
+        content = None
         for attempt in range(MAX_RETRIES + 1):
             try:
-                with no_proxy():
-                    response = self.ds_client.chat.completions.create(
-                        model=self._ds_config.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=0.3,
-                        max_tokens=4000,
-                    )
+                response = self.llm_client.chat.completions.create(
+                    model=self._llm_config.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt + "\n\n请直接输出JSON，不要输出其他内容。不要使用markdown格式。"},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=8000,
+                )
                 content = response.choices[0].message.content
                 if not content:
                     return None
-                return json.loads(content)
+                text = self._extract_json(content)
+                return json.loads(text)
             except json.JSONDecodeError as e:
-                logger.error("DeepSeek JSON parse error: %s", e)
+                logger.error("LLM JSON parse error (attempt %d): %s — content: %s",
+                             attempt + 1, e, (content or "")[:200])
+                if attempt < MAX_RETRIES:
+                    time.sleep(RETRY_DELAY)
+                    continue  # Retry on JSON error (Qwen may produce valid JSON on retry)
                 return None
             except Exception as e:
-                if "Content Exists Risk" in str(e):
-                    logger.warning("DeepSeek content risk, skipping")
-                    return None
-                logger.warning("DeepSeek call failed (attempt %d): %s", attempt + 1, e)
+                logger.warning("LLM call failed (attempt %d): %s", attempt + 1, e)
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_DELAY)
         return None

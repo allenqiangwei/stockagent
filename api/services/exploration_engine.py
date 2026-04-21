@@ -205,6 +205,17 @@ STDA_TRADES = 50
 STDA_WR = 60.0
 
 
+def _adjusted_stda_score(experience: dict) -> float:
+    """Raise StdA+ score threshold based on total candidates tested."""
+    import math
+
+    total = experience.get("meta", {}).get("total_strategies_scanned", 0)
+    if total <= 1000:
+        return STDA_SCORE
+    haircut = min(0.10, 0.02 * math.log10(total / 1000))
+    return round(STDA_SCORE + haircut, 4)
+
+
 # ────────────────────────────────────────────────────────────────
 # 4.  Helper functions
 # ────────────────────────────────────────────────────────────────
@@ -215,10 +226,13 @@ def is_stda_plus(
     max_drawdown_pct: float,
     total_trades: int,
     win_rate: float,
+    *,
+    score_threshold: float | None = None,
 ) -> bool:
     """Return True if metrics meet StdA+ criteria."""
+    threshold = score_threshold if score_threshold is not None else STDA_SCORE
     return (
-        score >= STDA_SCORE
+        threshold <= score
         and total_return_pct > STDA_RETURN
         and max_drawdown_pct < STDA_DD
         and total_trades >= STDA_TRADES
@@ -309,16 +323,28 @@ _API_BASE = "http://127.0.0.1:8050/api/"
 
 
 def _api(method: str, path: str, data: dict | None = None, timeout: int = 120) -> dict:
-    """Call local API via curl subprocess. Returns parsed JSON."""
+    """Call local API via curl subprocess. Returns parsed JSON.
+
+    Uses stdin (--data-binary @-) for POST/PUT payloads to avoid
+    OS argument-length limits on large JSON bodies.
+    """
     url = f"{_API_BASE}{path}"
     cmd = ["curl", "-s", "-X", method.upper(), url, "-H", "Content-Type: application/json"]
+    stdin_data = None
     if data is not None:
-        cmd += ["-d", json.dumps(data, ensure_ascii=False)]
+        payload = json.dumps(data, ensure_ascii=False)
+        # Use stdin for large payloads to avoid ARG_MAX limit
+        cmd += ["--data-binary", "@-"]
+        stdin_data = payload
     cmd += ["--max-time", str(timeout)]
 
     try:
         env = {"NO_PROXY": "localhost,127.0.0.1", "PATH": "/usr/bin:/bin"}
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10, env=env)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=timeout + 10, env=env,
+            input=stdin_data,
+        )
         if result.returncode != 0:
             logger.error("curl %s %s failed: %s", method, path, result.stderr)
             return {"error": result.stderr}
@@ -333,10 +359,14 @@ def _api(method: str, path: str, data: dict | None = None, timeout: int = 120) -
         return {"error": str(e)}
 
 
-def _promote_strategy(strategy_id: int, label: str = "[AI]", category: str = "") -> dict:
+def _promote_strategy(strategy_id: int, label: str = "[AI]", category: str = "", skip_wf: bool = False) -> dict:
     """Promote an experiment strategy via API with URL-encoded label/category."""
-    params = urllib.parse.urlencode({"label": label, "category": category})
-    return _api("POST", f"lab/strategies/{strategy_id}/promote?{params}")
+    params = urllib.parse.urlencode({"label": label, "category": category, "skip_wf": "1" if skip_wf else ""})
+    result = _api("POST", f"lab/strategies/{strategy_id}/promote?{params}", timeout=300)
+    if not result:
+        logger.warning("Promote S%d returned empty result (curl may have failed)", strategy_id)
+        return {"error": "empty_response"}
+    return result
 
 
 # ────────────────────────────────────────────────────────────────
@@ -554,7 +584,486 @@ def generate_skeleton_candidates(
 
 
 # ────────────────────────────────────────────────────────────────
-# 8.  LLM Planner
+# 7b. Parameterized Exit Grid Generator
+# ────────────────────────────────────────────────────────────────
+
+# ATR regime-based exit grids — tighter params for calm stocks, wider for volatile
+_EXIT_GRID_BY_REGIME = {
+    "calm": [  # ATR < 0.08: low-volatility blue chips
+        {"name": "SL8_TP0.5_MHD1",  "stop_loss_pct": -8,  "take_profit_pct": 0.5, "max_hold_days": 1},
+        {"name": "SL10_TP0.8_MHD2", "stop_loss_pct": -10, "take_profit_pct": 0.8, "max_hold_days": 2},
+        {"name": "SL10_TP1.0_MHD2", "stop_loss_pct": -10, "take_profit_pct": 1.0, "max_hold_days": 2},
+        {"name": "SL12_TP1.0_MHD3", "stop_loss_pct": -12, "take_profit_pct": 1.0, "max_hold_days": 3},
+        {"name": "SL12_TP1.5_MHD3", "stop_loss_pct": -12, "take_profit_pct": 1.5, "max_hold_days": 3},
+    ],
+    "normal": [  # 0.08 <= ATR < 0.13: standard volatility
+        # R1225 data: TP>=1.5 → 0% StdA+ (WR<60%). Only TP<=1.2 is productive.
+        {"name": "SL15_TP0.5_MHD1", "stop_loss_pct": -15, "take_profit_pct": 0.5, "max_hold_days": 1},
+        {"name": "SL15_TP0.8_MHD2", "stop_loss_pct": -15, "take_profit_pct": 0.8, "max_hold_days": 2},
+        {"name": "SL15_TP1.0_MHD2", "stop_loss_pct": -15, "take_profit_pct": 1.0, "max_hold_days": 2},
+        {"name": "SL20_TP1.0_MHD2", "stop_loss_pct": -20, "take_profit_pct": 1.0, "max_hold_days": 2},
+        {"name": "SL15_TP1.2_MHD2", "stop_loss_pct": -15, "take_profit_pct": 1.2, "max_hold_days": 2},
+    ],
+    "volatile": [  # ATR >= 0.13: higher volatility stocks
+        {"name": "SL20_TP1.0_MHD2", "stop_loss_pct": -20, "take_profit_pct": 1.0, "max_hold_days": 2},
+        {"name": "SL25_TP1.5_MHD3", "stop_loss_pct": -25, "take_profit_pct": 1.5, "max_hold_days": 3},
+        {"name": "SL25_TP2.0_MHD3", "stop_loss_pct": -25, "take_profit_pct": 2.0, "max_hold_days": 3},
+        {"name": "SL25_TP3.0_MHD5", "stop_loss_pct": -25, "take_profit_pct": 3.0, "max_hold_days": 5},
+        {"name": "SL30_TP3.0_MHD5", "stop_loss_pct": -30, "take_profit_pct": 3.0, "max_hold_days": 5},
+    ],
+}
+
+# Base grid (方案2: 经验聚焦) — used when ATR value is unknown
+_BASE_EXIT_GRID: list[dict] | None = None
+
+
+def _build_base_exit_grid() -> list[dict]:
+    """Generate base exit grid using constrained parameter sweep (方案2)."""
+    SL_VALUES = [-15, -20]
+    TP_VALUES = [0.5, 0.8, 1.0, 1.2, 1.5, 2.0]
+    MHD_VALUES = [1, 2, 3]
+
+    grid = []
+    for sl in SL_VALUES:
+        for tp in TP_VALUES:
+            for mhd in MHD_VALUES:
+                # Constraint: scalping TP exits fast
+                if tp <= 0.5 and mhd > 2:
+                    continue
+                name = f"SL{abs(sl)}_TP{tp}_MHD{mhd}"
+                grid.append({
+                    "name": name,
+                    "stop_loss_pct": sl,
+                    "take_profit_pct": tp,
+                    "max_hold_days": mhd,
+                })
+    return grid
+
+
+def _build_family_exit_profiles() -> dict[str, list[dict]]:
+    """Scan pool strategies to build per-family exit profiles.
+
+    Returns {family_name: [exit_config_dicts sorted by count desc]}.
+    Each entry has name, stop_loss_pct, take_profit_pct, max_hold_days, count, avg_score.
+    Only includes families with >= 10 StdA+ strategies (enough data to be meaningful).
+    """
+    from collections import defaultdict
+    try:
+        resp = _api("GET", "strategies?page=1&size=2000")
+        strategies = resp if isinstance(resp, list) else resp.get("items", resp.get("strategies", []))
+    except Exception as e:
+        logger.warning("Failed to load pool strategies for family profiles: %s", e)
+        return {}
+
+    # family → exit_key → {count, scores}
+    family_data: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(lambda: {"count": 0, "scores": []}))
+
+    for s in strategies:
+        if not s.get("enabled"):
+            continue
+        bs = s.get("backtest_summary") or {}
+        score = bs.get("score", 0) or 0
+        if score < 0.80:
+            continue
+
+        family = s.get("indicator_family") or ""
+        if not family:
+            # Derive from buy_conditions fields
+            bc = s.get("buy_conditions") or []
+            parts = sorted({c.get("field", "").split("_")[0].upper()
+                           for c in bc if c.get("field")} - {""})
+            family = "+".join(parts)
+        if not family:
+            continue
+
+        ec = s.get("exit_config") or {}
+        sl = ec.get("stop_loss_pct")
+        tp = ec.get("take_profit_pct")
+        mhd = ec.get("max_hold_days")
+        if sl is None or tp is None or mhd is None:
+            continue
+
+        key = f"SL{sl}_TP{tp}_MHD{mhd}"
+        family_data[family][key]["count"] += 1
+        family_data[family][key]["scores"].append(score)
+        family_data[family][key]["config"] = {"stop_loss_pct": sl, "take_profit_pct": tp, "max_hold_days": mhd}
+
+    # Build profiles for families with enough data
+    profiles: dict[str, list[dict]] = {}
+    for family, exits in family_data.items():
+        total = sum(v["count"] for v in exits.values())
+        if total < 10:
+            continue  # Not enough data — use ATR regime instead
+
+        ranked = sorted(exits.items(), key=lambda x: -x[1]["count"])
+        profile = []
+        for key, info in ranked:
+            cfg = info["config"]
+            avg_score = round(sum(info["scores"]) / len(info["scores"]), 4)
+            profile.append({
+                "name": key.replace(".", ""),
+                "stop_loss_pct": cfg["stop_loss_pct"],
+                "take_profit_pct": cfg["take_profit_pct"],
+                "max_hold_days": cfg["max_hold_days"],
+                "_count": info["count"],
+                "_avg_score": avg_score,
+            })
+        profiles[family] = profile
+        logger.debug("Family profile %s: %d StdA+, %d unique exits", family, total, len(profile))
+
+    logger.info("Built family exit profiles: %d families (>= 10 StdA+)", len(profiles))
+    return profiles
+
+
+def _family_focused_grid(profile: list[dict], max_configs: int = 12) -> list[dict]:
+    """Build a focused exit grid around a family's historically best exits.
+
+    Takes top exits by count, then adds neighbors (±SL, ±TP, ±MHD) to explore
+    nearby parameter space. Returns max_configs entries.
+    """
+    # Start with top proven exits (up to 5)
+    top_exits = profile[:5]
+    grid = []
+    seen = set()
+
+    for ex in top_exits:
+        key = (ex["stop_loss_pct"], ex["take_profit_pct"], ex["max_hold_days"])
+        if key not in seen:
+            seen.add(key)
+            grid.append({
+                "name": ex["name"],
+                "stop_loss_pct": ex["stop_loss_pct"],
+                "take_profit_pct": ex["take_profit_pct"],
+                "max_hold_days": ex["max_hold_days"],
+            })
+
+    # Add neighbors around top-3
+    for ex in top_exits[:3]:
+        for sl_d in [-5, 0, 5]:
+            for tp_d in [-0.3, 0, 0.3]:
+                for mhd_d in [-1, 0, 1]:
+                    if sl_d == 0 and tp_d == 0 and mhd_d == 0:
+                        continue
+                    sl = ex["stop_loss_pct"] + sl_d
+                    tp = round(ex["take_profit_pct"] + tp_d, 1)
+                    mhd = ex["max_hold_days"] + mhd_d
+                    # Sanity bounds
+                    if tp < 0.3 or mhd < 1 or sl > -5:
+                        continue
+                    key = (sl, tp, mhd)
+                    if key not in seen:
+                        seen.add(key)
+                        grid.append({
+                            "name": f"SL{abs(sl)}_TP{tp}_MHD{mhd}",
+                            "stop_loss_pct": sl,
+                            "take_profit_pct": tp,
+                            "max_hold_days": mhd,
+                        })
+                    if len(grid) >= max_configs:
+                        return grid
+
+    return grid[:max_configs]
+
+
+# Cached family profiles (rebuilt once per round)
+_family_profiles_cache: dict[str, list[dict]] | None = None
+
+
+def generate_exit_grid(
+    atr_value: float | None = None,
+    family: str | None = None,
+) -> list[dict]:
+    """Generate exit grid adapted to family history and ATR regime.
+
+    Priority:
+    1. Family profile (if family has >= 10 StdA+ strategies in pool)
+       → focused grid around proven exits + neighbors
+    2. ATR regime (if ATR value provided but family unknown/small)
+       → calm/normal/volatile preset grids
+    3. Base parametric grid (fallback)
+       → 方案2 constrained sweep
+
+    Args:
+        atr_value: ATR factor value from buy_factors.
+        family: indicator_family name (e.g. "ATR+RSI").
+
+    Returns:
+        List of exit config dicts.
+    """
+    # Priority 1: Family-specific grid
+    if family:
+        global _family_profiles_cache
+        if _family_profiles_cache is None:
+            _family_profiles_cache = _build_family_exit_profiles()
+
+        profile = _family_profiles_cache.get(family)
+        if profile:
+            grid = _family_focused_grid(profile)
+            logger.debug("Exit grid: family=%s, %d focused configs", family, len(grid))
+            return grid
+
+    # Priority 2: ATR regime
+    if atr_value is not None:
+        if atr_value < 0.08:
+            regime = "calm"
+        elif atr_value < 0.13:
+            regime = "normal"
+        else:
+            regime = "volatile"
+        grid = _EXIT_GRID_BY_REGIME[regime]
+        logger.debug("Exit grid: regime=%s (ATR=%.4f), %d configs", regime, atr_value, len(grid))
+        return grid
+
+    # Priority 3: Base parametric grid
+    global _BASE_EXIT_GRID
+    if _BASE_EXIT_GRID is None:
+        _BASE_EXIT_GRID = _build_base_exit_grid()
+        logger.info("Built base exit grid: %d configs", len(_BASE_EXIT_GRID))
+    return _BASE_EXIT_GRID
+
+
+# ────────────────────────────────────────────────────────────────
+# 7c. Code-Driven Skeleton Allocation (replaces LLM skeleton selection)
+# ────────────────────────────────────────────────────────────────
+
+def _find_factors_for_indicator(indicator: str) -> list[str]:
+    """Map a family-level indicator name to matching VALID_BUY_FACTORS keys.
+
+    E.g., "REALVOL" → ["REALVOL", "REALVOL_downside", "REALVOL_kurt", "REALVOL_skew"]
+          "W_KBAR"  → ["W_KBAR_amplitude", "W_KBAR_body_ratio", ...]
+          "MOM"     → ["MOM"]
+    """
+    indicator_lower = indicator.lower().replace(" ", "")
+    matches = [f for f in VALID_BUY_FACTORS
+               if f.lower().startswith(indicator_lower)]
+    # Exact match fallback
+    if not matches and indicator in VALID_BUY_FACTORS:
+        matches = [indicator]
+    return matches
+
+
+def _generate_threshold_variants(
+    factors: list[str],
+    experience: dict,
+    count: int,
+) -> list[dict]:
+    """Generate ``count`` experiment configs for a given factor list.
+
+    Spreads threshold values across each factor's optimal range (from
+    experience) or full registry range, so variants cover different
+    parameter regions rather than clustering at the midpoint.
+    """
+    factor_scores = experience.get("factor_scores", {})
+    configs: list[dict] = []
+
+    for i in range(count):
+        buy_factors: list[dict] = []
+        for factor in factors:
+            meta = VALID_BUY_FACTORS.get(factor)
+            if not meta:
+                continue
+
+            lo, hi = meta["min"], meta["max"]
+            # Prefer experience optimal range
+            fexp = factor_scores.get(factor, {})
+            opt = fexp.get("optimal_range")
+            if opt and len(opt) == 2:
+                lo = max(meta["min"], opt[0])
+                hi = min(meta["max"], opt[1])
+
+            # Spread values: variant 0 → 20% of range, last → 80%
+            if count > 1:
+                frac = i / max(count - 1, 1)
+                value = lo + (hi - lo) * (0.15 + 0.70 * frac)
+            else:
+                value = (lo + hi) / 2
+
+            buy_factors.append({"factor": factor, "value": round(value, 4)})
+
+        if not buy_factors:
+            continue
+
+        name = "_".join(f.split("_")[0] for f in factors) + f"_v{i + 1}"
+        configs.append({
+            "name": name,
+            "buy_factors": buy_factors,
+            "sell_factors": [],          # BASE_SELL applied in submit
+        })
+
+    return configs
+
+
+def _allocate_new_skeletons(
+    candidates: list[str],
+    experience: dict,
+    n: int,
+) -> list[dict]:
+    """Tier 1 (60%) — new factor combos not yet in the pool.
+
+    Uses 1 threshold variant per skeleton to maximize family diversity.
+    Same fingerprint with different thresholds adds no value (deduped at promote).
+    """
+    configs: list[dict] = []
+    if not candidates:
+        return configs
+
+    # 1 variant per skeleton → cover N different skeletons
+    n_candidates = min(len(candidates), n)
+    per_cand = 1
+
+    for cand_str in candidates[:n_candidates]:
+        factors = [p.strip() for p in cand_str.split("+")]
+        variants = _generate_threshold_variants(factors, experience, count=per_cand)
+        for v in variants:
+            v["_tier"] = "new"
+            v["_skeleton"] = cand_str
+        configs.extend(variants)
+        if len(configs) >= n:
+            break
+
+    return configs[:n]
+
+
+def _allocate_fill(
+    pool_families: list[dict],
+    experience: dict,
+    n: int,
+) -> list[dict]:
+    """Tier 2 (30%) — fill families with gap > 0, sorted by largest gap."""
+    configs: list[dict] = []
+    unfull = [f for f in pool_families if f.get("gap", 0) > 0]
+    unfull.sort(key=lambda x: -x.get("gap", 0))
+
+    if not unfull:
+        return configs
+
+    # 1 variant per family — maximize family coverage
+    n_families = min(len(unfull), n)
+    per_fam = 1
+
+    for fam in unfull[:n_families]:
+        family_name = fam.get("family", "")
+        parts = [p.strip() for p in family_name.split("+")]
+        extra = [p for p in parts if p.upper() not in ("ATR", "RSI")]
+
+        if not extra:
+            continue
+
+        # For each indicator, pick one factor (highest experience score)
+        chosen_factors: list[str] = []
+        for indicator in extra:
+            sub_factors = _find_factors_for_indicator(indicator)
+            if not sub_factors:
+                continue
+            # Pick the sub-factor with best experience
+            fs = experience.get("factor_scores", {})
+            best = max(sub_factors, key=lambda f: fs.get(f, {}).get("stda_rate_pct", 0))
+            chosen_factors.append(best)
+
+        if not chosen_factors:
+            continue
+
+        variants = _generate_threshold_variants(chosen_factors, experience, count=per_fam)
+        for v in variants:
+            v["_tier"] = "fill"
+            v["_skeleton"] = family_name
+        configs.extend(variants)
+        if len(configs) >= n:
+            break
+
+    return configs[:n]
+
+
+def _allocate_optimize(
+    pool_families: list[dict],
+    experience: dict,
+    n: int,
+) -> list[dict]:
+    """Tier 3 (10%) — target weakest champions in full families."""
+    configs: list[dict] = []
+    full = [f for f in pool_families if f.get("gap", 0) == 0]
+    full.sort(key=lambda x: x.get("avg_score", 1.0))
+
+    if not full:
+        return configs
+
+    for fam in full[:n]:
+        family_name = fam.get("family", "")
+        parts = [p.strip() for p in family_name.split("+")]
+        extra = [p for p in parts if p.upper() not in ("ATR", "RSI")]
+
+        if not extra:
+            continue
+
+        chosen_factors: list[str] = []
+        for indicator in extra:
+            sub_factors = _find_factors_for_indicator(indicator)
+            if sub_factors:
+                fs = experience.get("factor_scores", {})
+                best = max(sub_factors,
+                           key=lambda f: fs.get(f, {}).get("stda_rate_pct", 0))
+                chosen_factors.append(best)
+
+        if not chosen_factors:
+            continue
+
+        variants = _generate_threshold_variants(chosen_factors, experience, count=1)
+        for v in variants:
+            v["_tier"] = "opt"
+            v["_skeleton"] = family_name
+        configs.extend(variants)
+
+    return configs[:n]
+
+
+def allocate_experiments(
+    pool_families: list[dict],
+    candidates: list[str],
+    experience: dict,
+    n: int,
+) -> tuple[list[dict], dict]:
+    """Three-tier hard allocation.  Returns (configs, allocation_summary)."""
+    n_new = int(n * 0.6)
+    n_fill = int(n * 0.3)
+    n_opt = max(1, n - n_new - n_fill)
+
+    tier_new = _allocate_new_skeletons(candidates, experience, n_new)
+    tier_fill = _allocate_fill(pool_families, experience, n_fill)
+    tier_opt = _allocate_optimize(pool_families, experience, n_opt)
+
+    configs = tier_new + tier_fill + tier_opt
+
+    # If under-allocated (too few candidates), top up with fill
+    if len(configs) < n and pool_families:
+        extra = _allocate_fill(pool_families, experience, n - len(configs))
+        for v in extra:
+            v["_tier"] = "fill-extra"
+        configs.extend(extra)
+
+    summary = {
+        "new": len(tier_new),
+        "fill": len(tier_fill) + len(configs) - len(tier_new) - len(tier_fill) - len(tier_opt),
+        "opt": len(tier_opt),
+        "total": len(configs),
+        "new_skeletons": list({c.get("_skeleton", "") for c in tier_new}),
+        "fill_families": list({c.get("_skeleton", "") for c in tier_fill}),
+    }
+
+    # Strip internal tags (keep _skeleton for family exit grid selection)
+    for c in configs:
+        c.pop("_tier", None)
+
+    logger.info(
+        "Allocation: %d new + %d fill + %d opt = %d total (%d skeleton candidates)",
+        summary["new"], summary["fill"], summary["opt"],
+        len(configs), len(candidates),
+    )
+
+    return configs[:n], summary
+
+
+# ────────────────────────────────────────────────────────────────
+# 8.  LLM Planner (kept as optional fallback)
 # ────────────────────────────────────────────────────────────────
 
 _PLANNER_SYSTEM_PROMPT = """\
@@ -1467,25 +1976,33 @@ class ExplorationEngine:
     # ── Step implementations ──
 
     def _step_promote_check(self):
-        """Scan recent experiments for unpromoted StdA+ strategies and promote them."""
+        """Scan last 50 experiments for unpromoted StdA+ strategies and promote them.
+
+        Limits scope to 1 page (50 experiments) to avoid multi-hour WF backlog.
+        Also caps total promotes per check to prevent runaway WF processing.
+        """
         self._set_step("promote_check", "Scanning recent experiments")
-        # API max size=100, scan 3 pages to cover ~300 recent experiments
-        items = []
-        for page in range(1, 4):
-            resp = _api("GET", f"lab/experiments?page={page}&size=100")
-            page_items = resp.get("items", [])
-            items.extend(page_items)
-            if len(page_items) < 100:
-                break
+        resp = _api("GET", "lab/experiments?page=1&size=50")
+        items = resp.get("items", [])
         promoted_count = 0
+        max_promotes = 20  # Cap to avoid spending hours on WF
 
         for exp_item in items:
+            if promoted_count >= max_promotes:
+                logger.info("Promote check: hit cap (%d), stopping", max_promotes)
+                break
             exp_id = exp_item.get("id")
             if not exp_id:
                 continue
-            detail = _api("GET", f"lab/experiments/{exp_id}")
+            # Skip completed experiments (all strategies already processed)
+            if exp_item.get("status") == "done":
+                detail = _api("GET", f"lab/experiments/{exp_id}")
+            else:
+                continue
             strategies = detail.get("strategies", [])
             for s in strategies:
+                if promoted_count >= max_promotes:
+                    break
                 if s.get("promoted"):
                     continue
                 if s.get("status") != "done":
@@ -1529,60 +2046,58 @@ class ExplorationEngine:
         return families
 
     def _step_plan(self, pool_families: list[dict], n: int) -> tuple[list[dict], str]:
-        """Design experiments using LLM planner (P1: experience-guided)."""
-        insights = load_historical_insights()
-        suggestions = get_latest_round_suggestions()
-        candidates = generate_skeleton_candidates(pool_families, max_candidates=n * 2)
+        """Code-driven three-tier skeleton allocation.
+
+        Replaces LLM-based skeleton selection with deterministic allocation:
+          60% new skeletons (from candidate generator)
+          30% fill (gap > 0 families)
+          10% optimize (weakest full families)
+        Thresholds are spread across experience optimal ranges.
+        """
+        candidates = generate_skeleton_candidates(pool_families, max_candidates=n * 3)
         experience = load_experience()
 
-        planner = LLMPlanner()
-        configs, provider = planner.plan(
-            pool_families, n, insights, suggestions, candidates,
-            experience=experience,
+        configs, summary = allocate_experiments(
+            pool_families, candidates, experience, n,
         )
-        return configs, provider
+        self._round_allocation = summary
+        return configs, "code-driven"
 
     def _step_submit(self, configs: list[dict]) -> list[int]:
-        """Submit each config as a separate experiment via batch-clone-backtest.
+        """Submit configs grouped by condition hash.
 
-        Handles two LLM output formats:
-        Format A (plan spec): {extra_buy_conditions, extra_sell_conditions, exit_configs: [...]}
-        Format B (LLM actual): {buy_conditions, sell_conditions, exit_config: {...}}
+        Groups configs with identical buy/sell conditions into one batch each.
+        Within a batch, all strategies share the same signals — no re-vectorize.
+        Different batches share stock data via the server's _BACKTEST_SEMAPHORE.
+        Exit grid priority: family profile → ATR regime → base grid.
         """
+        # Reset family profiles cache so each round gets fresh data
+        global _family_profiles_cache
+        _family_profiles_cache = None
+
         source_id = getattr(self, "_source_strategy_id", 0)
         if not source_id:
             logger.error("No source_strategy_id set")
             return []
 
-        exp_ids: list[int] = []
-        total_strats = 0
-
-        # Default exit grid — used for EVERY experiment to maximize coverage
-        DEFAULT_EXIT_GRID = [
-            {"name": "SL20_TP0.5_MHD2", "stop_loss_pct": -20, "take_profit_pct": 0.5, "max_hold_days": 2},
-            {"name": "SL20_TP1_MHD3",   "stop_loss_pct": -20, "take_profit_pct": 1.0, "max_hold_days": 3},
-            {"name": "SL15_TP1.5_MHD3", "stop_loss_pct": -15, "take_profit_pct": 1.5, "max_hold_days": 3},
-            {"name": "SL20_TP2_MHD5",   "stop_loss_pct": -20, "take_profit_pct": 2.0, "max_hold_days": 5},
-            {"name": "SL25_TP3_MHD5",   "stop_loss_pct": -25, "take_profit_pct": 3.0, "max_hold_days": 5},
-            {"name": "SL20_TP4_MHD7",   "stop_loss_pct": -20, "take_profit_pct": 4.0, "max_hold_days": 7},
-        ]
+        # ── Phase 1: Build exit configs per condition group ──
+        # Group by (buy_conditions, sell_conditions) hash so each batch
+        # needs only 1 vectorize call (no re-vectorize within batch).
+        from collections import defaultdict
+        groups: dict[str, dict] = {}  # cond_hash → {buy, sell, exit_configs}
 
         for cfg in configs:
             label = cfg.get("name", cfg.get("label", cfg.get("name_suffix", "exp")))
 
             # ── Build buy conditions ──
-            # New simplified format: buy_factors = [{"factor": "X", "value": N}]
-            # Old format: buy_conditions = [{"field": "X", "operator": "<", ...}]
             buy = copy.deepcopy(BASE_BUY)
             buy_factors = cfg.get("buy_factors", [])
             if buy_factors:
-                # New simplified format → convert via _factor_to_condition
                 for bf in buy_factors:
                     cond = _factor_to_condition(bf.get("factor", ""), bf.get("value", 0), for_sell=False)
                     if cond:
                         buy.append(cond)
             else:
-                # Legacy format: raw conditions
                 extra = cfg.get("extra_buy_conditions", cfg.get("buy_conditions", []))
                 if isinstance(extra, list):
                     buy.extend(extra)
@@ -1600,18 +2115,32 @@ class ExplorationEngine:
                 if isinstance(extra, list):
                     sell.extend(extra)
 
-            # ── Build exit configs ──
-            # Use LLM's exit params if provided, otherwise use default grid
-            sl = cfg.get("stop_loss", cfg.get("stop_loss_pct", -20))
-            tp = cfg.get("take_profit", cfg.get("take_profit_pct", 2.0))
-            mhd = cfg.get("max_hold_days", 5)
+            # ── Select exit grid: family profile → ATR regime → base ──
+            atr_val = next(
+                (bf.get("value") for bf in buy_factors if bf.get("factor") == "ATR"),
+                None,
+            )
+            if atr_val is None:
+                atr_val = next(
+                    (c.get("compare_value") for c in BASE_BUY if c.get("field") == "ATR"),
+                    None,
+                )
+            skeleton = cfg.get("_skeleton", "")
+            if skeleton:
+                parts = sorted({"ATR", "RSI"} | {p.strip().upper() for p in skeleton.split("+") if p.strip()})
+                family = "+".join(parts)
+            else:
+                parts = sorted({bf.get("factor", "").split("_")[0].upper() for bf in buy_factors if bf.get("factor")} | {"ATR", "RSI"})
+                family = "+".join(p for p in parts if p)
+            exit_grid = generate_exit_grid(atr_val, family=family)
 
-            # Always use the full default grid to maximize StdA+ chances
-            exit_grid = DEFAULT_EXIT_GRID
+            # ── Group by condition hash ──
+            cond_key = json.dumps(buy, sort_keys=True) + "|||" + json.dumps(sell, sort_keys=True)
+            if cond_key not in groups:
+                groups[cond_key] = {"buy": buy, "sell": sell, "exit_configs": []}
 
-            api_exit_configs = []
             for ec in exit_grid:
-                api_exit_configs.append({
+                groups[cond_key]["exit_configs"].append({
                     "name_suffix": f"_{label}_{ec['name']}",
                     "exit_config": {
                         "stop_loss_pct": ec["stop_loss_pct"],
@@ -1622,26 +2151,37 @@ class ExplorationEngine:
                     "sell_conditions": sell,
                 })
 
+        if not groups:
+            logger.error("No condition groups from %d configs", len(configs))
+            return []
+
+        # ── Phase 2: Submit each group as one batch ──
+        exp_ids = []
+        total_strats = 0
+
+        for i, (cond_key, group) in enumerate(groups.items()):
+            exit_configs = group["exit_configs"]
             resp = _api("POST", f"lab/strategies/{source_id}/batch-clone-backtest", {
                 "source_strategy_id": source_id,
-                "exit_configs": api_exit_configs,
-            })
+                "exit_configs": exit_configs,
+            }, timeout=600)
+
             eid = resp.get("experiment_id")
             if eid:
                 exp_ids.append(eid)
-                total_strats += resp.get("count", len(api_exit_configs))
+                total_strats += resp.get("count", len(exit_configs))
             else:
-                logger.warning("Failed to submit experiment '%s': %s", label, str(resp)[:100])
+                logger.warning("Batch %d/%d failed: %s", i + 1, len(groups), str(resp)[:100])
 
         self.strategies_total = total_strats
         self.strategies_done = 0
         self.strategies_invalid = 0
         self.strategies_pending = total_strats
 
-        # Retry pending to ensure all strategies are queued
-        _api("POST", "lab/experiments/retry-pending")
-
-        logger.info("Submitted %d experiments, %d strategies", len(exp_ids), total_strats)
+        logger.info(
+            "Submitted %d batches (%d condition groups, %d strategies total)",
+            len(exp_ids), len(groups), total_strats,
+        )
         return exp_ids
 
     def _step_poll(self, exp_ids: list[int]):
@@ -1759,9 +2299,16 @@ class ExplorationEngine:
         return [exp_id]
 
     def _step_promote_and_rebalance(self, exp_ids: list[int]) -> int:
-        """Promote StdA+ strategies and Standard B regime champions, then rebalance."""
+        """Promote StdA+ strategies and Standard B regime champions, then rebalance.
+
+        Global WF early termination: if first 10 consecutive WF runs all FAIL,
+        skip WF for remaining strategies (mark promoted but archived).
+        """
         promoted_a = 0  # Standard A (StdA+)
         promoted_b = 0  # Standard B (regime champions)
+        wf_global_fails = 0       # consecutive WF failures across all experiments
+        wf_global_skip = False    # True after 10 consecutive fails
+        WF_EARLY_TERM_THRESHOLD = 10
         LABEL_MAP = {
             "bull": ("[AI-牛市]", "牛市"),
             "bear": ("[AI-熊市]", "熊市"),
@@ -1780,16 +2327,34 @@ class ExplorationEngine:
                 sid = s["id"]
 
                 # Standard A: StdA+ promote
+                adjusted_score = _adjusted_stda_score(load_experience())
                 if is_stda_plus(
                     s.get("score", 0),
                     s.get("total_return_pct", 0),
                     s.get("max_drawdown_pct", 100),
                     s.get("total_trades", 0),
                     s.get("win_rate", 0),
+                    score_threshold=adjusted_score,
                 ):
-                    result = _promote_strategy(sid)
+                    result = _promote_strategy(sid, skip_wf=wf_global_skip)
                     if "error" not in result:
                         promoted_a += 1
+                        # Track WF outcome for global early termination
+                        wf = result.get("walk_forward") or {}
+                        if wf.get("overfit_ratio", 0) > 2.5 or wf.get("skipped"):
+                            wf_global_fails += 1
+                        else:
+                            wf_global_fails = 0  # reset on PASS
+
+                        if not wf_global_skip and wf_global_fails >= WF_EARLY_TERM_THRESHOLD:
+                            wf_global_skip = True
+                            logger.info(
+                                "WF global early termination: %d consecutive fails, "
+                                "skipping WF for remaining strategies",
+                                wf_global_fails,
+                            )
+                    # Mark ES as promoted even if duplicate fingerprint
+                    _api("PUT", f"lab/strategies/{sid}", {"promoted": True})
 
                 # Standard B: track regime champions (even if already promoted as StdA+)
                 ret = s.get("total_return_pct", 0) or 0
@@ -1816,8 +2381,8 @@ class ExplorationEngine:
                 promoted_b += 1
             logger.info("Standard B: %s champion S%d (pnl=%.0f) → %s", key, sid, pnl, label)
 
-        logger.info("Promote complete: %d StdA+ (Standard A), %d regime champions (Standard B)",
-                    promoted_a, promoted_b)
+        logger.info("Promote complete: %d StdA+ (threshold=%.4f), %d regime champions",
+                    promoted_a, _adjusted_stda_score(load_experience()), promoted_b)
 
         # Rebalance pool
         rebalance_result = _api("POST", "strategies/pool/rebalance?max_per_family=15")
@@ -1828,6 +2393,14 @@ class ExplorationEngine:
 
         promoted = promoted_a + promoted_b
         self.step_detail = f"Promoted {promoted_a} StdA+ + {promoted_b} regime, rebalanced ({active} active, {archived} archived)"
+        # Check champion decay (uses existing _api helper, router prefix is /api/strategies)
+        try:
+            decay_resp = _api("POST", "strategies/pool/check-decay")
+            decay_count = decay_resp.get("demoted_count", 0)
+            if decay_count:
+                logger.info("Decay check: %d champions demoted", decay_count)
+        except Exception as e:
+            logger.warning("Decay check failed (non-fatal): %s", e)
         return promoted
 
     def _step_update_memory_doc(self, promoted: int):
@@ -1937,9 +2510,98 @@ class ExplorationEngine:
         except Exception as e:
             logger.error("sync-memory.py error: %s", e)
 
+    def _collect_round_metadata(self, exp_ids: list[int], promoted: int) -> dict:
+        """Scan completed experiments to build rich metadata for the round record."""
+        best_name = ""
+        best_return = 0.0
+        best_dd = 0.0
+        best_score = 0.0
+
+        # Collect per-family StdA+ counts to detect new families
+        family_stda: dict[str, int] = {}
+
+        for eid in exp_ids:
+            detail = _api("GET", f"lab/experiments/{eid}")
+            for s in detail.get("strategies", []):
+                if s.get("status") != "done":
+                    continue
+                sc = s.get("score", 0) or 0
+                ret = s.get("total_return_pct", 0) or 0
+                dd = abs(s.get("max_drawdown_pct", 100) or 100)
+                if sc > best_score:
+                    best_score = sc
+                    best_name = s.get("name", "")[:60]
+                    best_return = ret
+                    best_dd = dd
+
+                # Track family StdA+
+                buy = s.get("buy_conditions", [])
+                fields = sorted({c.get("field", "").split("_")[0].upper()
+                                 for c in buy if c.get("field")})
+                fam_key = "+".join(f for f in fields if f not in ("RSI", "ATR", ""))
+                if fam_key and is_stda_plus(sc, ret, dd,
+                                            s.get("total_trades", 0) or 0,
+                                            s.get("win_rate", 0) or 0):
+                    family_stda[fam_key] = family_stda.get(fam_key, 0) + 1
+
+        # ── Auto-generate insights ──
+        stda_rate = self.stda_count / max(self.strategies_done, 1) * 100
+        insights: list[str] = []
+        insights.append(f"StdA+率: {stda_rate:.1f}% ({self.stda_count}/{self.strategies_done})")
+        if best_name:
+            insights.append(f"最佳: {best_name} (score={best_score:.4f}, ret={best_return:.0f}%)")
+        if self.strategies_invalid > 0:
+            inv_rate = self.strategies_invalid / max(self.strategies_total, 1) * 100
+            insights.append(f"Invalid: {self.strategies_invalid} ({inv_rate:.0f}%)")
+        if family_stda:
+            top_fams = sorted(family_stda.items(), key=lambda x: -x[1])[:5]
+            insights.append(f"产出家族: {', '.join(f'{k}({v})' for k, v in top_fams)}")
+
+        # Allocation info from _step_plan
+        alloc = getattr(self, "_round_allocation", {})
+        if alloc:
+            insights.append(
+                f"分配: {alloc.get('new', 0)}新 + {alloc.get('fill', 0)}填 + {alloc.get('opt', 0)}优"
+            )
+
+        # ── Auto-generate next_suggestions ──
+        next_suggestions: list[str] = []
+        # Suggest filling top-gap families
+        pool_resp = _api("GET", "strategies/pool/status")
+        pool_fams = pool_resp.get("family_summary", [])
+        gap_fams = sorted([f for f in pool_fams if f.get("gap", 0) > 0],
+                          key=lambda x: -x.get("gap", 0))
+        for gf in gap_fams[:3]:
+            next_suggestions.append(
+                f"填充 {gf['family']} (gap={gf['gap']}, active={gf.get('active_count', 0)})"
+            )
+        # Suggest untested candidates
+        if alloc.get("new_skeletons"):
+            tested = set(alloc["new_skeletons"])
+            candidates = generate_skeleton_candidates(pool_fams, max_candidates=20)
+            untested = [c for c in candidates if c not in tested][:3]
+            for c in untested:
+                next_suggestions.append(f"新骨架: {c}")
+
+        return {
+            "best_name": best_name,
+            "best_score": best_score,
+            "best_return": best_return,
+            "best_dd": best_dd,
+            "insights": insights,
+            "next_suggestions": next_suggestions,
+        }
+
     def _step_record(self, exp_ids: list[int], promoted: int):
-        """Record exploration round via API."""
+        """Record exploration round via API with auto-generated metadata."""
         now = datetime.now()
+        meta = self._collect_round_metadata(exp_ids, promoted)
+        stda_rate = round(self.stda_count / max(self.strategies_done, 1) * 100, 1)
+
+        alloc = getattr(self, "_round_allocation", {})
+        alloc_str = (f"alloc={alloc.get('new', 0)}N+{alloc.get('fill', 0)}F+{alloc.get('opt', 0)}O"
+                     if alloc else "")
+
         data = {
             "round_number": self.current_round,
             "mode": "auto",
@@ -1949,22 +2611,20 @@ class ExplorationEngine:
             "total_experiments": len(exp_ids),
             "total_strategies": self.strategies_total,
             "profitable_count": self.strategies_done,
-            "profitability_pct": round(
-                (self.strategies_done / max(self.strategies_total, 1)) * 100, 1
-            ),
+            "profitability_pct": stda_rate,
             "std_a_count": self.stda_count,
-            "best_strategy_name": "",
-            "best_strategy_score": self.best_score,
-            "best_strategy_return": 0.0,
-            "best_strategy_dd": 0.0,
-            "insights": [],
+            "best_strategy_name": meta["best_name"],
+            "best_strategy_score": meta["best_score"],
+            "best_strategy_return": meta["best_return"],
+            "best_strategy_dd": meta["best_dd"],
+            "insights": meta["insights"],
             "promoted": [{"count": promoted, "round": self.current_round}],
             "issues_resolved": [],
-            "next_suggestions": [],
+            "next_suggestions": meta["next_suggestions"],
             "summary": (
                 f"R{self.current_round}: {self.strategies_done} done, "
-                f"{self.strategies_invalid} invalid, {self.stda_count} StdA+, "
-                f"best={self.best_score:.4f}, provider={self.llm_provider}"
+                f"{self.strategies_invalid} invalid, {self.stda_count} StdA+ ({stda_rate}%), "
+                f"best={self.best_score:.4f}, {alloc_str}, provider={self.llm_provider}"
             ),
             "memory_synced": False,
             "pinecone_synced": True,

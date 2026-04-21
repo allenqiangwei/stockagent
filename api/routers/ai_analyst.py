@@ -132,19 +132,9 @@ def save_report(body: AIReportSaveRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(report)
 
-    # Create trade plans from recommendations (plans execute on next trading day)
-    trade_plans_result = []
+    # Trade plans are auto-created by signal generation (beta_scorer).
+    # Capture beta snapshots for recommended stocks (informational only).
     if body.recommendations:
-        from api.services.bot_trading_engine import create_trade_plans
-        try:
-            trade_plans_result = create_trade_plans(
-                db, report.id, body.report_date, body.recommendations
-            )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("Trade plan creation failed: %s", e)
-
-        # Capture beta factor snapshots for all recommended stocks
         try:
             from api.services.beta_engine import capture_beta_snapshots
             capture_beta_snapshots(db, report.id, body.report_date, body.recommendations)
@@ -152,11 +142,14 @@ def save_report(body: AIReportSaveRequest, db: Session = Depends(get_db)):
             import logging
             logging.getLogger(__name__).warning("Beta snapshot capture failed: %s", e)
 
+    from api.models.bot_trading import BotTradePlan
+    pending_plans = db.query(BotTradePlan).filter(BotTradePlan.status == "pending").count()
+
     return {
         "id": report.id,
         "report_date": report.report_date,
         "summary": report.summary,
-        "trade_plans": trade_plans_result,
+        "pending_trade_plans": pending_plans,
     }
 
 
@@ -242,22 +235,33 @@ def trigger_analysis(
     _logger = logging.getLogger(__name__)
     target_date = report_date or date.today().isoformat()
 
-    # Step 1: Execute pending trade plans first (before lengthy AI analysis)
+    # Step 1: Execute pending trade plans — skip if scheduler already ran today
+    # to prevent double-execution when scheduler and AI analyze run on same date.
     executed_plans = []
     try:
+        from api.services.signal_scheduler import get_signal_scheduler
         from api.services.bot_trading_engine import execute_pending_plans
-        executed_plans = execute_pending_plans(db, target_date) or []
-        if executed_plans:
-            _logger.info("Executed %d trade plans for %s", len(executed_plans), target_date)
+        sched = get_signal_scheduler()
+        if sched._last_run_date == target_date:
+            _logger.info("Skipping execute_pending_plans for %s — scheduler already ran today", target_date)
+        else:
+            executed_plans = execute_pending_plans(db, target_date) or []
+            if executed_plans:
+                _logger.info("Executed %d trade plans for %s", len(executed_plans), target_date)
     except Exception as e:
         _logger.warning("Trade plan execution failed: %s", e)
 
-    # Step 1b: Monitor exit conditions (SL/TP/MHD) — runs before AI analysis
+    # Step 1b: Monitor exit conditions (SL/TP/MHD) — skip if scheduler already ran today
     try:
+        from api.services.signal_scheduler import get_signal_scheduler
         from api.services.bot_trading_engine import monitor_exit_conditions
-        exit_results = monitor_exit_conditions(db, target_date)
-        if exit_results:
-            _logger.info("Exit monitor: %d actions for %s", len(exit_results), target_date)
+        sched = get_signal_scheduler()
+        if sched._last_run_date == target_date:
+            _logger.info("Skipping monitor_exit_conditions for %s — scheduler already ran today", target_date)
+        else:
+            exit_results = monitor_exit_conditions(db, target_date)
+            if exit_results:
+                _logger.info("Exit monitor: %d actions for %s", len(exit_results), target_date)
     except Exception as e:
         _logger.warning("Exit monitoring failed: %s", e)
 
@@ -306,22 +310,16 @@ def trigger_analysis(
     db.commit()
     db.refresh(report)
 
-    # Step 3: Create trade plans from recommendations
-    trade_plans_result = []
-    if result.get("recommendations"):
-        from api.services.bot_trading_engine import create_trade_plans
-        try:
-            trade_plans_result = create_trade_plans(
-                db, report.id, target_date, result["recommendations"]
-            )
-        except Exception as e:
-            _logger.warning("Trade plan creation failed: %s", e)
+    # Trade plans are now auto-created by signal generation (beta_scorer),
+    # not by AI recommendations. Count existing pending plans for the response.
+    from api.models.bot_trading import BotTradePlan
+    pending_plans = db.query(BotTradePlan).filter(BotTradePlan.status == "pending").count()
 
     return {
         "id": report.id,
         "report_date": report.report_date,
         "summary": report.summary,
-        "trade_plans_created": len(trade_plans_result),
+        "pending_trade_plans": pending_plans,
         "trade_plans_executed": len(executed_plans),
     }
 

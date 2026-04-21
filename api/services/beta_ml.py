@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Features used by the model — order matters for consistency
 FEATURE_NAMES = [
     # Entry snapshot features (from BetaSnapshot)
-    "alpha_score", "final_score", "entry_price", "day_of_week",
+    "alpha_score", "day_of_week",
     "stock_return_5d", "stock_volatility_20d", "volume_ratio_5d",
     "index_return_5d", "index_return_20d",
     "sector_heat_score", "regime_encoded",
@@ -96,10 +96,15 @@ def predict_beta_score(db: Session, features: dict) -> float:
 
     try:
         import xgboost as xgb
+        import tempfile, os
 
-        buffer = io.BytesIO(model_state.model_blob)
+        # xgboost 3.x requires file path for load_model
+        with tempfile.NamedTemporaryFile(suffix=".ubj", delete=False) as tmp:
+            tmp.write(model_state.model_blob)
+            tmp_path = tmp.name
         booster = xgb.Booster()
-        booster.load_model(bytearray(buffer.read()))
+        booster.load_model(tmp_path)
+        os.unlink(tmp_path)
 
         x = _features_to_array(features)
         dmat = xgb.DMatrix(np.array([x]), feature_names=FEATURE_NAMES)
@@ -114,8 +119,6 @@ def _features_to_array(features: dict) -> list[float]:
     """Convert feature dict to ordered array matching FEATURE_NAMES."""
     return [
         features.get("alpha_score", 0.5),
-        features.get("final_score", 0.5),
-        features.get("entry_price", 0.0),
         features.get("day_of_week", 0),
         features.get("stock_return_5d", 0.0),
         features.get("stock_volatility_20d", 0.0),
@@ -171,14 +174,6 @@ def _scorecard_predict(db: Session, features: dict) -> float:
             score += 0.03  # warm sector
         elif sector_heat <= 30:
             score -= 0.05  # cold sector
-
-    # ── Per-stock news sentiment (from Proposal C, scale: -1 to +1) ──
-    news_sent = features.get("news_sentiment_3d")
-    if news_sent is not None:
-        if news_sent > 0.3:
-            score += 0.06  # positive news cluster
-        elif news_sent < -0.3:
-            score -= 0.06  # negative news cluster
 
     # ── PE valuation (from daily_basic via TuShare) ──
     pe = features.get("pe")
@@ -244,8 +239,6 @@ def _build_training_data(db: Session, window_days: int = 365) -> tuple[np.ndarra
 
         features = {
             "alpha_score": snapshot.final_score or snapshot.alpha_score or 0.5,
-            "final_score": snapshot.final_score or 0.5,
-            "entry_price": snapshot.entry_price or 0.0,
             "day_of_week": snapshot.day_of_week or 0,
             "stock_return_5d": snapshot.stock_return_5d or 0.0,
             "stock_volatility_20d": snapshot.stock_volatility_20d or 0.0,
@@ -340,17 +333,21 @@ def train_model(db: Session, force: bool = False) -> dict:
 
     # AUC rollback protection: don't deploy if worse than current
     current = get_active_model(db)
-    if current and current.auc_score and auc < current.auc_score - 0.02:
+    if current and current.auc_score and auc < current.auc_score - 0.10:
         return {
             "status": "rollback_prevented",
-            "reason": f"New AUC {auc:.4f} < current {current.auc_score:.4f} - 0.02",
+            "reason": f"New AUC {auc:.4f} < current {current.auc_score:.4f} - 0.10",
             "auc": auc, "accuracy": acc, "phase": phase,
         }
 
-    # Serialize model
-    buffer = io.BytesIO()
-    booster.save_model(buffer)
-    model_bytes = buffer.getvalue()
+    # Serialize model (xgboost 3.x requires file path, not BytesIO)
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".ubj", delete=False) as tmp:
+        tmp_path = tmp.name
+    booster.save_model(tmp_path)
+    with open(tmp_path, "rb") as f:
+        model_bytes = f.read()
+    os.unlink(tmp_path)
 
     # Feature importance
     importance = booster.get_score(importance_type="gain")
@@ -361,9 +358,11 @@ def train_model(db: Session, force: bool = False) -> dict:
     )
 
     # Save new model
-    version = f"v{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # Increment version from latest
+    latest = db.query(BetaModelState).order_by(BetaModelState.id.desc()).first()
+    version_int = (latest.version + 1) if latest else 1
     new_model = BetaModelState(
-        version=version,
+        version=version_int,
         model_type="xgboost",
         model_blob=model_bytes,
         feature_names=FEATURE_NAMES,
@@ -381,12 +380,12 @@ def train_model(db: Session, force: bool = False) -> dict:
 
     logger.info(
         "Beta model trained: %s, samples=%d, AUC=%.4f, accuracy=%.4f, phase=%s",
-        version, n_samples, auc, acc, phase,
+        version_int, n_samples, auc, acc, phase,
     )
 
     return {
         "status": "trained",
-        "version": version,
+        "version": version_int,
         "samples": n_samples,
         "auc": auc,
         "accuracy": acc,

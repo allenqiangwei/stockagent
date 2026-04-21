@@ -693,7 +693,7 @@ def _call_deepseek(user_prompt: str) -> Optional[dict]:
     """Call DeepSeek API for beta factor evaluation."""
     try:
         from openai import OpenAI
-        from api.config import settings
+        from api.config import get_settings; settings = get_settings()
         from api.utils.network import no_proxy
 
         client = OpenAI(

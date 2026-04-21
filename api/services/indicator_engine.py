@@ -40,10 +40,15 @@ class IndicatorEngine:
 
         calc = IndicatorCalculator(config or IndicatorConfig())
 
-        target = indicators if indicators else self.SUPPORTED
-        target = [i.lower() for i in target if i.lower() in self.SUPPORTED]
+        if config and (config.extended or not indicators):
+            # Use calculate_all when a custom config is provided — this handles
+            # both built-in and extended indicators (BOLL, CCI, NEWS_SENTIMENT, etc.)
+            ind_df = calc.calculate_all(df)
+        else:
+            target = indicators if indicators else self.SUPPORTED
+            target = [i.lower() for i in target if i.lower() in self.SUPPORTED]
+            ind_df = calc.calculate_subset(df, target)
 
-        ind_df = calc.calculate_subset(df, target)
         result = pd.concat(
             [df.reset_index(drop=True), ind_df.reset_index(drop=True)],
             axis=1,

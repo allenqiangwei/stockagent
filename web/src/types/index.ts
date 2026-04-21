@@ -180,7 +180,7 @@ export interface SignalItem {
   alpha_score: number;
   count_score: number;
   quality_score: number;
-  diversity_score: number;
+  simplicity_score: number;
   signal_level: number;
   signal_level_name: string;
   action: "buy" | "sell" | "hold";
@@ -461,6 +461,7 @@ export interface LabExperimentListItem {
   source_type: string;
   status: string;
   strategy_count: number;
+  done_count: number;
   best_score: number;
   best_name: string;
   created_at: string;
@@ -664,7 +665,9 @@ export interface BotTradeReviewItem {
   review_thinking: string;
   memory_synced: boolean;
   memory_note_id: string | null;
-  trades: BotTradeItem[] | null;
+  trades: Record<string, unknown>[] | null;
+  strategy_id: number | null;
+  exit_reason: string | null;
   created_at: string;
 }
 

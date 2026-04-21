@@ -27,5 +27,6 @@ class ConfidenceModel(Base):
     brier_score: Mapped[float] = mapped_column(Float, default=0.25)
     training_samples: Mapped[int] = mapped_column(Integer, default=0)
     positive_rate: Mapped[float] = mapped_column(Float, default=0.5)
+    calibration_data: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)

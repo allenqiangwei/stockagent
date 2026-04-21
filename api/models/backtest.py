@@ -17,7 +17,7 @@ class BacktestRun(Base):
     strategy_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("strategies.id"), nullable=True, index=True
     )
-    strategy_name: Mapped[str] = mapped_column(String(100))
+    strategy_name: Mapped[str] = mapped_column(Text)
     start_date: Mapped[str] = mapped_column(String(10))
     end_date: Mapped[str] = mapped_column(String(10))
     capital_per_trade: Mapped[float] = mapped_column(Float, default=10000.0)
@@ -54,7 +54,7 @@ class BacktestTrade(Base):
         Integer, ForeignKey("backtest_runs_v2.id"), index=True
     )
     stock_code: Mapped[str] = mapped_column(String(6))
-    strategy_name: Mapped[str] = mapped_column(String(100), default="")
+    strategy_name: Mapped[str] = mapped_column(Text, default="")
     buy_date: Mapped[str] = mapped_column(String(10), nullable=True)
     buy_price: Mapped[float] = mapped_column(Float, nullable=True)
     sell_date: Mapped[str] = mapped_column(String(10), nullable=True)

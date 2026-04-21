@@ -50,7 +50,12 @@ class WalkForwardResult:
     train_avg_return: float = 0.0
     train_avg_win_rate: float = 0.0
 
-    # Overfit ratio: train_return / test_return — >2x suggests overfitting
+    # Walk-Forward Efficiency (WFE): annualized_test / annualized_train
+    # >50% = robust (Pardo standard), >80% = excellent
+    wfe_pct: float = 0.0
+
+    # Overfit ratio: annualized_train / annualized_test (inverse of WFE)
+    # <2.0 = acceptable, >3.0 = likely overfit
     overfit_ratio: float = 0.0
 
     # Consistency: how many test rounds were profitable
@@ -121,46 +126,143 @@ def run_walk_forward(
     step_months: int = 6,
     index_data: Optional[pd.DataFrame] = None,
     progress_callback=None,
+    precomputed: Optional[Dict[str, Any]] = None,
+    regime_map: Optional[Dict[str, str]] = None,
 ) -> WalkForwardResult:
     """Run walk-forward validation on a strategy.
 
     For each window, runs the SAME strategy on train and test periods separately.
     Aggregates test-period results for out-of-sample performance.
+
+    If precomputed is provided (from PortfolioBacktestEngine.prepare_data()),
+    uses the fast run_with_prepared() path — indicators computed once.
+    Otherwise falls back to engine.run() per window (slower).
     """
     from src.backtest.portfolio_engine import PortfolioBacktestEngine
 
     windows = generate_windows(start_date, end_date, train_years, test_months, step_months)
     strategy_name = strategy.get("name", "unknown")
+    exit_config = strategy.get("exit_config", {})
 
     if not windows:
         return WalkForwardResult(strategy_name=strategy_name)
 
     logger.info("Walk-forward: %d rounds for %s (%s ~ %s)", len(windows), strategy_name, start_date, end_date)
 
+    use_fast_path = precomputed is not None and precomputed.get("prepared")
+
     for i, w in enumerate(windows):
         if progress_callback:
             progress_callback(i + 1, len(windows), f"Round {w.round_num}: test {w.test_start}~{w.test_end}")
 
-        engine = PortfolioBacktestEngine()
+        if use_fast_path:
+            # Fast path: reuse precomputed indicators, just slice date range
+            engine = PortfolioBacktestEngine()
+            train_pre = _slice_precomputed(precomputed, w.train_start, w.train_end)
+            if train_pre and train_pre.get("sorted_dates"):
+                try:
+                    w.train_result = engine.run_with_prepared(
+                        strategy_name=strategy_name,
+                        exit_config=exit_config,
+                        precomputed=train_pre,
+                        regime_map=regime_map,
+                    )
+                except Exception as e:
+                    logger.warning("Walk-forward train round %d failed: %s", w.round_num, e)
 
-        # Filter stock_data to train period
-        train_data = _filter_stock_data(stock_data, w.train_start, w.train_end)
-        if train_data:
-            try:
-                w.train_result = engine.run(strategy, train_data, index_data=index_data)
-            except Exception as e:
-                logger.warning("Walk-forward train round %d failed: %s", w.round_num, e)
+            test_pre = _slice_precomputed(precomputed, w.test_start, w.test_end)
+            if test_pre and test_pre.get("sorted_dates"):
+                try:
+                    w.test_result = engine.run_with_prepared(
+                        strategy_name=strategy_name,
+                        exit_config=exit_config,
+                        precomputed=test_pre,
+                        regime_map=regime_map,
+                    )
+                except Exception as e:
+                    logger.warning("Walk-forward test round %d failed: %s", w.round_num, e)
+        else:
+            # Slow path: full engine.run() per window
+            engine = PortfolioBacktestEngine()
+            train_data = _filter_stock_data(stock_data, w.train_start, w.train_end)
+            if train_data:
+                try:
+                    w.train_result = engine.run(strategy, train_data, index_data=index_data)
+                except Exception as e:
+                    logger.warning("Walk-forward train round %d failed: %s", w.round_num, e)
 
-        # Filter stock_data to test period
-        test_data = _filter_stock_data(stock_data, w.test_start, w.test_end)
-        if test_data:
-            try:
-                w.test_result = engine.run(strategy, test_data, index_data=index_data)
-            except Exception as e:
-                logger.warning("Walk-forward test round %d failed: %s", w.round_num, e)
+            test_data = _filter_stock_data(stock_data, w.test_start, w.test_end)
+            if test_data:
+                try:
+                    w.test_result = engine.run(strategy, test_data, index_data=index_data)
+                except Exception as e:
+                    logger.warning("Walk-forward test round %d failed: %s", w.round_num, e)
 
     # Aggregate results
-    return _aggregate_results(strategy_name, windows)
+    return _aggregate_results(strategy_name, windows, train_years, test_months)
+
+
+def _slice_precomputed(
+    precomputed: Dict[str, Any],
+    start_date: str,
+    end_date: str,
+) -> Dict[str, Any]:
+    """Slice precomputed data to a date range without recomputing indicators.
+
+    buy_signal_map / sell_signal_map are {stock_code: np.array} where the array
+    is aligned row-by-row with that stock's prepared DataFrame.  We must slice
+    the arrays using the same row mask we use for the DataFrame.
+    """
+    import numpy as np
+
+    sorted_dates = precomputed.get("sorted_dates", [])
+    filtered_dates = [d for d in sorted_dates if start_date <= d <= end_date]
+
+    if not filtered_dates:
+        return {}
+
+    date_set = set(filtered_dates)
+    orig_buy_map = precomputed.get("buy_signal_map", {})
+    orig_sell_map = precomputed.get("sell_signal_map", {})
+
+    prepared = {}
+    stock_date_idx: Dict[str, Dict[str, int]] = {}
+    buy_signal_map = {}
+    sell_signal_map = {}
+
+    for code, df in precomputed.get("prepared", {}).items():
+        if "date" not in df.columns:
+            continue
+
+        # Boolean mask for rows in the date window
+        mask = df["date"].isin(date_set).values
+        sliced = df[mask].reset_index(drop=True)
+
+        if len(sliced) < 10:
+            continue
+
+        prepared[code] = sliced
+
+        # Rebuild date→row index
+        dates = sliced["date"].tolist()
+        stock_date_idx[code] = {d: i for i, d in enumerate(dates)}
+
+        # Slice signal arrays with the same mask
+        if code in orig_buy_map:
+            buy_signal_map[code] = orig_buy_map[code][mask]
+        if code in orig_sell_map:
+            sell_signal_map[code] = orig_sell_map[code][mask]
+
+    if not prepared:
+        return {}
+
+    return {
+        "prepared": prepared,
+        "sorted_dates": filtered_dates,
+        "stock_date_idx": stock_date_idx,
+        "buy_signal_map": buy_signal_map,
+        "sell_signal_map": sell_signal_map,
+    }
 
 
 def _filter_stock_data(
@@ -179,7 +281,12 @@ def _filter_stock_data(
     return result
 
 
-def _aggregate_results(strategy_name: str, windows: List[WalkForwardWindow]) -> WalkForwardResult:
+def _aggregate_results(
+    strategy_name: str,
+    windows: List[WalkForwardWindow],
+    train_years: float = 2.0,
+    test_months: int = 6,
+) -> WalkForwardResult:
     """Aggregate test-period results across all rounds."""
     result = WalkForwardResult(
         strategy_name=strategy_name,
@@ -223,10 +330,41 @@ def _aggregate_results(strategy_name: str, windows: List[WalkForwardWindow]) -> 
         result.train_avg_return = round(sum(train_returns) / len(train_returns), 2)
         result.train_avg_win_rate = round(sum(train_win_rates) / len(train_win_rates), 2)
 
-    # Overfit ratio
-    if result.test_avg_return != 0:
-        result.overfit_ratio = round(result.train_avg_return / result.test_avg_return, 2) if result.test_avg_return > 0 else 99.0
-    elif result.train_avg_return > 0:
-        result.overfit_ratio = 99.0  # train positive, test zero/negative = severe overfit
+    # ── Walk-Forward Efficiency (WFE) ──
+    # Annualize returns before comparing: train=2yr, test=6mo have different durations.
+    # WFE = annualized_test / annualized_train (Pardo standard, threshold ≥ 50%)
+    # overfit_ratio = annualized_train / annualized_test (inverse, threshold ≤ 2.0)
+    train_years_len = train_years
+    test_months_len = test_months
+
+    def _annualize(pct_return: float, period_months: float) -> float:
+        """Annualize a percentage return. E.g. 17% over 6 months → ~36.9%/year."""
+        if period_months <= 0 or pct_return <= -100:
+            return 0.0
+        growth = 1 + pct_return / 100
+        if growth <= 0:
+            return -100.0
+        years = period_months / 12
+        return (growth ** (1 / years) - 1) * 100
+
+    ann_train = _annualize(result.train_avg_return, train_years_len * 12)
+    ann_test = _annualize(result.test_avg_return, test_months_len)
+
+    if ann_train > 0 and ann_test > 0:
+        result.wfe_pct = round(ann_test / ann_train * 100, 1)
+        result.overfit_ratio = round(ann_train / ann_test, 2)
+    elif ann_train > 0 and ann_test <= 0:
+        result.wfe_pct = 0.0
+        result.overfit_ratio = 99.0
+    else:
+        result.wfe_pct = 0.0
+        result.overfit_ratio = 0.0
+
+    logger.info(
+        "Walk-forward WFE: train_avg=%.1f%% (ann=%.1f%%), test_avg=%.1f%% (ann=%.1f%%) → "
+        "WFE=%.1f%%, overfit=%.2fx, consistency=%.0f%%",
+        result.train_avg_return, ann_train, result.test_avg_return, ann_test,
+        result.wfe_pct, result.overfit_ratio, result.consistency_pct,
+    )
 
     return result

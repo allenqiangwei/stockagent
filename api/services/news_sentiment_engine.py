@@ -125,6 +125,13 @@ class NewsSentimentEngine:
             logger.info("No unanalyzed news found for %s (last %.0f hours)", period_type, hours_back)
             return None
 
+        # Layer 0: rule-based pre-filter (reject ads, irrelevant, too short)
+        from api.services.news_filter import filter_batch
+        raw_rows, _filter_stats = filter_batch(raw_rows, title_key="title", content_key="content")
+        if not raw_rows:
+            logger.info("All news filtered out for %s", period_type)
+            return None
+
         # Dedup + sample
         unique_rows = self._deduplicate(raw_rows)
         sampled_rows = self._source_proportional_sample(unique_rows, MAX_NEWS_PER_RUN)

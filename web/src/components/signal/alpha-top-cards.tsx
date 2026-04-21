@@ -4,23 +4,23 @@ import { Badge } from "@/components/ui/badge";
 import { Trophy } from "lucide-react";
 import type { SignalItem } from "@/types";
 
-function ScoreBar({ count, quality, diversity, total }: {
+function ScoreBar({ count, quality, simplicity, total }: {
   count: number;
   quality: number;
-  diversity: number;
+  simplicity: number;
   total: number;
 }) {
   if (total <= 0) return null;
   const pctC = (count / 100) * 100;
   const pctQ = (quality / 100) * 100;
-  const pctD = (diversity / 100) * 100;
+  const pctS = (simplicity / 100) * 100;
 
   return (
     <div className="flex items-center gap-2">
       <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden flex">
         <div className="h-full bg-blue-500" style={{ width: `${pctC}%` }} title={`数量 ${count}`} />
         <div className="h-full bg-violet-500" style={{ width: `${pctQ}%` }} title={`质量 ${quality}`} />
-        <div className="h-full bg-orange-500" style={{ width: `${pctD}%` }} title={`多样性 ${diversity}`} />
+        <div className="h-full bg-orange-500" style={{ width: `${pctS}%` }} title={`简洁性 ${simplicity}`} />
       </div>
       <span className="text-xs text-muted-foreground tabular-nums w-7 text-right">{total}</span>
     </div>
@@ -73,7 +73,7 @@ export function AlphaTopCards({
         <div className="flex items-center gap-3 ml-auto text-xs text-muted-foreground">
           <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-blue-500" />数量</span>
           <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-violet-500" />质量</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500" />多样性</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-orange-500" />简洁性</span>
           <span className="mx-1 text-border">|</span>
           <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-emerald-500" />日线</span>
           <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-cyan-500" />周线</span>
@@ -98,7 +98,7 @@ export function AlphaTopCards({
             <ScoreBar
               count={s.count_score}
               quality={s.quality_score}
-              diversity={s.diversity_score}
+              simplicity={s.simplicity_score}
               total={s.alpha_score}
             />
 

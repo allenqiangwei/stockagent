@@ -1,0 +1,792 @@
+{
+  "round_number": 1282,
+  "rounds_total": 1,
+  "rounds_completed": 0,
+  "current_step": "submit",
+  "experiment_ids": [
+    15827,
+    15828,
+    15829,
+    15830,
+    15831,
+    15832,
+    15833,
+    15834,
+    15835,
+    15836,
+    15837,
+    15838,
+    15839,
+    15840,
+    15841,
+    15842,
+    15843,
+    15844,
+    15845,
+    15846,
+    15847,
+    15848,
+    15849,
+    15850,
+    15851,
+    15852,
+    15853,
+    15854,
+    15855,
+    15856,
+    15857,
+    15858,
+    15859,
+    15860,
+    15861,
+    15862,
+    15863,
+    15864
+  ],
+  "source_strategy_id": 116987,
+  "experiments_per_round": 50,
+  "started_at": "2026-04-21T09:25:18.812848",
+  "updated_at": "2026-04-21T09:27:53.375257",
+  "llm_provider": "code-driven",
+  "promoted_count": 0,
+  "configs": [
+    {
+      "name": "TREND_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "TREND_STRENGTH + VOLUME_RATIO"
+    },
+    {
+      "name": "RSTR_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "RSTR_weighted + TREND_STRENGTH"
+    },
+    {
+      "name": "RSTR_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "RSTR_weighted + VOLUME_RATIO"
+    },
+    {
+      "name": "PVOL_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "PVOL_amount_conc + TREND_STRENGTH"
+    },
+    {
+      "name": "ACCELERATION_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "ACCELERATION",
+          "value": 0.0
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ACCELERATION + TREND_STRENGTH"
+    },
+    {
+      "name": "PVOL_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "PVOL_amount_conc + VOLUME_RATIO"
+    },
+    {
+      "name": "PVOL_RSTR_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        },
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "PVOL_amount_conc + RSTR_weighted"
+    },
+    {
+      "name": "ACCELERATION_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "ACCELERATION",
+          "value": 0.0
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ACCELERATION + VOLUME_RATIO"
+    },
+    {
+      "name": "LIQ_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "LIQ_turnover_vol + TREND_STRENGTH"
+    },
+    {
+      "name": "ACCELERATION_RSTR_v1",
+      "buy_factors": [
+        {
+          "factor": "ACCELERATION",
+          "value": 0.0
+        },
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ACCELERATION + RSTR_weighted"
+    },
+    {
+      "name": "LIQ_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "LIQ_turnover_vol + VOLUME_RATIO"
+    },
+    {
+      "name": "LIQ_RSTR_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "LIQ_turnover_vol + RSTR_weighted"
+    },
+    {
+      "name": "REALVOL_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "REALVOL_kurt + TREND_STRENGTH"
+    },
+    {
+      "name": "TREND_W_v1",
+      "buy_factors": [
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        },
+        {
+          "factor": "W_REALVOL",
+          "value": 26.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "TREND_STRENGTH + W_REALVOL"
+    },
+    {
+      "name": "REALVOL_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "REALVOL_kurt + VOLUME_RATIO"
+    },
+    {
+      "name": "VOLUME_W_v1",
+      "buy_factors": [
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        },
+        {
+          "factor": "W_REALVOL",
+          "value": 26.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "VOLUME_RATIO + W_REALVOL"
+    },
+    {
+      "name": "ACCELERATION_PVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "ACCELERATION",
+          "value": 0.0
+        },
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ACCELERATION + PVOL_amount_conc"
+    },
+    {
+      "name": "LIQ_PVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "LIQ_turnover_vol + PVOL_amount_conc"
+    },
+    {
+      "name": "ACCELERATION_LIQ_v1",
+      "buy_factors": [
+        {
+          "factor": "ACCELERATION",
+          "value": 0.0
+        },
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ACCELERATION + LIQ_turnover_vol"
+    },
+    {
+      "name": "PVOL_W_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        },
+        {
+          "factor": "W_REALVOL",
+          "value": 26.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "PVOL_amount_conc + W_REALVOL"
+    },
+    {
+      "name": "ACCELERATION_REALVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "ACCELERATION",
+          "value": 0.0
+        },
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ACCELERATION + REALVOL_kurt"
+    },
+    {
+      "name": "ACCELERATION_W_v1",
+      "buy_factors": [
+        {
+          "factor": "ACCELERATION",
+          "value": 0.0
+        },
+        {
+          "factor": "W_REALVOL",
+          "value": 26.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ACCELERATION + W_REALVOL"
+    },
+    {
+      "name": "LIQ_REALVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "LIQ_turnover_vol + REALVOL_kurt"
+    },
+    {
+      "name": "LIQ_W_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "W_REALVOL",
+          "value": 26.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "LIQ_turnover_vol + W_REALVOL"
+    },
+    {
+      "name": "REALVOL_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "REALVOL",
+          "value": 25.0
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "REALVOL + TREND_STRENGTH"
+    },
+    {
+      "name": "TREND_W_v1",
+      "buy_factors": [
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        },
+        {
+          "factor": "W_KBAR_amplitude",
+          "value": 0.065
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "TREND_STRENGTH + W_KBAR_amplitude"
+    },
+    {
+      "name": "REALVOL_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "REALVOL",
+          "value": 25.0
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "REALVOL + VOLUME_RATIO"
+    },
+    {
+      "name": "VOLUME_W_v1",
+      "buy_factors": [
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        },
+        {
+          "factor": "W_KBAR_amplitude",
+          "value": 0.065
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "VOLUME_RATIO + W_KBAR_amplitude"
+    },
+    {
+      "name": "RSTR_W_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "W_KBAR_amplitude",
+          "value": 0.065
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "RSTR_weighted + W_KBAR_amplitude"
+    },
+    {
+      "name": "PVOL_W_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        },
+        {
+          "factor": "W_KBAR_amplitude",
+          "value": 0.065
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "PVOL_amount_conc + W_KBAR_amplitude"
+    },
+    {
+      "name": "RSTR_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+RSI+RSTR+TREND_STRENGTH"
+    },
+    {
+      "name": "PVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+PVOL_AMOUNT+RSI"
+    },
+    {
+      "name": "RSTR_W_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "W_REALVOL",
+          "value": 26.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+RSI+RSTR+W_REALVOL"
+    },
+    {
+      "name": "LIQ_REALVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+LIQ_TURNOVER+REALVOL+RSI"
+    },
+    {
+      "name": "PVOL_RSTR_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        },
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+PVOL_AMOUNT+RSI+RSTR"
+    },
+    {
+      "name": "RSTR_W_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "W_KBAR_amplitude",
+          "value": 0.065
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+RSI+RSTR+W_KBAR"
+    },
+    {
+      "name": "KBAR_REALVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "KBAR_amplitude",
+          "value": 0.0325
+        },
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+KBAR+REALVOL+RSI"
+    },
+    {
+      "name": "AMPVOL_KBAR_v1",
+      "buy_factors": [
+        {
+          "factor": "AMPVOL_std",
+          "value": 0.025
+        },
+        {
+          "factor": "KBAR_amplitude",
+          "value": 0.0325
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "AMPVOL+ATR+KBAR+RSI"
+    },
+    {
+      "name": "ACCELERATION_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "ACCELERATION",
+          "value": 0.0
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ACCELERATION+ATR+RSI+TREND_STRENGTH"
+    },
+    {
+      "name": "RSTR_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+RSI+RSTR+VOLUME_RATIO"
+    },
+    {
+      "name": "LIQ_VOLUME_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "VOLUME_RATIO",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+LIQ_TURNOVER+RSI+VOLUME_RATIO"
+    },
+    {
+      "name": "REALVOL_W_v1",
+      "buy_factors": [
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        },
+        {
+          "factor": "W_REALVOL",
+          "value": 26.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+REALVOL+RSI+W_REALVOL"
+    },
+    {
+      "name": "REALVOL_RSTR_v1",
+      "buy_factors": [
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        },
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+REALVOL+RSI+RSTR"
+    },
+    {
+      "name": "REALVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+REALVOL+RSI"
+    },
+    {
+      "name": "REALVOL_W_v1",
+      "buy_factors": [
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        },
+        {
+          "factor": "W_KBAR_amplitude",
+          "value": 0.065
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+REALVOL+RSI+W_KBAR"
+    },
+    {
+      "name": "RSTR_TREND_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "TREND_STRENGTH",
+          "value": 5.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+RSI+RSTR+TREND_STRENGTH"
+    },
+    {
+      "name": "PVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+PVOL_AMOUNT+RSI"
+    },
+    {
+      "name": "RSTR_W_v1",
+      "buy_factors": [
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        },
+        {
+          "factor": "W_REALVOL",
+          "value": 26.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+RSI+RSTR+W_REALVOL"
+    },
+    {
+      "name": "LIQ_REALVOL_v1",
+      "buy_factors": [
+        {
+          "factor": "LIQ_turnover_vol",
+          "value": 1.4
+        },
+        {
+          "factor": "REALVOL_kurt",
+          "value": 3.0
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+LIQ_TURNOVER+REALVOL+RSI"
+    },
+    {
+      "name": "PVOL_RSTR_v1",
+      "buy_factors": [
+        {
+          "factor": "PVOL_amount_conc",
+          "value": 0.45
+        },
+        {
+          "factor": "RSTR_weighted",
+          "value": -2.5
+        }
+      ],
+      "sell_factors": [],
+      "_skeleton": "ATR+PVOL_AMOUNT+RSI+RSTR"
+    }
+  ]
+}

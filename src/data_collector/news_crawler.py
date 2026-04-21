@@ -343,3 +343,91 @@ class NewsCrawler:
 
         total_score = sum(n.sentiment_score for n in news_list)
         return total_score / len(news_list)
+
+    # ── LLM-based sentiment scoring ─────────────────────
+
+    _LLM_BASE_URL = "http://192.168.100.172:8680/v1"
+    _LLM_MODEL = "qwen3.5-35b-a3b"
+    _LLM_BATCH_SIZE = 10
+    _LLM_WORKERS = 5
+    _LLM_TIMEOUT = 60
+
+    _LLM_PROMPT = """你是A股市场资深分析师。对以下财经新闻逐条评分(0-100)。
+规则: 0-20极度利空, 20-40偏空, 40-60中性, 60-80偏多, 80-100极度利多。
+仅输出JSON数组，不要其他内容。
+格式: [{{"id":1,"score":75}}, ...]
+
+{news_text}"""
+
+    def rescore_with_llm(self, news_list: List[NewsItem]) -> int:
+        """Batch rescore news using local Qwen LLM. Modifies items in-place.
+
+        Returns number of successfully rescored items.
+        """
+        import json as _json
+        import re as _re
+        import concurrent.futures
+        import urllib.request
+
+        if not news_list:
+            return 0
+
+        batches = [news_list[i:i+self._LLM_BATCH_SIZE]
+                   for i in range(0, len(news_list), self._LLM_BATCH_SIZE)]
+
+        def _score_batch(batch_idx: int, batch: List[NewsItem]) -> list:
+            news_text = ""
+            for i, n in enumerate(batch):
+                news_text += f"[{i+1}] {n.title}\n"
+
+            payload = _json.dumps({
+                "model": self._LLM_MODEL,
+                "messages": [{"role": "user", "content": self._LLM_PROMPT.format(news_text=news_text)}],
+                "temperature": 0.3,
+                "max_tokens": 1000,
+            }).encode()
+
+            try:
+                req = urllib.request.Request(
+                    f"{self._LLM_BASE_URL}/chat/completions",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=self._LLM_TIMEOUT) as resp:
+                    result = _json.loads(resp.read())
+
+                content = result["choices"][0]["message"]["content"]
+                content = _re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                match = _re.search(r'\[[\s\S]*?\]', content)
+                if match:
+                    return _json.loads(match.group())
+            except Exception as e:
+                logger.warning("LLM batch %d scoring failed: %s", batch_idx, e)
+            return []
+
+        rescored = 0
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self._LLM_WORKERS) as executor:
+                futures = {
+                    executor.submit(_score_batch, idx, batch): (idx, batch)
+                    for idx, batch in enumerate(batches)
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    idx, batch = futures[future]
+                    try:
+                        scores = future.result()
+                        for item in scores:
+                            local_idx = item.get("id", 0) - 1
+                            score = item.get("score")
+                            if 0 <= local_idx < len(batch) and isinstance(score, (int, float)):
+                                batch[local_idx].sentiment_score = float(max(0, min(100, score)))
+                                rescored += 1
+                    except Exception as e:
+                        logger.warning("LLM batch %d result failed: %s", idx, e)
+
+            logger.info("LLM rescore: %d/%d news rescored in %d batches",
+                       rescored, len(news_list), len(batches))
+        except Exception as e:
+            logger.warning("LLM rescore failed (falling back to keywords): %s", e)
+
+        return rescored

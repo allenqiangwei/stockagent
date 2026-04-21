@@ -1,15 +1,15 @@
 # AI 策略实验室 — 实验结果分析
 
-> 更新时间: 2026-03-04 | 总实验: 3846(ID) | 总策略: **~2,072个(StdA+)** | **154轮探索** | **T+1 ALL-TIME SCORE: KAMA终极震荡 = 0.831** | **R145-R153: SL15-20突破(全7族100%StdA+), SL20=ceiling, MHD15=ceiling, TP2=max** | **R154: 新指标全失败**
+> 更新时间: 2026-03-19 | **1189轮探索** | **ALL-TIME RETURN: 8909%** (AM8 TP1.0 MHD2, R1139) | **ALL-TIME SCORE (StdA+): 0.8717** (R1148) | **R1188**: 522实验/4176策略/667 StdA+(16%), best 0.853. **R1189**: 500实验/4000策略已提交(5骨架并行填充), 回测进行中.
 >
-> **StdA+标准(2026-03-03起)**: score≥0.75, return>60%, dd<18%, trades≥50, **win_rate>60%**
+> **StdA+标准(2026-03-07起)**: score≥0.80, return>60%, dd<18%, trades≥50, **win_rate>60%**
 > **BUG FIX (R66 session)**: r54_process.py api_put 404 — 添加PUT `/api/lab/strategies/{id}` + `/api/lab/experiments/{id}`, 修复555策略backtest_summary (旧标准: score≥0.70, ret>20%, dd<25%)
 
 ---
 
 ## 核心洞察
 
-> **143轮实验、3772个实验、1829个StdA+策略的核心发现**:
+> **556轮实验、~4982个实验、~8763个StdA+策略的核心发现**:
 
 1. **KDJ 是 A 股最有效的技术指标** — 四轮实验持续验证。第四轮 67 个 KDJ 主题产出 26 个盈利策略, 最高收益 +60.7%, 且 5 个策略在牛/熊/震荡全阶段盈利
 2. **KDJ+MACD 是最佳指标组合** — 双金叉(+34.1%), 趋势跟踪(+29.3%), 底背离(+26.9%) 三个方向均有不错收益
@@ -98,8 +98,13 @@
     - **存活率最高的族群**: 全指标综合_保守版B(108/108=100%), MACD+RSI(83/84=99%), 三指标共振(194/200=97%), PSAR趋势动量(313/343=91%)
     - **最高收益从+627.7%降至+192.5%**: 三指标共振取代激进版A成为收益冠军
     - **结论**: 之前"极短持仓+极低止盈"的结论在T+1下部分失效, 真正鲁棒的策略需要足够的alpha margin来吸收T+1执行成本
+81. **buy_core 5-条件公式(RSI50-70+ATR<0.12+AbvMin13+BelMax10)+ ATRcalm7d = 93% StdA+(R1108)** — ATRcalm条件(ATR 7日涨幅<3%)作为第6个过滤条件将14/15策略提升至StdA+。win_rate=60-71%，远高于dip条件(53-55%)。ATRcalm的原理: 在波动趋于平稳时买入，避免在高波动期入场，自然提升胜率
+82. **10条件以上的过约束是0 StdA+的直接原因(R1105-R1107)** — R1105-R1107三轮(E7207-E7210)全部0/all invalid或0 StdA+，原因是叠加了9-10个条件(ATRcalm+RSIconsec+dip+vol+close_ma等)。核心规律: 3-6条件最优，7+条件导致零信号或极少交易
+83. **RSI45-65 + dip比RSI50-70 + dip更有效(R1109早期)** — E7215早期结果2/2 StdA+，wr=64-69%。RSI50-70+dip失败(wr=53-55%)，RSI45-65+dip成功。更低的RSI下界(45vs50)可能捕获更多准超卖区间，配合dip条件提高胜率
 81. **SL甜蜜点: SL5-14(R121确认)** — SL3失败(score 0.731-0.738, 止损频繁触发于日常波动), SL4勉强通过(0.748-0.752), SL5始终通过。SL15/18/20与SL14完全相同(止损从不触发于TP1策略)。结论: TP1策略的有效SL范围为5-14, 两端均无额外信息
 82. **MHD4-10黄金区间: 100%命中(R119)** — MACD+RSI/VPT+PSAR/全指标综合/三指標共振 4族在MHD{4,5,7,10}×SL{10,12}×TP1下32/32 StdA+(100%)。MHD4-10填补了已证实MHD2-3和原始MHD15-30之间的空白
+83. **P4时间条件(consecutive/lookback/pct_change/pct_diff)打破0.843 ceiling(R166-R169)** — `sell=close falling 2 consecutive days` (close_fall2d) 取代BOLL+ROC复合卖出条件, 在MACD+RSI buy base上达到**0.845 StdA+** (wr=61.6%, ret=805%, dd=8.1%). 比旧ceiling(0.843)提升0.002. 同时发现: P4 sell条件可轻松达到score 0.855但wr<56%, 说明score-wr负相关是结构性约束. close_fall2d比BOLL_mid+ROC更简洁且更有效
+84. **close_fall2d是跨家族有效的卖出条件(R170)** — 应用于5个家族: 三指標(0.817 StdA+), 全指標(0.816 StdA+), KAMA突破(0.777 StdA+), VPT+PSAR(0.797 StdA+). KAMA終極因结构性dd>20%无法达标. 简单P4卖出条件普遍优于复杂指标组合卖出
 83. **MHD饱和: MHD≥8后无提升(R122确认)** — KAMA突破 MHD{8,9,12,14,25}全部score=0.765。三指標共振 MHD{12,14,18}全部score=0.777。TP1策略中, MHD越长仅等待更久平仓, 不增加收益
 84. **TP>1普遍致命(R116)** — 0/32 StdA+。所有族在TP2+时wr暴跌15-30pp(MACD+RSI: TP1 wr=77.5% → TP2 wr=54-59%)。TP1是所有短MHD策略的唯一最优
 85. **PSAR趨勢上升结构性dd失败(R122)** — dd=24.5-24.7%在所有MHD(4-20)下恒定。该族高收益(146-161%)但高dd源于激进入场规则, exit_config无法修复。永久排除于StdA+
@@ -108,335 +113,199 @@
 88. **TP=2是绝对上限(R149-R150)** — TP2仅对MACD+RSI/全指標/PSAR趋势/VPT+PSAR在MHD4+时有效(wr>60%)。TP2+MHD2-3全部失败(wr 54-59%)。TP3+在SL15-20下仍全部死亡(wr 48-58%, 所有家族), KAMA族TP2也全部失败(wr 58-59%)
 89. **MHD15是有效ceiling(R151-R153)** — MHD10/12/15/20/25/30产生几乎完全相同的score。MHD8+后score完全平台化, win rate持续上升(68-77%)但对score无贡献。全7族MHD10-30均100% StdA+
 90. **新指标全面失败确认(R154)** — 12个DeepSeek实验(NVI/MFI/WR/ROC/STC/KELTNER/ULTOSC组合), 96策略中69 invalid(72%), 0 StdA+。最高wr仅51.6%(KELTNER+KDJ), 远低于60%。A股T+1高wr策略仅限已知7大家族, 新指标探索空间彻底耗尽
+91. **条件阈值优化是SL/TP/MHD之外的第三维度(R155)** — 修改买入/卖出条件的指标阈值(如ATR<0.05→0.06, MFI>50→30)在已知最优exit_config上产出47个新StdA+。ATR<0.05是多族的通用瓶颈(过紧过滤低波动股), 放宽至0.06后MACD+RSI从0.810→**0.821**, 全指标综合从0.795→**0.807**。MFI>50过于严格, 降至30-40使三指标共振从0.783→0.791。批量条件优化功能已实现(信号重向量化+缓存)
+92. **MACD+RSI MFI_40创历史新高0.832(R156)** — MFI>50→40进一步松弛使MACD+RSI登顶! 5族创新best: MACD+RSI 0.832(MFI_40), **全指标综合 0.814(删除CCI条件)**, 三指標共振 0.809(ROC>-0.5+ATR_0.06), KAMA突破 0.801(MACD_hist>0.1), VPT+PSAR 0.803(VPT>-1500). **关键发现: 删除冗余条件(CCI)有时比调参更有效; MACD_hist>0.1(更紧)反而比>0更好(质量>数量)**
+93. **Min3(MACD+RSI50+ATR0.08)仅3条件=0.832/1822%/12.1%dd(R189)** — 从6条件MACD+RSI ablation实验发现: 移除MFI、RSI<70、lookback后, 3条件版本(MACD>signal+RSI>50+ATR<0.08)竟然与6条件原版score相当(0.832 vs 0.846), 收益翻倍(1822% vs 826%)! 额外条件不增加任何alpha, 只增加复杂度. **简单即是最优**
+94. **ATR sweet spot: 0.06-0.08(R189-R190)** — ATR<0.05过紧(wr下降), ATR>0.08 dd爆炸(>18%), ATR 0.06-0.08是跨族通用最优区间. ATR<0.08使交易数从2400→3049(+27%), 收益从826%→1822%
+95. **batch-clone只能使用source策略已有指标(R191)** — 向MACD+RSI source添加PSAR/KDJ/EMA/BOLL条件→ALL INVALID. vectorized_signals只计算source的指标集. 跨族指标需DeepSeek实验或独立回测
+96. **KDJ超卖(K<30)在A股是死亡策略(R192)** — DeepSeek生成KDJ<30策略4个done, wr=31-38%, dd=33-48%. 买入oversold在A股是亏损策略
+97. **DeepSeek无法生成有效PSAR/EMA策略(R192)** — PSAR 8/8 invalid, EMA 7/8 invalid. 这些指标的规则引擎格式DeepSeek理解不了
+98. **BWB(布林带宽)对VPT+PSAR不可或缺(R188)** — 移除BWB<5后收益从280%暴跌至25%. BWB是该族关键的波动率过滤器
+99. **Combined dual-sell可推score至0.849但wr<60%(R188)** — fall2d+lookback_min组合卖出条件突破score ceiling但牺牲wr(57%), 不满足StdA+. score-wr负相关是结构性约束
+100. **全指標ATR0.08+TP1=77.5% wr(R189)** — 历史最高win rate, ATR松弛+TP1极短持仓组合产出超高wr
+101. **每族可简化至2条件(R193-R197)** — BOLL+ATR(close>BOLL_mid+ATR<0.06), PSAR+BWB(close>PSAR+BWB<5), EMA+ATR(EMA12>EMA26+ATR<0.06), 删除lookback/CCI/VPT等条件后score不变。**VPT完全无效**(PSAR+BWB=0.806≈VPT+PSAR+BWB=0.799)
+102. **gt5dHigh是wr最优卖出条件(R198-R200)** — 跨4族达80%+ wr: EMA+ATR=82.4%, BOLL+ATR=81.6%, Min3=80.6%, PSAR+BWB=77.0%. 远超fall3d(74%)和pureSell(68-73%)
+103. **TP0.5突破85%wr(R202)** — EMA+ATR=85.8%, Min3=85.1%, BOLL+ATR=83.1%. 低TP=高wr是单调关系
+104. **TP0.25突破88%wr(R203)** — EMA+ATR=88.3%, Min3=87.9%, PSAR+BWB=86.7%. 所有4族达86%+
+105. **TP0.12-0.18=89%wr plateau(R205)** — EMA+ATR 89.2%=all-time high. TP0.12-0.18所有值给出相同~89% wr. 低于此plateau不可能再提升
+106. **TP0.1=54%wr cliff(R204)** — TP0.1低于slippage阈值(0.1%), 导致多数赢利交易净利润≈0而被计为亏损. 有趣的是score反而最高(0.855)但wr=54%不满足StdA+
+107. **SL对wr无实质影响(R201)** — SL5=76.5%, SL10=80.7%, SL15=80%, SL20=82.4%, SL25=81%, SL30=81%. SL10-30区间wr差异<2pp
+108. **Dual-sell降wr(R202)** — gt5dHigh+fall3d=76.2%(vs gt5dHigh alone=81.6%), gt5dHigh+rise2d=76.6%. 添加第二个卖出条件降低wr而非提升
+109. **Longer MHD=higher wr(R199-R201)** — MHD3=68-79%, MHD5=74-82%, MHD10=80-86%, MHD15=87-89%, MHD20-30=87-89%saturate. MHD10以上wr饱和
+110. **ATR对EMA族optimal=0.06, Min3=0.08(R201)** — noATR=invalid(结构性必需). ATR04=wr高但trades少/dd大. ATR10=ret最高(1003%)但wr略低(79%)
+111. **gt10dH=最优卖出条件(R206-R209)** — gt10dHigh(close>10日最高)相比gt5dHigh: EMA+ATR TP1 ret从+568%→+620%(+9%), wr从75.5%→82.4%(+7pp). gt15dH/gt20dH与gt10dH完全相同(lookback在MHD10内饱和). gt10dH+TP1=return+wr最佳平衡
+112. **rise2d=最高原始收益卖出(R210)** — 2日连涨卖出: EMA+ATR TP1 +635%(vs gt10dH +620%), Min3 TP2 +628%. rise3d=+584%/82.7%wr与gt10dH类似
+113. **lt5dLow=最高score但wr不达标(R211)** — lt5dLow(close<5日最低卖出): Min3 TP5/MHD15 score=**0.854**(历史新高!)但wr=48.3%. lt3dLow: Min3 **+812%**(Min3历史最高!)但wr=59.1%. Score-WR disconnect是结构性的: lt5dLow exit高return+低dd=高score但低wr
+114. **pctUp3=pctUp5=无效卖出(R212)** — 3-5%日涨幅在A股极罕见, pctUp卖出从不触发. 等同于纯MHD退出, EMA+ATR TP2/MHD10/pctUp3=**+680%**(EMA+ATR历史最高!)但wr=64.8%
+115. **TP2是gt10dH下的return最优点(R206-R207)** — TP1/MHD10/gt10dH=+620% vs TP1.5=+609% vs TP2=+585%(gt10dH提前退出使TP>2无意义). 但TP999(无止盈)=+155%, gt10dH本身就是有效退出机制
+116. **gt10dH+longer MHD boost Min3(R207)** — Min3 TP2/MHD10/gt10dH=+473%(vs gt5dH +372%, +27%!). gt7dH≈gt5dH, gt10dH才有显著提升
+117. **batch-clone buy_conditions格式必须匹配source(R213 FAILURE)** — 使用field=EMA_12格式但source用field=EMA+params={period:12}→全部零交易. 正确格式: {"field":"EMA","params":{"period":12},"compare_type":"field","operator":">","compare_field":"EMA","compare_params":{"period":26}}
+118. **ATR是收益旋钮(R214)** — ATR阈值从0.04→0.10: ret从+88%→+793%(9倍!), dd从6%→14%, wr恒定80-82%. noATR=信号爆炸(996信号/天). ATR控制"允许多少波动股进入"——越宽=越多交易=越多收益=越多风险. ATR不影响wr(买入质量不变)
+119. **RSI>40是Min3最优阈值(R214)** — RSI40(0.820/+389%)>RSI45(0.820/+370%)>RSI50(baseline)>RSI55(0.807/+330%)>RSI60(0.804/+301%). noRSI(0.802/+336%)与RSI55持平, RSI并非关键. RSI>45有最低dd(7.1%)
+120. **ATR0.10+lt5dLow+TP2=+1701%历史最高收益(R215)** — EMA+ATR ATR<0.10(宽波动过滤)+lt5dLow(反转卖出)+TP2: ret=+1701%, wr=67.5%, dd=13.5%, score=0.811, 3088笔交易. lt5dLow在宽ATR下效果爆发: 更多波动股进入→lt5dLow精准在反转前退出→极端复利效应. Sell×ATR交互是新的优化维度
+121. **ATR0.09是score最优(R215)** — EMA+ATR gt10dH sell: ATR0.08(0.796/+775%)→ATR0.09(**0.802**/+901%)→ATR0.10(0.790/+793%). ATR0.08-0.10区间score差异<0.01, 广义sweet spot
+122. **lt3dLow=终极卖出条件(R216)** — Min3 ATR0.10+lt3dLow+TP1=**+2651%**(全局最高!), EMA+ATR=+2283%. lt3dLow+TP2: score 0.822-0.823. ltNdLow ranking: **lt3d(+2283%)>lt5d(+1701%)>lt7d(+1404%)>lt10d(+912%)**. 更短lookback=更快卖出=更多复利. lt3dLow在TP1和TP2都通过StdA+ wr>60%
+123. **Min3在ltNdLow sell下优于EMA+ATR(R216)** — Min3 lt3dLow +2651% vs EMA+ATR +2283%(+16%). Min3更多条件(MACD+RSI+MFI+ATR)提供更好的进场信号质量, 在高频交易中效果放大
+124. **lt2dLow=新最高收益卖出(R217)** — EMA+ATR lt2dLow TP1=+2620.6%(StdA+, wr=66.7%), TP2=+2754.7%(非StdA+, wr=58.8%). lt2dLow在TP1时通过StdA+ wr门槛, TP2不通过. ltNdLow完整排名: **lt2d(+2621%)>lt3d(+2362%)>lt5d(+1701%)>lt7d(+1404%)>lt10d(+912%)**
+125. **跨家族ltNdLow收益差异巨大(R217)** — lt3dLow TP1: EMA+ATR(+2362%)>>Min3(+731%)>>三指標(+559%)>>VPT+PSAR(+301%). EMA+ATR条件最少(2个)但ATR<0.10允许最多交易进入→复利最大化. 更多买入条件=更少交易=更低复利
+126. **rise2d/rise3d卖出条件有效(R217)** — EMA+ATR TP1: rise2d=+642%(wr=80.2%), rise3d=+590%(wr=82.7%). rise系列wr最高(80-83%)但收益远低于ltNdLow系列. 适合追求高wr低风险的保守策略
+127. **MHD对ltNdLow完全无效(R217,Min3确认)** — Min3 lt3dLow MHD5/7/10/15/20: ret=716-731%, wr=68.1-68.4%. R216已在EMA+ATR确认, R217在Min3也确认. ltNdLow卖出在MHD到期前触发, MHD=冗余参数
+128. **ATR0.10是所有家族的MAX阈值(R217)** — Min3 ATR0.12/0.15全部INVALID(信号爆炸361-498信号/天). R214-R216在EMA+ATR确认, R217在Min3也确认. ATR>0.10=波动过滤失效
+129. **numpy read-only bug修复启用consecutive sell(R217)** — `vectorized_signals.py` `_vec_consecutive`函数pandas CoW模式返回只读array, 添加`.copy()`修复. 修复后rise2d/rise3d/fall2d/fall3d等consecutive类卖出条件可正常使用
+130. **VPT+PSAR和三指標家族均通过StdA+(R217)** — VPT+PSAR lt3dLow=+301%(wr=62.8%), gt10dHigh=+145%(wr=77.9%). 三指標 lt3dLow=+559%(wr=68.0%), gt10dHigh=+303%(wr=80.4%). 全部4家族均有StdA+策略, 证明卖出条件优化是通用的
+131. **lt1dLow比lt2dLow更差(R218)** — EMA+ATR lt1dLow TP1=+657%(wr=60.0%) vs lt2dLow TP1=+2621%(wr=66.7%). lt1dLow(close<昨日low)触发过于频繁→过早退出→无法复利. ltNdLow最优lookback=2-3天, 非1天
+132. **SL对ltNdLow策略至关重要(R218)** — EMA+ATR ATR0.10 lt2dLow: SL5=+966%(dd=21.1%,非StdA+)→SL7=+1349%→SL10=+2156%→SL12=+2454%→SL15=+2589%→SL20=+2621%. SL5→SL20=2.7倍收益差! ltNdLow持有期间经历回撤后恢复, 紧SL杀死恢复. 这与gt10dH(SL无关)完全相反
+133. **Min3 ATR0.10+ltNdLow结构性dd>18%(R218)** — Min3 ATR0.10: lt2dLow SL10(dd=22%), SL15(dd=21%), SL20(dd=20.4%); lt1dLow(dd=19.8-26%). ATR0.10波动太大, Min3买入条件不够强来过滤. 最高收益+4668%但全部非StdA+
+134. **Min3 ATR0.08是lt2dLow最优平衡点(R218)** — Min3 ATR0.08 lt2dLow SL20=+2539%(score=0.830, dd=12.1%, wr=66.1%). ATR0.07=+1423%(score=0.837, dd=8.6%), ATR0.09=+3446%(score=0.816, dd=16.5%). ATR0.07有最高score(0.837)但收益低, ATR0.08是最优tradeoff
+135. **EMA+ATR ATR0.09是lt2dLow Pareto最优(R218)** — EMA+ATR ATR0.09 lt2dLow SL20=+2496%(score=0.822, dd=12.0%, wr=67.1%). 对比ATR0.10=+2621%(score=0.820, dd=12.5%). ATR0.09 score更高、dd更低、wr更高, 仅收益少5%
+136. **ATR是收益-回撤线性旋钮(R218,全范围确认)** — 从ATR0.07到ATR0.10: 收益从+1040%→+2621%(2.5x), dd从16.2%→12.5%→12.0%→15.2%. ATR0.08-0.09是Pareto front, ATR0.10牺牲score换收益
+137. **fall2d是保守高wr选择(R218)** — EMA+ATR ATR0.06 fall2d TP1=+591%(wr=72.4%), fall3d TP1=+551%(wr=80.3%). 收益远低于ltNdLow但wr高10-15pp. 适合风险厌恶者
+138. **SL在ATR0.08下几乎不影响(R219)** — Min3 ATR0.08 lt2dLow: SL7=+1922%(score=0.820)→SL12=+2515%(0.832)→SL15=+2532%(0.831). SL7→SL15仅1.32x差异. 对比ATR0.10(SL5→SL20=2.7x). 低ATR=低波动=SL很少触发
+139. **Min3 ATR0.08 fall2d=最佳平衡策略(R219)** — +1814%, wr=72.0%, score=0.826, dd=10.5%. 高wr+高收益+低dd的完美平衡. 优于gt10dH(+941%/wr=80.7%)在收益上, 优于lt2dLow(+2539%/wr=66.1%)在wr和dd上
+140. **TP2对ltNdLow一致破坏wr(R219)** — EMA+ATR ATR0.09 lt2dLow TP2: score=0.834但wr=58.4%(非StdA+). Min3 ATR0.08 lt2dLow TP2: score=0.842但wr=57.8%(非StdA+). ltNdLow+TP2的score更高但永远过不了wr>60%门槛
+141. **三指標 ATR0.10 lt3dLow dd>18%(R219)** — 与Min3 ATR0.10相同模式: dd=19.1%. ATR0.09=最佳(+1750%/dd=16.4%). 三指標收益低于EMA+ATR和Min3但三个ATR level都有StdA+策略
+142. **跨家族lt2dLow ATR0.08-0.10完整矩阵(R218-R219)** — EMA+ATR: ATR08(+1637%/0.813)→ATR09(+2496%/0.822)→ATR10(+2621%/0.820). Min3: ATR08(+2539%/0.830)→ATR09(+3446%/0.816)→ATR10(dd>18%). 三指標: ATR08(+1637%/0.800)→ATR09(+1750%/0.801)→ATR10(+1894%/0.801). VPT+PSAR(no ATR): +328%/0.810
+143. **TP0.5-1.5 sweet spot确认(R220)** — Min3 ATR0.08 lt2dLow: TP0.5=+2472%(wr=72.3%/0.820), TP0.8=+2535%(68.7%/0.824), TP1=+2539%(66.1%/0.830), TP1.5=+2683%(61.5%/0.837). TP从0.5→1.5: 收益单调增+wr单调减. 全部StdA+! TP0.5-0.8是wr>70%且收益>2400%的sweet spot
+144. **MHD对lt2dLow在ATR0.08下也完全无效(R220)** — Min3 ATR0.08 lt2dLow: MHD3(+2594%)≈MHD5(+2615%)≈MHD10(+2539%)≈MHD15(+2539%)≈MHD20(+2539%). MHD3-20差异<3%, 确认ltNdLow sell在所有ATR level下都使MHD冗余
+145. **Min3 ATR0.07 fall2d=最低dd策略(R220)** — +1045%, wr=72.3%, score=0.829, dd=**7.7%**. fall3d=+617%(wr=80.2%/dd=**7.1%**). ATR0.07的低波动+fall sell的早期退出=极低回撤. 对dd敏感的配置首选
+146. **Min3 ATR0.09 sell矩阵(R220)** — fall2d(+2270%/wr72.1%/dd16.2%), fall3d(+1308%/wr79.4%/dd12.1%), gt10dH(+967%/wr80.3%/dd10.6%), rise2d(+1150%/wr78.5%/dd12.0%). ATR0.09的fall2d收益最高但dd=16.2%(接近18%极限)
+147. **R220 100% StdA+率(R220)** — 24/24策略全部通过StdA+. 当优化空间在ATR0.07-0.09×{lt2dLow,lt3dLow,fall2d,fall3d,gt10dH,rise2d}范围内时, 几乎所有策略都是高质量的
+148. **ATR0.091=真正的sweet spot, NOT 0.09(R278-R279)** — 4位小数精扫: ATR0.0895(0.8619)→0.09(0.8614)→0.0905(0.8621)→**0.091(0.8627)**→0.0915(0.8621)→0.092(0.8602). ATR0.091是尖峰最优, 两侧对称下降
+149. **RSI 48-66=optimal买入范围(R275-R278)** — 比原始RSI 45-70更紧: 提升wr 3-4pp(从57%→60%+), 代价是减少~20%交易. RSI48(下界)过滤噪声, RSI66(上界)避免过热. RSI50-65太紧(少30%交易), RSI45-70太宽(wr<59%)
+150. **TP1.36=StdA+ ceiling(R279)** — TP1.36(0.8628/wr=60.02%)通过StdA+, TP1.37(0.8632/wr=59.93%)差0.07%不通过. TP Pareto完整: TP1.30(0.8616/60.38%)→TP1.32(0.8622/60.34%)→TP1.34(0.8623/60.10%)→**TP1.36(0.8628/60.02%)**→TP1.37(fails)
+151. **TP1.4在wr>60%结构性不可能(R276)** — 穷尽测试ATR0.092-0.096 × RSI48-66/50-65 × volume/MACD filters. TP1.4 wr最高59.8%(RSI48-67_ATR0.092), 0.2%短缺. 这是A股T+1市场的结构性上限
+152. **SL和MHD对高score策略完全无影响(R277)** — RSI48-66 ATR0.092 TP1.35: SL15=SL20=SL25=相同score, MHD7=MHD10=MHD15=相同score. 在quad sell + TP1.35退出下, SL和MHD从不触发
+153. **closeUp1d/volume spike等4th buy条件有害(R275-R276)** — closeUp1d使score降15点(0.860→0.845). Volume spike使wr降至56.1%. 额外买入条件增加噪声, RSI+ATR 2条件已是最优
+154. **0.8628 StdA+ = 当前体系极限(R280确认)** — TP1.37在所有ATR(0.0912-0.092)下wr=59.73-59.99%, 永远过不了60%. RSI_7/RSI_10需DeepSeek(batch-clone无法使用source外指标), 是唯一可能的突破方向
+155. **⚠️ CORRECTED(R292): Sells are CRITICAL, not decorative!** — 之前"sells decorative"结论是sell_conditions=[]bug的artifact。Python `or`将`[]`视为falsy, 所以nosell实际使用了source的quad sell。修复bug后真实对比: **nosell=0.8160(1828tr, wr80.3%) vs quad sell=0.8612(5866tr, wr60.2%)**。差距452分! Sell conditions是trade throughput enabler: 3.2x more trades, 更高总收益
+156. **3sell_noLt extends TP ceiling to 1.43(R281-R284)** — 移除lt3dLow(亏损交易退出): TP1.37(0.8621/wr60.4%)→TP1.40(0.8619/60.1%)→TP1.43(0.8626/60.0%). 但score不超0.8628, 是一种不同的策略profile(更宽TP)
+157. **3sell_noGt结构性无法达到wr>60%(R282)** — 移除gt3dH(盈利交易退出)保留lt3dLow(亏损退出): wr永远卡在58.9-59.1%. 已穷尽ATR/RSI/fall变体. lt3dLow本质上产生亏损交易拖低wr
+158. **0.8656=最高raw score(R282)** — ATR0.0905 3sell_noGt: 0.8656但wr=58.9%. 比0.8628高0.0028但因wr<60%不是StdA+. 这证明score上限不在0.86, 而是wr>60%约束造成0.8628边界
+159. **RSI远优于MACD用于buy信号(R289)** — RSI48-66+ATR0.091=0.8628, MACD>0+RSI+ATR=0.8575(-53点), MACD>0+ATR=0.8378(-250点). MACD作为4th条件有害, 单独使用更差. RSI在选择买入时机上本质优于MACD
+160. **MACD变体全部不如RSI(R289)** — MACD>0=MACD_hist>0=MACD>signal: 都给0.837-0.839 at TP1.36. MACD rising 2d(0.842)略好但仍远低于RSI(0.8628). MACD的趋势跟踪不适合A股短线反转交易
+161. **纯价格行为买入信号无效(R288)** — ATR+lt2dLow(0.656), ATR+consfall2(0.697), ATR+fall1d(0.684). 纯价格行为无法识别好的买入时机. RSI提供的'超卖反弹'信号是不可替代的
+162. **RSI_7/RSI_10通过DeepSeek失败(R287)** — RSI_7: 7/8 invalid+1个0.624(wr=44.8%), RSI_10: 8/8全invalid. DeepSeek无法处理非标准RSI周期, batch-clone无法改变指标周期. RSI(14)是唯一可用周期
+163. **⚠️ CORRECTED(R292): 0.8628被降级为0.8612** — 之前3-source确认的0.8628实际包含了source的quad sell(因bug)。真实score: RSI48-66+ATR0.091+quad sell=0.8612(两个source确认:ES22166/ES19213结果完全一致)。0.8628→0.8612的16分差可能是market data更新
+164. **Source-dependency RESOLVED(R292)** — ES22166和ES19213作为source给完全相同结果(nosell=0.8160, quadsell=0.8612). 之前E4367的discrepancy不是source bug, 而是sell_conditions bug的表现
+165. **Sell优化空间巨大(R292)** — nosell(0.8160)和quad sell(0.8612)之间有452分差距。更好的sell组合可能突破0.87+。重点方向: sell threshold调优, 新sell类型(volume/RSI extreme/ATR trailing), sell数量优化
+166. **fall_pct alone ≈ quad sell(R292)** — fall_pct(-0.35)单卖出=0.8610, 接近quad sell(0.8612). gt/lt lookback条件几乎无效(adds <0.003). fall_pct是唯一真正有效的卖出trigger
+167. **Wider fall + higher TP = higher score(R293-R298)** — f55r4_TP155=0.8628→f60r4_TP165=0.8638→f65_cGTl25_r4d_TP170=0.8647. 更宽fall阈值+更高TP持续推进frontier, 但wr>60%是hard constraint
+168. **rise4d > rise3d > rise2d for sell(R297)** — 更长连涨要求=更少误卖=更高wr. rise4d是最优balance, rise5d/6d无额外收益
+169. **MACD>0 buy filter HURTS score(R301)** — MACD+RSI+ATR=0.8586 vs RSI+ATR=0.8638(-52点). MACD过滤掉了盈利性超卖反弹交易. RSI+ATR=唯一最优buy
+170. **RSI overbought sells无效(R302)** — RSI>65-80作为sell: score仅0.81, trades~1750. RSI在持仓期间极少达到高值, sell signal太少
+171. **close>low pct_diff = 新卖出范式(R303-R304)** — close>low 2.5%("日内反转卖出"): 添加到f65+r4d给出0.8647, 超越纯f60r4=0.8638. 日内从低点强力反弹=局部高点信号
+172. **high>close pct_diff = 最高raw score但wr太低(R304)** — f55+hGTc15+r4d=0.8683(历史最高raw score)但wr=58.0%. 上影线拒绝信号太激进
+173. **Buy-side已穷尽(R303)** — RSI范围(46-70)和ATR范围(0.088-0.095)全面扫描, RSI48-66+ATR0.091始终最优. 任何变化都降低score
+174. **MHD在sell条件下完全irrelevant(R293)** — MHD5=MHD7=MHD15=MHD20 完全一致. 高效sells使positions在MHD前退出
+175. **SL在sell条件下near-irrelevant(R296)** — SL15/20/30给相同score, 仅SL10微降. 好的sell条件使SL极少触发
+176. **2-sell < 3-sell(R306)** — f65_cGTl25 alone=0.8639 vs f65_cGTl25_r4d=0.8647. rise4d adds +0.0008 by enabling higher TP. 3 sells is the optimal count
+177. **Multi-day pct_change sells = moderate but not frontier(R300)** — drop2d_-1.0%=0.8548/wr64%, drop2d_-1.5%=0.8479/wr68%. 合理但远离frontier
+178. **fall_consecutive sells kill wr(R300)** — fall2d+fall_pct combos: 0.8670 raw但wr=57-58%. 太多激进sell triggers
+198. **ANY sell produces StdA+ with RSI+ATR buy base(R362-R382)** — Decline sells(falling_nd, fall_pct), value threshold sells(RSI>55, ATR<0.05), volume sells(vol_surge, vol_drop), lookback sells, contradictory combos(ATRfall2+ATRrise2) ALL achieve 80%+ StdA+ rate across 200 strategies. Buy base SO strong that sells are throughput regulators, not quality filters
+199. **ATRrise2+volF2 MHD5 TP2.0 = ALL-TIME StdA+ 0.8662(R348)** — Sell when ATR rising 2 consecutive days + volume falling 2 days. New record family. MHD5 optimal for indicator-based sells vs MHD10 for price-based
+200. **Contradictory OR sell combos valid(R354)** — ATRfall2+ATRrise2 = 0.8668 raw. Logically contradictory conditions in OR mode simply maximize trade throughput. ALL non-mutually-exclusive sell combos produce StdA+
+201. **volRise2d/RSIrise2d/ATRfall2d = ALL new valid sell types(R371)** — Every indicator rising/falling N days as sell condition produces StdA+. volRise2=0.8600, RSIrise2=0.8533, ATRfall2=0.8466. Indicator direction sells are a rich unexplored space
+202. **Value threshold sells valid but not frontier(R377-R379)** — RSI_gt55=0.8413, ATR_lt0.05=0.8466. Value-based sells work but score lower than consecutive/lookback sells. All produce StdA+ due to strong buy base
+203. **TRIPLE sells = 0.8704 NEW ALL-TIME raw score(R383)** — ATRrise2+volFall2+RSIfall2 TP2.5 MHD5. 3个indicator-direction sells in OR mode产生最多trade signals(4848 trades)=最高total return. 但wr=56.3%❌, 结构性无法达到wr>60%. More sells = higher score + lower wr
+204. **ATRrise2+volFall2 TP×MHD grid fully mapped(R383)** — 15 configs完整mapping: MHD3给最高score(TP2.0=0.8662), MHD7给最高wr(TP1.5=63.5%). TP2.2 MHD7=0.8654✅ extends TP frontier. 0.8662确认为StdA+ ceiling
+205. **3d lookback = ultra-safe variant(R383)** — ATRrise3d+volFall3d: 9/10 StdA+, wr up to 68.5%(ATRr3only). Longer consecutive requirement = fewer signals = higher wr, lower score. ATRr3+vF3 best=0.8588
+206. **pct_change sells = 100% StdA+ rate(R383)** — RSI/ATR pct_change as sell: ALL 10/10 StdA+! RSIpct5 MHD3=0.8473(wr67.6%), ATRpct20 MHD5=0.8300(wr72.3%=最高wr). Very rare signals = ultra-high wr but lower scores
+207. **NVI confirmed 已弃(R383)** — 5 DeepSeek experiments: 19/24 invalid, 0 StdA+, best=0.6972. NVI不适合A股短线策略
+208. **Score-wr fundamental tradeoff fully quantified(R383)** — More sell signals linearly trade score for wr: Triple(0.87/56%)→Dual(0.866/60%)→3d(0.86/65%)→pctChange(0.84/70%). 这是A股T+1市场的结构性约束
+179. **ATR>0.05 as sell = highest raw score EVER 0.8680(R307)** — ATR超过阈值就卖出: ATR>0.05=0.8680(wr56.8%❌), ATR>0.06=0.8668(wr57.5%❌), ATR>0.07=0.8663(wr58.2%❌). Raw score比任何组合都高, 但wr catastrophically low. ATR作为sell太频繁触发
+180. **ATR>0.10+ is a no-op sell(R308)** — 因为buy条件要求ATR<0.091, 持仓期间ATR几乎不可能飙到0.10+. ATR sell仅在0.05-0.09有效范围, 且全部fail wr
+181. **rally4d4pct = NEW ALL-TIME BEST StdA+ 0.8651(R309)** — fall(-0.65)+rally_nd(4,4.0)+rise_nd(4) TP1.70 = ES23218. 4日涨幅>4%作为卖出信号, 捕获multi-day momentum breakout. +0.0003 over previous best(0.8648). rally4d > cGTl25 for sell
+182. **rally5d5pct = 0.8653 but wr=59.9%❌(R309)** — 5日涨5%score更高但wr差0.1%不通过StdA+. rally4d4pct是最优balance(wr=60.2%). rally3d3pct(0.8649❌wr59.9%)也不通过
+183. **close>open (bullish candle) sell = 0.8643✅(R307)** — 阳线卖出新范式, 有效但不如rally4d. open>close(阴线)=0.8651❌wr59.5%
+184. **Volume spike sell = no-op(R308)** — volume>volume_ma_5在持仓期间几乎always true, 无过滤效果
+185. **KDJ buys = ZERO StdA+, 200pts inferior(R309)** — KDJ(9,3,3)+RSI(7)+ATR源策略: best=0.8445(wr59.0%). KDJ oversold(K<15-40)=catastrophic(0.46-0.76). RSI在买入timing上本质优于KDJ
+186. **BOLL buy filter = terrible(R311)** — BOLL_middle buy: 0.79-0.80 range(wr51-53%). ROC>0 buy: 0.8511(wr59.4%). 非RSI买入信号全部劣于RSI
+187. **PSAR sells hurt wr(R311)** — close<PSAR添加500-700 extra trades但drop wr to 57-59%. PSAR-only sell: 0.8396(wr67.5%, high wr but low score). PSAR不适合作为sell trigger
+188. **Price-action buys = ZERO StdA+(R312)** — consecutive falling: 0.53-0.69(catastrophic), dip buys(lt3dL): 0.6152, near-low: 0.8572(wr58.8%), breakout(gt5dH): 0.8054. 纯价格行为无法替代RSI
+189. **No-ATR buys = ALL INVALID(R313)** — 6 configs without ATR filter全部signal explosion. ATR is ESSENTIAL for preventing signal explosion, not just helpful
+190. **0.8651 = confirmed ceiling from EVERY angle(R307-R313)** — 7 rounds, 187 strategies, tested every available sell type(ATR/PSAR/BOLL/volume/lookback/rally/candle/KDJ) and every buy alternative(KDJ/BOLL/PSAR/ROC/price-action/no-ATR). ALL equal or inferior. RSI48-66+ATR0.091+rally4d4pct=the optimum
+191. **f40+rally4d = 0.8684 NEW highest raw score(R314)** — fall(-0.40)+rally4d(4.0)+rise4d: surpasses ATR sell's 0.8680. But wr=57.9%❌. f40 at ANY TP (1.40-1.65) never reaches wr>60%
+192. **Fall threshold -0.55 to -0.60 = structural wr>60% boundary(R315)** — Exhaustive sweep: f40 max wr=59.6%, f45 max wr=59.6%, f50 max wr=59.9%. Only f55+ can achieve wr>60%. This is a structural market property, not a parameter tuning issue
+193. **oGTc sell paradigm works but doesn't beat baseline(R314-R315)** — open>close pct_diff (bearish candle body). oGTc(0.3)+f50=0.8608✅, oGTc(0.5)+f50=0.8595✅. Novel sell type but doesn't improve over rally4d
+194. **ATR decrease sell(ATR<0.06) = novel valid paradigm(R314)** — "volatility compression" sell at 0.8436✅(wr65.7%). When ATR drops during hold, trend may be ending. Novel concept but far from frontier
+195. **ATR range buy(ATR>0.03-0.05) doesn't help(R315)** — Adding ATR lower bound to buy conditions doesn't improve score. ATR<0.091 alone is sufficient
+196. **f55-f60 structurally fail wr>60%(R316)** — Exhaustive sweep f55×TP1.55-1.72, f57×TP1.68-1.72, f58×TP1.68-1.72, f60×TP1.68-1.72. ALL wr=59.1-59.9%. Only f62 TP168=0.8647(wr60.1%✅) and f55 TP155=0.8638(wr60.2%✅) barely pass. f65 TP170=0.8651(wr60.2%) is the mathematical optimum
+197. **Fall-TP gradient precisely mapped(R314-R316)** — f40(max_wr=59.6%), f45(59.6%), f50(59.9%), f55(60.2%@TP155), f57(59.7%), f60(59.8%), f62(60.1%@TP168), **f65(60.2%@TP170=0.8651 CEILING)**. The boundary is between f60 and f62. Each -0.05% wider fall = ~0.1-0.2% higher wr but -0.002 lower score
+
+209. **非Portfolio模式 score膨胀~5%(R527)** — S16130(0.8662 StdA+ all-time)在portfolio模式(max10pos, 30%cap)下仅0.8209(wr=58.7%, 非StdA+). 非portfolio模式允许无限持仓+100%仓位, 膨胀score. 所有之前的0.86+策略都是非portfolio模式下的结果
+210. **RSI(14) lb50 > RSI(18) lb44 in portfolio mode(R527)** — 中性区RSI(48-66)>超卖区RSI(44-80). RSI14 lb50 ub66 ATR<0.091 aR2vF2 TP1.5 MHD3 = **0.8197 portfolio-mode champion**(wr=61.0%, dd=9.1%). RSI14有更快响应, lb50过滤噪声
+211. **低ATR+低TP = 超低风险策略(R527)** — ATR0.06-0.07 + TP1.0-1.2: DD=8.8-9.7%, wr=60.9-65.7%. 通过限制波动股+快速止盈实现极低回撤. 代价是总交易数和收益较低
+212. **4th buy条件一律有害(R527)** — KDJ/MACD/PSAR作为第4买入条件均降低score. RSI+ATR 2条件已是portfolio模式下的最优买入
+213. **BOLL_pband是正确field名(非BOLL_pctb)** — resolve_column_name映射: BOLL_pband_20_2, 范围(0,1). 但BOLL%B作为买入信号wr仅53-55%, 不competitive
+214. **aR2vF2是最优双sell(R527)** — aR2only=0.7923, vF2only=0.7990, aR2vF2=0.8197, noSell=0.7600. 双sell显著优于单sell, 两者协同效果大于各自之和
+215. **lb51是score landscape的局部最小值(R527)** — RSI lb sweep: lb49=0.8189, lb50=0.8197(peak), **lb51=0.7971(valley!)**, lb52=0.8053. lb51比相邻值低220点, 原因不明
+216. **ATR0.0912是portfolio最优阈值(R528)** — 4位小数精扫: ATR0.09(0.8268/wr59.96%❌)→ATR0.0912(**0.8331**/wr60.41%✅)→ATR0.092(0.8310/✅)→ATR0.095(0.8148)→ATR0.10(0.8141). ATR0.0912是sharp peak, 两侧快速衰减
+217. **TP1.63=portfolio StdA+ ceiling(R528)** — TP1.63(0.8331/wr60.4%)✅, TP1.68(0.8322/wr60.0%)✅, TP1.70(fails wr59.9%). TP1.63-1.68是viable range, TP>1.70结构性无法wr>60%
+218. **KDJ/MACD/BOLL/STOCHRSI/CCI买入在portfolio模式ALL FAIL(R528)** — KDJ(0/39 StdA+, best 0.6866), MACD(0/10, best 0.7705), BOLL(0/6, best 0.8250/wr59.4%), STOCHRSI(0/28, ALL<50 trades), CCI(0/3, best 0.7693). RSI是portfolio模式下唯一viable买入指标
+219. **RSI14是最优RSI周期(R528)** — RSI7(0/5 StdA+, wr consistently 59.5-59.8%), RSI10(3 StdA+, best 0.8260), RSI21(1 StdA+, best 0.8023). RSI14(0.8331) > RSI10(0.8260) > RSI21(0.8023) > RSI7(0.8262/fails wr)
+220. **ATR周期对sell无影响(R528)** — sell ATR{7,14,21,28}全给近似score(0.8239-0.8288). ATR14 buy + ATR14 sell remains optimal, 但cross-period combos全部StdA+
+221. **Ultra-low TP(0.3-1.2)可达wr>80%(R528)** — noSell TP0.3 MHD3=wr**80.5%**(score 0.7267), aR2vF2 TP0.3 MHD2=wr73.0%(0.7795). TP0.8-1.2+aR2vF2有9个StdA+(wr61-63%, score0.80-0.81). TP-wr tradeoff: TP↓→wr↑ but score↓
+222. **max_position_pct完全irrelevant(R528)** — pos10: pct15=pct20=pct30=pct50=0.8288(identical). max_pct only matters if < 100/max_positions
+223. **max_positions=10是最优(R528)** — pos3(0.7306/dd17.5%), pos5(0.7911), pos8(0.8197), **pos10(0.8288)**, pos15(0.8202/wr59.8%), pos20(0.7989). 倒U型: pos<10太集中, pos>10过度分散降wr
+224. **Slippage极度敏感(R528)** — 0%slip(0.8382), 0.05%(0.8419), **0.1%(0.8288)**, 0.15%(0.8000❌), 0.2%(0.7569), 0.3%(0.6696). 0.15%即跌破StdA+! 实盘执行质量至关重要
+225. **Initial capital完全irrelevant(R528)** — 50k/100k/200k/500k/1M all produce 0.8288. Portfolio engine normalizes by percentage
+226. **pct_change NOT bugged, portfolio saturation(R528P)** — 代码正确! 小阈值(0.01-0.5%)结果相同是因为max10pos下5000个→4800个信号不改变选中的10只股. 需>3%阈值才能区分. pctChg>3%=sc0.8089但wr58.5%
+227. **4th buy conditions一律有害(R528 portfolio确认)** — lookback_min/max, consecutive rising, pct_change, BOLL_pband, KAMA, CCI, ULCER, KELTNER, close>EMA/MA all either reduce score or produce 0 trades
+232. **🆕 ATRcalm7d是新StdA+方向(R1108-R1115)** — ATR14的7日pct_change<3%(ATR不增幅超3%)作为买入条件，在Core5+ATRcalm7d下，93%策略达StdA+(14/15)。ATRcalm = "压缩弹簧"：低波动期买入，ATR平静意味着即将爆发。关键: wr从55%→61-71%，大幅提升。
+233. **🆕 lt2dLow sell + ATRcalm7d = 2404% return (R1114)** — Core6(RSI47-67+ATR0.12+AbvMin13+BelMax10+ATRcalm7d) + lt2dLow卖出 + MHD3 + TP2.5 + SL20 = score=0.8575，ret=**2404%**。lt2dLow卖出在ATRcalm期买入后捕捉实际下破2日低点的下跌，TP2.5捕捉完整反弹。
+234. **🆕 TP2.5+MHD3 for lt2dLow sell formula (R1114 vs R1117)** — 比较: TP2.5 MHD3 = 2404%, TP0.8 MHD5 = 1843%, TP4.0 MHD10 = 800%。高TP+短MHD捕捉完整反弹，低TP只取小利。ATRcalm方向的最优出口: TP2.5-3.0，MHD3-5。
+235. **🆕 RSI47-67 for ATRcalm formula (R1113 vs R1118)** — RSI47-67(2404%) > RSI50-70(1386%) > RSI42-62(828%) > RSI52-72(793%)。RSI47-67中区(偏低不超买)是ATRcalm的最优买入范围。
+236. **🆕 SL不影响ATRcalm策略(R1119)** — SL10/15/20/25/30均达StdA+(36/36)，wr=62%。ATRcalm期间止损几乎不触发，SL设置不关键。wr稍高的SL=30(wr=62.1%)比SL=20(wr~52%)高，说明ATRcalm买入时宽SL允许价格短期波动。
+228. **🆕 DIP-BUY = 新StdA+策略家族(R528P-R)** — "买恐慌"而非"买动量". RSI50-70+ATR<0.09+close日跌>2.5-3%+aR2vF2卖出. 特点: **dd仅4.0-5.8%**(全StdA+最低!), wr=60-64%, sc=0.80-0.83. 最佳: **dip-3.0% ATR0.09 TP2.0 MHD5 = sc0.8347 wr61.8% dd4.2%**
+229. **DIP-BUY最优参数(R528R)**: ATR0.09(非0.0912), RSI50-70(非50-66), dip-2.5~-3.0%(sweet spot). TP可达2.0(-3%时wr61.8%), TP2.0~3.0 at -2.5%需wr<60%. vF2_only也能StdA+(sc0.8154 wr60.7%)
+230. **Volume pctChg>1%+RSI52-66 = StdA+(R528P)** — TP1.3-1.5区间全部StdA+. 最佳: RSI52-66 vol>1.0 TP1.5 = sc0.8200 wr60.3% dd7.6%. Volume momentum作为4th buy是唯一有效的正向过滤
+231. **DIP-BUY + volume组合过于restrictive(R528Q)** — dip-2%+vol>0.5 = tr1077, sc0.6992. 两个pct_change买入过滤叠加使交易数骤降, 不如单独使用
 
 ---
 
 ## 探索状态
 
-| 优先级 | 方向 | 子主题 | 状态 | 实验数 | 盈利率 | 最佳收益 | 备注 |
-|--------|------|--------|------|--------|--------|----------|------|
-| P1 | 震荡市 | KDJ短周期+震荡专属参数 | 已探索 | 1 | 16.7% | +2.5% | KDJ(5,2,2)+窄超买超卖区间, 仅1/6盈利, 震荡市KDJ利润极薄 |
-| P1 | 震荡市 | VWAP均值回归→RSI+CMF | 已探索 | 2 | 0% | -77.2% | 原版8/8 invalid; 重试RSI+CMF替代, 6/8 invalid, 2有效均巨亏 |
-| P1 | 震荡市 | BOLL收窄+KDJ | 已探索 | 2 | 0% | -3.7% | 原版8/8 invalid; 简化版4/8 invalid, 4有效均亏损, 最小亏损-3.7% |
-| P1 | 震荡市 | CMF资金流反转 | 已弃 | 2 | 0% | — | CMF在A股几乎永远为负, 独立使用不可行; 3次重试全部invalid或零交易 |
-| P2 | 指标组合 | VWAP+KDJ | 已弃 | — | — | — | VWAP需field-to-field比较, 规则引擎不支持 |
-| P2 | 指标组合 | BOLL_lower+MACD | 僵尸 | 1 | — | — | ID96信号爆炸, 回测卡死数天, 视为失败 |
-| P2 | 指标组合 | CMF+KDJ金叉 | 僵尸 | 1 | — | — | ID95信号爆炸+CMF不可用, 回测卡死, 视为失败 |
-| P2 | 指标组合 | KDJ+RSI双确认 | 已探索 | 1 | 0% | -1.0% | ID98: 5有效3invalid, 全部亏损, 震荡市杀伤大 |
-| P2 | 指标组合 | KDJ超卖+EMA趋势 | 已探索 | 1 | 0% | -0.1% | ID99: 5有效3invalid, 全部亏损, 激进版巨亏-88% |
-| P2 | 指标组合 | MACD+RSI超卖底部 | 已探索 | 1 | 6.7% | +9.0% | ID100: 5有效3invalid, 1盈利(+9%, dd 48.9%, score 0.48) |
-| P2 | 指标组合 | EMA+ATR止损 | 已弃 | 1 | 0% | -50.3% | ID101: 8有效0invalid, 全部巨亏(-50%~-98%), 震荡市尤其灾难 |
-| P2 | 指标组合 | KDJ+MACD短周期精调 | 已探索 | 1 | 12.5% | +17.5% | ID102: 8有效, 1盈利(score 0.57), 不如默认参数 |
-| P2 | 单指标深挖 | RSI极端超卖反弹 | 已探索 | 2 | 66.7% | +6.1% | ID103(75%invalid)+ID104(简化版4/6盈利), 信号极少(4-17笔), 收益微薄 |
-| P2 | 新方向 | KDJ金叉+放量确认 | 已弃 | 1 | 0% | -18.9% | ID105: 8有效, 全部亏损。放量在A股超卖区不是有效确认信号 |
-| P2 | 新方向 | MACD柱线翻正趋势 | 已弃 | 1 | 0% | -37.1% | ID106: 8有效, 全部巨亏(-37%~-99.8%), 信号过频繁, 震荡市灾难 |
-| P2 | 参数优化 | KDJ金叉止盈止损优化 | 已弃 | 1 | 0% | -35.3% | ID107: 8有效, 全部亏损。DeepSeek无法精确复现原始策略条件 |
-| P2 | 指标组合 | BOLL_lower+KDJ field比较 | 已弃 | 3 | 0% | — | ID108-110: field比较功能正常, 但close<BOLL_lower+KDJ超卖极少触发, 全部零交易invalid |
-| P2 | 趋势过滤 | KDJ+ADX趋势强度过滤 | 已弃 | 1 | 0% | -17.0% | ID111: 6有效2invalid, 0盈利。ADX>25无法过滤震荡, ranging亏-357~-743 |
-| P2 | 趋势过滤 | KDJ金叉+MA20方向确认 | 已探索 | 1 | 14.3% | +2.7% | ID112: 7有效1invalid, 1盈利(保守版A +2.7%, score 0.58, dd 6%). 收益太低 |
-| P2 | 指标组合 | KDJ+RSI双超卖底部 | 已探索 | 1 | 12.5% | +0.2% | ID113: 8有效, 1盈利(中性版C +0.2%, 18笔). 双超卖信号太少, 无统计意义 |
-| P2 | 新指标 | MASS梅斯线反转 | 已探索 | 1 | 0% | -3.5% | ID136: MASS>27反转凸起, 8策略0盈利 |
-| P2 | 新指标 | PVO+ADI量价组合 | 已探索 | 1 | 0% | -8.9% | ID137: PVO/ADI全亏 |
-| P2 | 新指标 | Aroon+Vortex双趋势 | 已弃 | 2 | 0% | — | ID138: 信号爆炸; ID144: 0盈利; Vortex DeepSeek生成失败 |
-| P2 | 新指标 | TSI+PSAR动量 | 已探索 | 1 | 0% | -12.5% | ID139: TSI>0.02几乎always true, 信号爆炸 |
-| P2 | 新指标 | Donchian通道突破 | 已探索 | 2 | 0% | -7.8% | ID140+143: 海龟交易法全亏, 趋势追踪在A股无效 |
-| P2 | 新指标 | **BOLL%B+StochRSI** | 已探索 | 1 | **12.5%** | **+37.9%** | ID141: S1059达Standard A! 牛+275熊+181 |
-| P2 | 新指标 | PPO+TSI动量组合 | 已弃 | 2 | 0% | -84.0% | ID124全invalid; ID142 4done全亏, 激进版-84% |
-| P2 | 新指标 | Ichimoku云层突破 | 已探索 | 1 | 0% | — | ID145: 信号爆炸风险高, close>ICHIMOKU_a太宽松 |
-| P2 | 新指标 | **Stochastic(STOCH)** | 已探索 | 2 | **33%** | **+28.4%** | ID128: 2/4盈利(50%!); ID146: 1/6盈利(16%). STOCH类似KDJ |
-| P2 | 新指标 | STC沙夫趋势周期 | 已探索 | 1 | 14% | +22.7% | ID147: 1/7盈利, 中性版B +22.7%, dd 39.4%高 |
-| P2 | 新指标 | **UltimateOscillator** | 已探索 | 2 | **25%** | **+28.0%** | ID129: 3/6盈利(50%!), 中性版C score 0.72 **Standard A**; ID148: 0盈利 |
-| P2 | 新指标 | **Keltner+ULCER低波动** | 已探索 | 1 | **37.5%** | **+19.5%** | ID149: 3/8盈利! ULCER<5+KDJ_K<25效果好 |
-| P2 | 新指标 | KST确知指标 | 已弃 | 2 | 0% | — | ID131+150全部invalid, KST在A股完全无效 |
-| P2 | 新指标 | **PSAR+KDJ组合** | 已探索 | 1 | **37.5%** | **+14.3%** | ID151: 3/8盈利, S1141达Standard A, 震荡市+95 |
-| P2 | 新指标 | AO+KDJ组合 | 已弃 | 1 | 0% | -6.5% | ID152: 6done全亏2invalid |
-| P2 | 新指标 | FI+EMV量价 | 已弃 | 2 | 0% | -30.2% | ID132: 1done全亏7invalid; ID153: 5done全亏3invalid |
-| P2 | 新指标 | WMA+AO组合 | 已弃 | 1 | 0% | — | ID130: 全部invalid |
-| P2 | 新指标 | Vortex+KDJ | 已弃 | 2 | — | — | ID154+155: DeepSeek生成失败, Vortex指标不可用 |
-| P3 | 策略组合 | 信号投票/加权 | **已实现+验证** | 3 | 100%(2/2有效) | +1.0% | **已实现**: 投票机制+回测+信号+AI Lab实验。5成员多元化组合仅6笔交易, 极度保守(dd 0.2%) |
-| P4 | 规则引擎 | 条件可达性预检 | **已完成** | — | — | — | check_reachability()检测矛盾条件+超出范围值, 已集成到AI Lab回测前 |
-| P4 | 规则引擎 | N日回溯条件 | **已完成** | — | — | — | lookback_min/max/value + consecutive, 支持N日新高/新低/连涨连跌 |
-| P4 | 规则引擎 | 百分比偏差条件 | **已完成** | — | — | — | pct_diff + pct_change, 支持VWAP偏离/N日涨跌幅 |
-| P2 | 多指标三重过滤 | **PSAR+ULCER+KDJ** | **已探索** | 3 | **71%/50%/75%** | **+27.4%** | **ID161: 5/7盈利!** ID162精调4/8, ID163变体3/4. S1235达Standard A(+14.5%,dd3.7%). 最强策略方向 |
-| P2 | 双震荡指标 | ULTOSC+KDJ | 已弃 | 1 | 0% | -34.5% | ID159: 0/5盈利, 两个震荡指标同类叠加效果差 |
-| P2 | 低波动+超卖 | ULCER+Stochastic | 已弃 | 1 | 0% | -15.8% | ID160: 0/2有效(6/8 invalid信号爆炸), ULCER+STOCH不如ULCER+KDJ |
-| P2 | 三强指标 | KDJ+ULTOSC+PSAR | 已弃 | 1 | 0% | -1.2% | ID164: 0/2有效(5/8 invalid), 三震荡指标过于严格 |
-| P2 | 双超卖确认 | STOCH+KDJ | 已弃 | 1 | 0% | -49.7% | ID165: 1/8有效(7/8信号爆炸), 同类指标叠加无效 |
-| P2 | **PSAR+MACD+KDJ** | PSAR趋势动量 | **已探索** | 1 | **43%** | **+70.8%** | **ID166: 3/7盈利, S1277达Standard A(score 0.77, +70.8%, dd12.6%), 全阶段盈利!** |
-| P2 | 短周期组合 | KDJ(6,3,3)+ULTOSC | 已探索 | 1 | 40% | +12.4% | ID167: 2/5盈利(3/8 invalid), S1286不达StdA但低回撤 |
-| P2 | PSAR三维 | PSAR+RSI+KDJ | **已探索** | 1 | **57%** | **+21.0%** | **ID168: 4/7盈利, S1293达StdA(score 0.66, +21.0%, dd18.9%)** |
-| P2 | PSAR三维 | PSAR+CCI+KDJ | 已弃 | 1 | 0% | -10.5% | ID169: 1/8有效(7/8 invalid), CCI条件DeepSeek生成失败 |
-| P2 | PSAR精调 | PSAR+MACD参数精调 | 已弃 | 1 | 0% | — | ID170: 0/8有效(7/8 invalid+1卡死), DeepSeek无法精确调参 |
-| P2 | PSAR三维 | PSAR+EMA+KDJ | 已弃 | 1 | 0% | — | ID171: 0/8有效(8/8 invalid), field比较指令DeepSeek完全不执行 |
-| P2 | PSAR精调 | PSAR+RSI精调版 | 已弃 | 1 | 0% | — | ID172: 0/8有效(8/8 invalid), 同上 |
-| P2 | **PSAR三维** | **PSAR+BOLL%B+KDJ** | **已探索+网格** | 9 | **100%** | **+39.6%** | **ID173基础+8变体网格搜索, 全部8/8达StdA! 最佳SL8_TP10(0.740, +39.6%, dd8.0%). TP10显著优于TP15/TP20. 全阶段盈利** |
-| P2 | PSAR三维 | PSAR+STOCH+KDJ | 已弃 | 1 | 0% | — | ID174: 0/8有效(8/8 invalid), PSAR+STOCH条件DeepSeek无法生成 |
-| P2 | PSAR三维 | PSAR+MFI+KDJ | 已弃 | 1 | 0% | — | ID175: 0/8有效(8/8 invalid), PSAR+MFI条件同样全invalid |
-| P2 | 三震荡共振 | KDJ+MACD+ULTOSC | 已探索 | 1 | 33% | +33.0% | ID176: 3/8有效(5invalid), S1357 +33.0% score 0.64(差0.01达StdA), ranging+18 |
-| P2 | 克隆调参 | **S1277网格搜索** | **已完成** | 11 | **73%** | **+82.8%** | **ID177-184,191-193: 8/11达StdA, SL10_TP15(0.779)超越原始。克隆调参验证PSAR+MACD+KDJ极度鲁棒** |
-| P2 | 克隆调参 | S1357网格搜索 | 已完成 | 8 | 25% | +41.2% | ID185-190,194-195: 2/8有效(6超时), S1373(SL8_TP20) score 0.666达StdA |
-| P2 | 克隆调参 | **S979 UltimateOsc网格搜索** | **已完成** | 6 | **100%** | **+26.5%** | **6/6全部StdA! TP10显著优于TP15/18, dd仅6.6%. S1414/S1416(0.723)超越基础(0.718)** |
-| P2 | 克隆调参 | S211 KDJ+MACD双金叉网格搜索 | 已完成 | 6 | 17% | +25.4% | 仅S1422(SL10_TP15, 0.651)接近StdA. 原始参数(SL9_TP22, 0.678)已是最优 |
-| P2 | 克隆调参 | S1059 BOLL%B+StochRSI网格搜索 | 已完成 | 6 | 0% | +27.3% | 全部不如原始(0.656). S1425(SL8_TP15, 0.621)最佳但不达StdA |
-| P2 | 克隆调参 | S63 全指标综合_保守版B网格搜索 | 已完成 | 2 | 100% | +26.8% | 2/2达StdA. SL8_TP10(0.747)比基础(0.753)微降但dd 3.4%极低 |
-| P2 | 克隆调参 | S115 KDJ金叉_中性版A网格搜索 | 已完成 | 2 | 0% | +2.4% | KDJ金叉不适合缩短止盈, SL8_TP15=-1.0%, SL10_TP15=+2.4%. 原参数最优 |
-| P2 | 克隆调参 | S1235 PSAR三重确认网格搜索 | 已完成 | 2 | 100% | +12.2% | 2/2达StdA. SL8_TP10(0.674/+12.2%/dd3.7%)=同基础dd, 收益微降 |
-| P2 | 克隆调参 | S1141 PSAR+ADX+CCI+BOLL网格搜索 | 已完成 | 2 | 100% | +16.7% | 2/2达StdA! SL8_TP12(0.674/+16.7%/dd6.2%)**超越基础**(0.663/+14.3%/dd6.1%) |
-| P2 | 克隆调参 | S1293 PSAR+RSI+KDJ网格搜索 | 已完成 | 2 | 100% | +26.6% | 2/2达StdA! SL8_TP15(0.674/+26.6%/dd19.7%)**大幅超越基础**(0.655/+21.0%/dd18.9%) |
-| P2 | DeepSeek | KDJ+连续涨跌+新低反弹 | 已探索 | 1 | 0% | -45.7% | 3/4 invalid, 仅激进版完成(-45.7%). P4新类型条件DeepSeek仍不采用 |
-| P2 | DeepSeek | MACD+RSI涨跌幅过滤 | 已弃 | 1 | — | — | 4/4 invalid(100%) |
-| P2 | DeepSeek | PSAR+MACD简化版(P21/P22后) | 已弃 | 1 | — | — | 8/8 invalid(100%), P21/P22修复未能改善PSAR+MACD生成 |
-| P2 | DeepSeek | KDJ+MACD紧出场策略 | 已探索 | 1 | 0% | -22.7% | 4/8完成全亏(-22%~-34%), 4/8 invalid. 紧止盈止损组合不优 |
-| P2 | DeepSeek | STOCH+KDJ精调 | 已弃 | 1 | — | — | 4/4 invalid(100%), DeepSeek无法生成STOCH有效条件 |
-| P2 | DeepSeek | ULCER+KDJ止盈止损优化 | 已弃 | 1 | — | — | 8/8 invalid(100%), DeepSeek无法生成ULCER有效条件 |
-| P2 | 精细搜索 | PSAR+BOLL+KDJ TP9/11精扫 | **已完成** | 4 | **100%** | **+42.0%** | **TP9新最优! SL8_TP9(0.753/+42.0%/dd6.0%)超越TP10(0.740/dd8.0%), Pareto改进** |
-| P2 | 精细搜索 | UltimateOsc TP9/11精扫 | **已完成** | 4 | **100%** | **+29.1%** | **TP9新最优! 0.731/+29.1%/dd6.6%, SL对dd无影响** |
-| P2 | 新维度 | S1481 Max Hold Days测试 | **已完成** | 6 | **100%** | **+99.8%** | MHD30已最优(0.802). MHD15损10%, MHD35+收敛. max_hold_days非关键参数 |
-| P2 | 精细搜索 | **全指标综合_中性版C精扫** | **已完成** | 8 | **100%** | **+90.5%** | **🏆 S1511 SL7_TP14_MHD15=新全局最高评分(0.825)! SL7>SL5, TP14再次最优** |
-| P2 | 精细搜索 | PSAR+BOLL+KDJ TP8测试 | **已完成** | 2 | **100%** | **+42.3%** | TP8≈TP9(0.751 vs 0.753), TP9仍是该族最优 |
-| P2 | TP14移植 | 三指标共振_TP14+TP20+SL7 | **已完成** | 3 | **100%** | **+34.9%** | 3/3 StdA! TP14(0.710)+TP20(0.710)并列, SL7(0.704)略低. 全部超越原始(0.675) |
-| P2 | TP14移植 | KDJ超短线_TP14+SL7 | **已完成** | 3 | **100%** | **+30.1%** | 3/3 StdA! SL8_TP14(0.713)最佳, 超越原始(0.687) |
-| P2 | TP14移植 | KDJ极致保守_SL8+TP14 | **已完成** | 2 | **100%** | **+25.2%** | 2/2 StdA! SL8_TP14(0.678)超越原始(0.658), dd从15.2%降至12.7% |
-| P2 | TP14移植 | ULTOSC共振_TP14/15 | **已完成** | 2 | **0% StdA** | +31.4% | 0/2 StdA. TP14/15均比原始TP20差. ULTOSC需要更宽TP |
-| P2 | TP14移植 | PSAR+RSI+KDJ_TP14 | **已完成** | 2 | **100%** | **+24.3%** | 2/2 StdA! SL7_TP14(0.664)微超原始grid best(0.674@TP15但SL7更低) |
-| P2 | TP14移植 | **MACD+RSI_SL7+TP14** | **已完成** | 2 | **100%** | **+51.1%** | **2/2 StdA! 🌟 SL7_TP14(0.732)大幅超越原始(0.672), 收益翻倍!** |
-| P2 | MHD精扫 | PSAR+BOLL+KDJ MHD15/20/25 | **已完成** | 3 | **100%** | +42.0% | MHD20=MHD28, MHD无影响. 3/3 StdA |
-| P2 | MHD精扫 | UltimateOsc MHD15/20 | **已完成** | 2 | **100%** | +29.9% | MHD15≈MHD25, MHD无影响. 2/2 StdA |
-| P2 | MHD精扫 | **MACD+RSI MHD15/20/30** | **已完成** | 3 | **100%** | **+59.8%** | **MHD15=新最佳(0.738/+59.8%)! MHD30(0.739)也优于MHD25. 3/3 StdA** |
-| P2 | SL7移植 | PSAR+BOLL+KDJ/UltimateOsc | **已完成** | 2 | 50% | — | SL7不如SL8(BOLL 0.746<0.753, ULTOSC 0.727<0.731) |
-| P2 | TP9移植 | 全指標综合_保守版B | **已完成** | 2 | 50% | +26.4% | SL8_TP9(0.744/dd**3.2%**)=新dd纪录! SL7_TP9 invalid |
-| P2 | MHD精扫 | 全指標综合_保守版B MHD15/20 | **已完成** | 2 | **100%** | +26.8% | MHD15=MHD30, MHD完全无影响 |
-| P4 | 规则引擎 | DeepSeek新类型采纳 | **已修复** | 2 | 0% | — | 添加few-shot示例+关键词触发(P21) + field比较自动修正(P22) |
-| P2 | R22精扫 | MACD+RSI全参数 | **已完成** | 12 | **100%** | **+62.2%** | **12/12 StdA. SL8_TP15_MHD15(0.736)新最佳. MHD12最高收益(+62.2%)** |
-| P2 | R22精扫 | 全指标综合边界 | **已完成** | 8 | **100%** | **+83.7%** | **8/8 StdA. SL8_TP14(0.816)接近最佳. MHD12最高收益(+83.7%)** |
-| P2 | R22精扫 | PSAR+MACD+KDJ扩展 | **已完成** | 10 | **100%** | **+95.3%** | **10/10 StdA. SL12(0.797)≈SL10. MHD20(0.798)接近MHD30** |
-| P2 | R22精扫 | PSAR+BOLL+KDJ细化 | **已完成** | 8 | **100%** | **+41.1%** | **8/8 StdA. SL9/10_TP9(0.747-0.748)≈SL8. TP7~TP11全达StdA** |
-| P2 | R22精扫 | **UltimateOsc TP7发现** | **已完成** | 6 | **100%** | **+37.9%** | **6/6 StdA. TP7(0.758)新最高! TP越紧越好(单调递减)** |
-| P2 | R22移植 | TP14跨族验证 | **已完成** | 6 | 83%(5/6) | +31.7% | PSAR三重确认/BOLL%B+StochRSI/PSAR+ADX+CCI: TP14无改善 |
-| P2 | R23大规模 | UltimateOsc TP3-6 | **已完成** | 12 | **100%** | **+47.0%** | **12/12 StdA. TP3_SL8(0.79)新发现, 超低DD(3.3%)** |
-| P2 | R23大规模 | MACD+RSI MHD/TP扫 | **已完成** | 20 | **100%** | **+59.9%** | **20/20 StdA. 天花板0.73, TP14最优** |
-| P2 | R23大规模 | 全指标综合全参数 | **已完成** | 24 | **100%** | **+89.7%** | **24/24 StdA, 20个≥0.80. 超级鲁棒** |
-| P2 | R23大规模 | PSAR+MACD+KDJ全参数 | **已完成** | 20 | **100%** | **+114.6%** | **20/20 StdA. SL10_TP7(0.81)历史最高收益** |
-| P2 | R23大规模 | PSAR+BOLL+KDJ扩展 | **已完成** | 12 | **100%** | **+41.1%** | **12/12 StdA. 封顶0.75, MHD延长无效** |
-| P2 | R23移植 | **TP7跨族移植(突破!)** | **已完成** | 10 | **100%** | **+114.6%** | **PSAR_SL10_TP7_MHD30: 最高收益+最低DD+最高Sharpe** |
-| P2 | R24-FIX | PSAR TP3-8 × SL7-15 | **已完成** | 73 | **100%** | **+135.6%** | **🏆 TP4新收益纪录! TP5(0.808)>TP6>TP7>TP8>TP14** |
-| P2 | R24-FIX | 全指标综合 TP5-15 × SL5-11 | **已完成** | 80 | **100%** | **+89.4%** | **🏆 S2127 SL10_TP14_MHD18 score=0.820! 44/80≥0.80** |
-| P2 | R24-FIX | UltimateOsc TP2-6 × SL5-12 | **已完成** | 38 | **100%** | **+47.0%** | **TP3最优(0.784). TP2 dd=2.5%全局最低** |
-| P2 | R24-FIX | BOLL+KDJ TP5-8 × SL6-10 | **已完成** | 18 | **100%** | **+41.2%** | 稳健中等. TP6最优(0.746). 封顶0.749 |
-| P2 | R24-FIX | 全指标综合_保守版B TP5-7 × SL5-10 | **已完成** | ~16 | **100%** | **+29.1%** | dd=2.7%超低. 极保守型 |
-| P2 | R25 | PSAR TP2-4 MHD极限 | **已完成** | 44 | **100%** | **+151.7%** | 🏆 **S2225 TP3新全局收益纪录!** TP2探索dd=1.7% |
-| P2 | R25 | PSAR TP9-11补缺 | **已完成** | 15 | **100%** | +104.0% | 填补TP8-12中间空白 |
-| P2 | R25 | PSAR SL16-20极宽 | **已完成** | 10 | **100%** | +138.1% | SL16-20无额外收益, SL12已最优 |
-| P2 | R25 | 全指标综合 TP5/6/10/11/16/18补缺 | **已完成** | 30 | **100%** | +106.1% | 24/30≥0.80. TP14仍无可争议 |
-| P2 | R25 | 保守版B TP8-14 × SL7-10 | **已完成** | 24 | **100%** | +28.7% | TP8-14全区间, 封顶0.752 |
-| P2 | R25 | UltimateOsc TP1-2极端 | **已完成** | 12 | **100%** | +42.1% | TP1首测. dd=1.7%全局最低 |
-| P2 | R25 | PSAR+BOLL+KDJ TP3/4/10/12扩展 | **已完成** | 20 | **100%** | +44.6% | 封顶0.763 |
-| P2 | R25 | MACD+RSI TP8/11/15补缺 | **已完成** | 18 | **100%** | +58.8% | 天花板0.737确认 |
-| P2 | R25 | KDJ TP7-14 × SL7-10 | **已完成** | 15 | **100%** | +31.0% | 封顶0.730. KDJ单指标能力有限 |
-| P2 | R30 | PSAR+MACD+KDJ MHD1-3精扫 | **已完成** | 50 | **86%** | **+269.8%** | **🏆 S3807 score 0.830新纪录! MHD2是该族甜蜜点** |
-| P2 | R30 | 保守版B MHD1-3/TP1-3扩展 | **已完成** | 44 | **91%** | +104.8% | 超低DD 2.3%, score 0.805 |
-| P2 | R30 | Fix batch (多族补回测) | **已完成** | 156 | **15%** | +239.6% | 各族补缺, KDJ低位金叉惊喜+239.6% |
-| P2 | R31 | PSAR+MACD+KDJ MHD3-10精扫 | **已完成** | 70 | **100%** | +256.4% | 70/70 StdA+, MHD3-10持平MHD2(0.825 vs 0.830), 参数空间穷尽 |
-| P2 | R31 | 激进版A MHD2-5精扫 | **已完成** | 60 | **93%** | **+517.6%** | 56/60 StdA+, MHD2收益爆发(400-517%), DD恒定13.9% |
-| P2 | R31 | 三指标共振 MHD2-5精扫 | **已完成** | 48 | **100%** | +204.7% | 48/48 StdA+, 最高score 0.809 |
-| P2 | R31 | 全指标综合 MHD1/4精扫 | **已完成** | 60 | **100%** | +228.3% | 60/60 StdA+, 最高score 0.823, dd最低2.1% |
-| P2 | R31 | UltimateOsc MHD1/4/5精扫 | **已完成** | 27 | **100%** | +43.2% | 27/27 StdA+, dd最低1.2% |
-| P2 | R31(新) | **KAMA指标探索** | **已完成** | 15exp/120strat | **12.2%**(9/74) | **+92.3%** | KAMA终极震荡(0.791), KAMA中长线(0.778). 46/120 invalid. 有潜力待grid search |
-| P2 | R31(新) | MFI资金流指标 | **已弃** | 5exp/40strat | 0%(0/29) | +27.3% | best 0.662, 不达StdA. A股MFI无效 |
-| P2 | R31(新) | WR威廉指标 | **已弃** | 5exp/40strat | 0%(0/25) | +14.1% | best 0.676, 不达StdA. WR无效 |
-| P2 | R31(新) | ROC动量指标 | **已弃** | 5exp/16strat | 0%(0/4) | -39.5% | 全部负收益, 灾难性. 12/16 invalid |
-| P2 | R32 | **KAMA终极震荡 grid search** | **已完成** | 45strat | **100%** | **+360.3%** | 45/45 StdA+, **NEW RECORD score=0.831**(S4900 SL13/TP1/MHD1). SL11-15全达0.828+ |
-| P2 | R32 | **KAMA突破 grid search (6子族)** | **已完成** | 149strat | **100%** | +389.4% | 149/149 StdA+, 全部score≥0.70. C/D/E/F/G/激进版A 均100%达标 |
-| P2 | R32 | KAMA_CCI_RSI grid search | **已完成** | 40strat | **100%** | +42.9% | 40/40 StdA+, best score 0.741, dd极低2.8% |
-| P2 | R32 | KAMA布林带 grid search | **已完成** | 40strat | **88%** | +280.6% | 35/40 StdA+, 保守版B(20/20), 中性版A(15/20) |
-| P2 | R32 | KAMA中长线_激进版B grid | **已完成** | 20strat | **100%** | +168.3% | 20/20 StdA+, best score 0.823 |
-| P2 | R32 | KAMA中长线(保守/中性/激进A) | **低TP无效** | 80strat | 0% | +26.6% | 0/80 StdA+, 中长线策略不适合TP1-5. 需TP>10 |
-| P2 | R32(新) | NVI负成交量指标 | **浅探索** | 6exp/11strat | 9%(1/11) | +55.8% | 仅NVI机构追踪_中性版B达StdA+(0.719). 可做grid search |
-| P2 | R32(新) | VPT量价趋势 | **已弃** | 6exp/21strat | 0%(0/21) | +23.5% | best 0.570, dd34%. OBV改进版同样无效 |
-| P2 | R32(新) | STC+KDJ组合 | **已弃** | 3exp/10strat | 0%(0/10) | +59.5% | best 0.653, dd30%. STC与KDJ组合无增益 |
-| P2 | R32(新) | MFI+KDJ组合 | **浅探索** | 3exp/20strat | 5%(1/20) | +33.3% | MFI+KDJ_中性版B达0.718. MFI独立无效但与KDJ弱组合 |
-| P2 | R32(新) | WR+KDJ/PSAR组合 | **已弃** | 2exp/7strat | 0%(0/7) | +0.7% | 完全无效 |
-| P2 | R32(新) | ROC+KDJ/PSAR组合 | **已弃** | 2exp/10strat | 0%(0/10) | -2.7% | 负收益, 完全无效 |
-| P2 | R32(新) | KAMA+PSAR/MACD跨家族 | **浅探索** | 2exp/10strat | 30%(3/10) | +45.2% | KAMA+MACD(2 StdA+), KAMA+PSAR(1 StdA+). 有潜力 |
-| P2 | R36 | **NVI深度Grid Search** | **已完成** | 5exp/25strat | **32%(8/25)** | **+80.5%** | SL7最优(非SL5)! S6553 SL7/TP20/MHD15=0.739. SL3太紧(0.67-0.69) |
-| P2 | R36 | KAMA突破 T+1参数优化 | **已完成** | 3exp/15strat | 13%(2/15) | +60.5% | S6576 SL12/TP12/MHD15=0.735. 缩短MHD(15<20)有效 |
-| P2 | R36 | KAMA终极震荡 高TP探索 | **已完成** | 2exp/10strat | 0%(0/10) | — | TP2-10全不达StdA+. TP1/MHD1仍是唯一甜蜜点 |
-| P1 | R36→R37 | **VPT+PSAR+布林带** | **深度探索** | R36:3exp+R37:4exp/26done+18invalid | **73%(19/26)** | **+130.7%** | **🏆 R37 grid search: 18/20 StdA+(90%)! S6631=0.783(+102.6%), S6628=+130.7%. 新王牌家族!** |
-| P2 | R36(新) | VPT+KDJ | **已探索** | 1exp/3done+5invalid | 0%(0/3) | +42.7% | best 0.632, dd28.8%. 不达StdA |
-| P2 | R36(新) | VPT+MACD | **已弃** | 1exp/2done+6invalid | 0%(0/2) | -14.4% | 全亏, VPT+MACD无效 |
-| P1 | R37 | **VPT+PSAR Grid Search** | **已完成** | 4exp/20strat | **90%(18/20)** | **+130.7%** | **🏆 新王牌家族! S6631 SL7/TP7/MHD7=0.783(+102.6%). S6628 SL5/TP3/MHD5=+130.7%. 全部参数组合盈利, 90%达StdA+!** |
-| P2 | R37 | NVI+KDJ双确认 | **已弃** | 1exp/3done+5invalid | 0%(0/3) | +19.6% | 62.5%invalid. best 0.597, NVI+KDJ组合无效 |
-| P2 | R37 | NVI+PSAR趋势追踪 | **已弃** | 1exp/1done+7invalid | 0%(0/1) | +167.9% | 87.5%invalid. 0.699/dd38.9%, 高收益但高风险. 不达StdA |
-| P2 | R37 | NVI SL7 extended TP | **已完成** | 1exp/5strat | **80%(4/5)** | **+79.7%** | **S6635 SL7/TP25/MHD15=0.757, NVI新最高分!** TP16-25均有效 |
-| P2 | R37 | NVI SL7 short TP | **已完成** | 1exp/5strat | 0%(0/5) | +54.9% | TP1-10不达StdA. NVI需要TP>=15 |
-| P1 | R38 | **VPT+PSAR极端参数Grid** | **已完成** | 3exp/15strat | **93%(14/15)** | **+259.0%** | **🏆 S6672 SL12/TP8/MHD10=0.795新VPT+PSAR最高分! S6662 SL10/TP1/MHD3=+259.0%最高收益!** SL3太紧 |
-| P2 | R38 | STC+KDJ双超卖 | **已弃** | 1exp/2done+6invalid | 0%(0/2) | -21.4% | 全亏. STC在A股完全无效 |
-| P2 | R38 | STC+PSAR趋势 | **已弃** | 1exp/7done+1invalid | 0%(0/7) | +46.3% | dd>50%, 高收益但高风险. STC已弃 |
-| P2 | R38 | MFI+KDJ资金流 | **已弃** | 1exp/4done+4invalid | 0%(0/4) | +25.1% | best 0.600/dd29.9%, 接近但不达StdA |
-| P2 | R38 | MFI+PSAR趋势 | **已弃** | 2exp/8done+7invalid | 0%(0/8) | +13.6% | best 0.573, MFI在A股无效 |
-| P2 | R38 | VPT+全指标综合 | **已弃** | 1exp/0done+8invalid | — | — | 100% invalid, 过多指标DeepSeek无法处理 |
-| P1 | R39 | **VPT+PSAR精调Grid** | **已完成** | 2exp/10strat | **100%(10/10)** | **+145.8%** | **🏆 VPT+PSAR 100% StdA+! S6734=0.787, S6739=+145.8%. SL10-12/TP5-10/MHD7-10精调** |
-| P2 | R39 | WR+KDJ双确认 | **已弃** | 1exp/3done+5invalid | 0%(0/3) | — | 62.5%invalid, 全亏. WR+KDJ无效 |
-| P2 | R39 | WR+PSAR趋势 | **已弃** | 1exp/6done+2invalid | 0%(0/6) | +21.3% | best 0.729/dd29.3%, 接近但不达StdA |
-| P2 | R39 | ROC+KDJ动量 | **已弃** | 1exp/4done+4invalid | 0%(0/4) | +12.8% | 50%invalid, best 0.683. ROC+KDJ无效 |
-| P2 | R39 | ROC+PSAR趋势 | **已弃** | 1exp/2done+6invalid | 0%(0/2) | +22.1% | 75%invalid, best 0.747/dd28.1%. ROC已弃 |
-| P1 | R40 | **PSAR终极震荡Grid** | **已完成** | 1exp/80strat | **19%(15/80)** | **+96.7%** | score 0.783, TP=10必须, SL5-12无影响. 从1策略→15 StdA+ |
-| P1 | R40 | **MACD+RSI Grid** | **已完成** | 1exp/100strat | **73%(73/100)** | **+199.3%** | **🏆 score 0.805! MACD+RSI从28→73+StdA+, TP2-5/MHD3-15最优** |
-| P1 | R40 | **VPT+PSAR精调Grid** | **已完成** | 1exp/150strat | **95%(142/150)** | **+110.0%** | score 0.797, SL7-12/TP5-10/MHD7-12. 超级家族95%! |
-| P2 | R40 | PSAR+RSI+KDJ TP3+ | **已弃** | 1exp/64strat | **0%(0/64)** | — | TP3+全部dd>25%, 该族只能TP1-2. 已确认 |
-| P2 | R40 | NVI扩展Grid | **已完成** | 1exp/80strat | **4%(3/80)** | +88.1% | best 0.758, SL5-8/TP25/MHD10. NVI依旧弱 |
-| P1 | R55-R66 | **5族MHD全参数Mapping** | **已完成** | 57exp/~494strat | **~90%** | +181.2% | 12轮连续grid search, 五大家族SL/TP/MHD全覆盖. R64=100% |
-| P2 | R55-R66 | WR+KDJ/ROC+KDJ/MFI+KDJ | **已弃** | 多exp | 0% | — | R55-R66新指标测试全部失败 |
+> 528轮探索已完全穷尽所有可用方向。以下为关键方向摘要。Portfolio模式(R527-R528)发现非portfolio score有~5%膨胀。R528 portfolio-mode参数空间已FULLY EXHAUSTED: 买入指标(RSI/KDJ/MACD/BOLL/STOCHRSI/CCI/KAMA/Volume/EMA/close>MA), 卖出类型(aR2vF2/lt2dLow/ATRrise3/noSell/triple), TP(0.3-3.0), MHD(1-10), SL(5-99), ATR周期(7/10/14/21/28), RSI周期(7/10/14/21), portfolio sizing(pos3-20, pct15-50), capital(50k-1M), slippage(0-0.3%).
+
+### 有效方向 (已穷尽)
+
+| 方向 | 最佳Score | 关键发现 |
+|------|-----------|----------|
+| **RSI+ATR买入基底** | 0.8662(non-port) / **0.8331(portfolio)** | RSI 50-66 + ATR14<0.0912 = 唯一最优买入条件. Portfolio: TP1.63 MHD3 pos10. RSI14>RSI10>RSI21>RSI7 |
+| **ATRrise2+volFall2 卖出** | 0.8662 StdA+ | 波动扩张+成交量萎缩 = 最佳卖出信号 |
+| **RSIfall2d 卖出** | 0.8651 StdA+ | RSI 2日连跌 = 经典反转卖出 |
+| **rally4d4pct 卖出** | 0.8651 StdA+ | 4日涨4% = 动量突破卖出 |
+| **落日卖出(fall_pct)** | 0.8647 StdA+ | close下跌-0.65%触发卖出 |
+| **Sell 3-Tier Model** | — | Tier1(永不触发), Tier2(每天触发), Tier3(选择性) |
+| **PSAR+MACD+KDJ** | 0.830 | PSAR趋势+MACD动量+KDJ超卖三维组合 |
+| **全指标综合** | 0.825 | 全指标组合, T+1 Top 1 |
+| **EMA+ATR** | 0.823 | 2条件极简策略, lt2dLow sell = +2621% |
+| **Min3(MACD+RSI+ATR)** | 0.830 | 3条件版, lt2dLow = +2539% |
+| **三指標共振** | 0.817 | close_fall2d跨族有效 |
+| **VPT+PSAR** | 0.810 | VPT+PSAR+BWB三重过滤 |
+
+### 已弃指标 (52个方向)
+
+> 以下指标/组合经多轮测试确认在A股T+1市场无效: CMF, MA, EMA(独立), OBV, NVI, VPT(独立), Donchian, Aroon, Ichimoku, KST, MASS, TSI, Vortex, WMA, TRIX, DPO, PPO, PVO, AO, FI, EMV, ADI, STC, MFI, WR, ROC, STOCH+KDJ叠加, ULTOSC+KDJ叠加, 纯价格行为买入, KDJ超卖买入, BOLL买入过滤, MACD买入过滤, ADX趋势过滤
+
+### 已穷尽参数空间
+
+| 参数维度 | 测试范围 | 结论 |
+|----------|----------|------|
+| **SL** | SL3-SL99 | SL≥12完全irrelevant, SL99≥SL12 |
+| **TP** | TP0.12-TP7.0 | StdA+ ceiling = TP2.0, TP0.12-0.18=89%wr |
+| **MHD** | MHD1-MHD30 | MHD3-5最优, MHD≥8后无提升 |
+| **买入条件** | RSI(7/10/14/21), ATR(0.04-0.15), +MACD/KDJ/BOLL/PSAR/STOCHRSI/CCI/KAMA/Volume/EMA/close>MA | RSI48-66+ATR0.091=唯一最优. Portfolio: RSI50-66+ATR0.0912 |
+| **卖出条件** | 全indicator×rising/falling×2-5d + threshold + pct_change + pct_diff + lookback_min/max | Sell 3-Tier Model, 所有类型已测试 |
+| **卖出组合** | 双/三卖出, Tier2+Tier3, 矛盾OR组合 | Tier2+Tier3=Tier3, 双卖出<单卖出 |
+| **Portfolio** | pos3-20, pct15-50, capital 50k-1M, slippage 0-0.3% | pos10最优, pct/capital irrelevant, slip>0.15%破坏StdA+ |
 
 ---
 
 ## Auto-Promote 记录
 
-| 日期 | 策略名 | 标签 | 评分 | 收益 | 回撤 | Promote标准 |
-|------|--------|------|------|------|------|------------|
-| 2026-02-14 | 全指标综合_中性版C | [AI] | 0.78 | +58.5% | 14.6% | Standard A |
-| 2026-02-14 | 全指标综合_保守版B | [AI] | 0.75 | +29.1% | 4.0% | Standard A |
-| 2026-02-14 | KDJ金叉_中性版A | [AI] | 0.70 | +37.1% | 9.8% | Standard A + 震荡冠军 |
-| 2026-02-14 | KDJ金叉_激进版B | [AI] | 0.70 | +31.5% | 9.1% | Standard A |
-| 2026-02-14 | KDJ短周期快速交易_保守版A | [AI] | 0.69 | +21.5% | 6.6% | Standard A |
-| 2026-02-14 | KDJ超短线_中性版A | [AI] | 0.69 | +25.9% | 21.0% | Standard A |
-| 2026-02-14 | KDJ金叉+MACD双金叉_中性版A | [AI] | 0.68 | +34.1% | 17.9% | Standard A + 熊市冠军 |
-| 2026-02-14 | 三指标共振_中性版C | [AI] | 0.68 | +28.2% | 24.9% | Standard A |
-| 2026-02-14 | KDJ极致保守策略_保守版B | [AI] | 0.66 | +21.8% | 15.2% | Standard A |
-| 2026-02-14 | KDJ低位金叉+均线多头_中性版C | [AI] | 0.65 | +12.7% | 14.5% | Standard A |
-| 2026-02-14 | BOLL%B+StochRSI_中性版C | [AI] | 0.66 | +37.9% | 23.3% | Standard A (第十轮新指标) |
-| 2026-02-14 | PSAR+ADX+CCI+BOLL_保守版B | [AI] | 0.66 | +14.3% | 6.1% | Standard A (第十轮新指标) |
-| 2026-02-15 | 全指标综合_中性版C_全紧 | [AI] | **0.81** | **+75.6%** | 12.2% | Standard A (克隆调参最佳) |
-| 2026-02-15 | 全指标综合_中性版C_快止盈15pct | [AI] | **0.80** | +69.1% | 12.8% | Standard A (克隆调参) |
-| 2026-02-15 | 全指标综合_中性版C_紧止损5pct | [AI] | 0.75 | +46.5% | 14.7% | Standard A (克隆调参) |
-| 2026-02-15 | UltimateOsc_中性版C | [AI] | **0.72** | +28.0% | 11.2% | Standard A (新指标发现) |
-| 2026-02-15 | VWAP均值回归_保守版A | [AI] | 0.65 | +14.7% | 7.9% | Standard A |
-| 2026-02-15 | MACD+RSI双确认_保守版B | [AI] | 0.67 | +29.8% | 22.1% | Standard A |
-| 2026-02-16 | **PSAR趋势动量_保守版A** | [AI] | **0.77** | **+70.8%** | 12.6% | **Standard A (PSAR+MACD+KDJ, 全阶段盈利, Top 3!)** |
-| 2026-02-16 | PSAR三重确认_中性版B | [AI] | **0.69** | +14.5% | **3.7%** | Standard A (PSAR+ULCER+KDJ三重过滤, 全阶段盈利) |
-| 2026-02-16 | PSAR+RSI_KDJ双超卖_保守版A | [AI] | **0.66** | +21.0% | 18.9% | Standard A (PSAR+RSI+KDJ, ID168) |
-| 2026-02-16 | **PSAR+BOLL+KDJ_保守版B** | [AI] | **0.70** | **+27.5%** | **8.2%** | **Standard A (PSAR+BOLL+KDJ, 全阶段盈利!, ID173)** |
-| 2026-02-16 | **PSAR趋势动量_保守版A_SL10_TP15** | [AI] | **0.779** | **+82.8%** | 14.7% | **Standard A (克隆调参新最佳! 超越原S1277)** |
-| 2026-02-16 | PSAR趋势动量_保守版A_SL8_TP10_v2 | [AI] | 0.775 | +75.0% | 12.6% | Standard A (克隆调参) |
-| 2026-02-16 | PSAR趋势动量_保守版A_SL8_TP15_v2 | [AI] | 0.772 | +77.5% | 14.8% | Standard A (克隆调参) |
-| 2026-02-16 | PSAR趋势动量_保守版A_SL10_TP20 | [AI] | 0.762 | +68.8% | 15.2% | Standard A (克隆调参) |
-| 2026-02-16 | PSAR趋势动量_保守版A_SL5_TP15 | [AI] | 0.761 | +66.0% | 13.4% | Standard A (克隆调参) |
-| 2026-02-16 | PSAR趋势动量_保守版A_SL8_TP20_v2 | [AI] | 0.758 | +67.3% | 15.6% | Standard A (克隆调参) |
-| 2026-02-16 | PSAR趋势动量_保守版A_SL5_TP10 | [AI] | 0.738 | +57.8% | 15.9% | Standard A (克隆调参) |
-| 2026-02-16 | PSAR趋势动量_保守版A_SL5_TP20 | [AI] | 0.713 | +51.0% | 20.6% | Standard A (克隆调参) |
-| 2026-02-16 | KDJ+MACD+ULTOSC共振_保守版A_SL8_TP20 | [AI] | 0.666 | +41.2% | 20.6% | Standard A (S1357调参, 从0.64升至StdA) |
-| 2026-02-16 | **PSAR+BOLL+KDJ_SL8_TP10_v2** | [AI] | **0.740** | **+39.6%** | **8.0%** | **Standard A (BOLL+KDJ网格搜索最佳, dd极低!)** |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL10_TP10_v2 | [AI] | 0.739 | +39.4% | 8.1% | Standard A (BOLL+KDJ网格搜索) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL5_TP10_v2 | [AI] | 0.730 | +37.0% | 8.8% | Standard A (BOLL+KDJ网格搜索) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL8_TP15_v2 | [AI] | 0.703 | +28.6% | 8.0% | Standard A (BOLL+KDJ网格搜索) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL8_TP20_v2 | [AI] | 0.701 | +28.3% | 8.0% | Standard A (BOLL+KDJ网格搜索) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL10_TP15_v2 | [AI] | 0.700 | +28.1% | 8.1% | Standard A (BOLL+KDJ网格搜索) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL10_TP20_v2 | [AI] | 0.698 | +27.8% | 8.1% | Standard A (BOLL+KDJ网格搜索) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL5_TP20_v2 | [AI] | 0.691 | +26.2% | 8.8% | Standard A (BOLL+KDJ网格搜索) |
-| 2026-02-16 | **UltimateOsc_中性版C_SL8_TP10** | [AI] | **0.723** | **+26.5%** | **6.6%** | **Standard A (UltimateOsc网格最佳! dd极低)** |
-| 2026-02-16 | UltimateOsc_中性版C_SL10_TP10 | [AI] | 0.723 | +26.5% | 6.6% | Standard A (UltimateOsc网格) |
-| 2026-02-16 | UltimateOsc_中性版C_SL5_TP10 | [AI] | 0.711 | +23.6% | 6.6% | Standard A (UltimateOsc网格) |
-| 2026-02-16 | UltimateOsc_中性版C_SL8_TP15 | [AI] | 0.693 | +20.7% | 9.5% | Standard A (UltimateOsc网格) |
-| 2026-02-16 | UltimateOsc_中性版C_SL10_TP15 | [AI] | 0.693 | +20.7% | 9.5% | Standard A (UltimateOsc网格) |
-| 2026-02-16 | UltimateOsc_中性版C_SL5_TP15 | [AI] | 0.678 | +17.2% | 9.6% | Standard A (UltimateOsc网格) |
-| 2026-02-16 | KDJ+MACD双金叉_中性版A_SL10_TP15 | [AI] | 0.651 | +25.4% | 18.0% | Standard A (KDJ+MACD网格, 仅此一个达标) |
-| 2026-02-16 | 全指标综合_保守版B_SL8_TP10 | [AI] | **0.747** | +26.8% | **3.4%** | Standard A (网格搜索, dd极低!) |
-| 2026-02-16 | 全指标综合_保守版B_SL5_TP10 | [AI] | 0.745 | +26.6% | 3.4% | Standard A (网格搜索) |
-| 2026-02-16 | PSAR+ADX+CCI+BOLL_SL8_TP12 | [AI] | **0.674** | +16.7% | 6.2% | Standard A (超越基础!) |
-| 2026-02-16 | PSAR+RSI+KDJ_SL8_TP15 | [AI] | 0.674 | +26.6% | 19.7% | Standard A (大幅超越基础!) |
-| 2026-02-16 | PSAR+RSI+KDJ_SL10_TP15 | [AI] | 0.674 | +26.4% | 19.8% | Standard A (网格搜索) |
-| 2026-02-16 | PSAR三重确认_SL8_TP10 | [AI] | 0.674 | +12.2% | 3.7% | Standard A (网格搜索) |
-| 2026-02-16 | PSAR三重确认_SL5_TP10 | [AI] | 0.669 | +11.8% | 4.0% | Standard A (网格搜索) |
-| 2026-02-16 | PSAR+ADX+CCI+BOLL_SL5_TP10 | [AI] | 0.659 | +14.4% | 6.5% | Standard A (网格搜索) |
-| 2026-02-16 | **PSAR趋势动量_SL10_TP14** | **[AI]** | **0.802** | **+99.6%** | **12.2%** | **🏆 Standard A — 新全局最佳! 接近翻倍!** |
-| 2026-02-16 | **PSAR趋势动量_SL11_TP14** | [AI] | **0.801** | +99.2% | 12.2% | Standard A (第十七轮精扫) |
-| 2026-02-16 | PSAR趋势动量_SL9_TP14 | [AI] | 0.793 | +92.6% | 12.9% | Standard A (第十七轮精扫) |
-| 2026-02-16 | PSAR趋势动量_SL10_TP12 | [AI] | 0.784 | +83.3% | 12.6% | Standard A (第十七轮精扫) |
-| 2026-02-16 | PSAR趋势动量_SL11_TP12 | [AI] | 0.784 | +83.0% | 12.6% | Standard A (第十七轮精扫) |
-| 2026-02-16 | PSAR趋势动量_SL11_TP15 | [AI] | 0.782 | +84.5% | 14.3% | Standard A (第十七轮精扫) |
-| 2026-02-16 | PSAR趋势动量_SL9_TP12 | [AI] | 0.776 | +76.8% | 12.7% | Standard A (第十七轮精扫) |
-| 2026-02-16 | PSAR趋势动量_SL10_TP13 | [AI] | 0.776 | +80.1% | 14.5% | Standard A (第十七轮精扫) |
-| 2026-02-16 | PSAR趋势动量_SL11_TP13 | [AI] | 0.775 | +79.8% | 14.5% | Standard A (第十七轮精扫) |
-| 2026-02-16 | PSAR趋势动量_SL9_TP13 | [AI] | 0.767 | +73.8% | 14.6% | Standard A (第十七轮精扫) |
-| 2026-02-16 | 全指标综合_保守版B_SL7_TP12 | [AI] | 0.741 | +26.8% | 4.0% | Standard A (第十七轮精扫) |
-| 2026-02-16 | 全指标综合_保守版B_SL6_TP8 | [AI] | 0.737 | +25.0% | **3.3%** | Standard A (dd最低纪录!) |
-| 2026-02-16 | 全指标综合_保守版B_SL7_TP8 | [AI] | 0.737 | +25.1% | 3.3% | Standard A (第十七轮精扫) |
-| 2026-02-16 | 全指标综合_保守版B_SL7_TP11 | [AI] | 0.736 | +25.5% | 4.0% | Standard A (第十七轮精扫) |
-| 2026-02-16 | 全指标综合_保守版B_SL6_TP11 | [AI] | 0.735 | +25.4% | 3.9% | Standard A (第十七轮精扫) |
-| 2026-02-16 | **PSAR+BOLL+KDJ_SL8_TP9** | [AI] | **0.753** | **+42.0%** | **6.0%** | **Standard A (R18精扫, TP9新最优! Pareto改进)** |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL10_TP9 | [AI] | 0.751 | +41.7% | 6.2% | Standard A (R18精扫) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL8_TP11 | [AI] | 0.750 | +42.8% | 8.0% | Standard A (R18精扫) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL10_TP11 | [AI] | 0.748 | +42.5% | 8.1% | Standard A (R18精扫) |
-| 2026-02-16 | UltimateOsc_SL8_TP9 | [AI] | **0.731** | **+29.1%** | **6.6%** | **Standard A (R18精扫, TP9新最优!)** |
-| 2026-02-16 | UltimateOsc_SL10_TP9 | [AI] | 0.731 | +29.1% | 6.6% | Standard A (R18精扫) |
-| 2026-02-16 | UltimateOsc_SL8_TP11 | [AI] | 0.718 | +25.3% | 6.6% | Standard A (R18精扫) |
-| 2026-02-16 | UltimateOsc_SL10_TP11 | [AI] | 0.718 | +25.3% | 6.6% | Standard A (R18精扫) |
-| 2026-02-16 | PSAR+MACD+KDJ_MHD40 | [AI] | 0.801 | +99.8% | 12.2% | Standard A (R18 MHD测试) |
-| 2026-02-16 | PSAR+MACD+KDJ_MHD50 | [AI] | 0.801 | +99.8% | 12.2% | Standard A (R18 MHD测试) |
-| 2026-02-16 | PSAR+MACD+KDJ_MHD35 | [AI] | 0.801 | +99.4% | 12.2% | Standard A (R18 MHD测试) |
-| 2026-02-16 | PSAR+MACD+KDJ_MHD25 | [AI] | 0.800 | +98.2% | 12.2% | Standard A (R18 MHD测试) |
-| 2026-02-16 | PSAR+MACD+KDJ_MHD20 | [AI] | 0.798 | +95.9% | 12.2% | Standard A (R18 MHD测试) |
-| 2026-02-16 | PSAR+MACD+KDJ_MHD15 | [AI] | 0.790 | +89.6% | 12.4% | Standard A (R18 MHD测试) |
-| 2026-02-16 | **全指标综合_中性版C_SL7_TP14_MHD15** | **[AI]** | **0.825** | **+90.5%** | **12.4%** | **🏆 Standard A — R19新全局最高评分!** |
-| 2026-02-16 | 全指标综合_中性版C_SL7_TP15_MHD15 | [AI] | 0.820 | +85.5% | 12.3% | Standard A (R19精扫) |
-| 2026-02-16 | 全指标综合_中性版C_SL5_TP14_MHD15 | [AI] | 0.815 | +80.6% | 12.2% | Standard A (R19精扫) |
-| 2026-02-16 | 全指标综合_中性版C_SL5_TP15_MHD10 | [AI] | 0.809 | +87.1% | 12.4% | Standard A (R19精扫, MHD10=MHD15同分!) |
-| 2026-02-16 | 全指标综合_中性版C_SL5_TP12_MHD15 | [AI] | 0.807 | +77.1% | 12.4% | Standard A (R19精扫) |
-| 2026-02-16 | 全指标综合_中性版C_SL5_TP13_MHD15 | [AI] | 0.804 | +73.3% | 12.2% | Standard A (R19精扫) |
-| 2026-02-16 | 全指标综合_中性版C_SL5_TP15_MHD20 | [AI] | 0.791 | +65.0% | 13.4% | Standard A (R19精扫) |
-| 2026-02-16 | 全指标综合_中性版C_SL5_TP14_MHD20 | [AI] | 0.790 | +65.4% | 14.2% | Standard A (R19精扫) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL8_TP8 | [AI] | 0.751 | +42.3% | 6.3% | Standard A (R19, TP8≈TP9) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL10_TP8 | [AI] | 0.750 | +42.0% | 6.5% | Standard A (R19) |
-| 2026-02-16 | **MACD+RSI双确认_SL7_TP14** | **[AI]** | **0.732** | **+51.1%** | **20.9%** | **🌟 Standard A (R20 TP14移植最大赢家! 原0.672→0.732)** |
-| 2026-02-16 | MACD+RSI双确认_SL7_TP12 | [AI] | 0.711 | +43.3% | 21.4% | Standard A (R20 SL7移植) |
-| 2026-02-16 | KDJ超短线_SL8_TP14 | [AI] | 0.713 | +30.1% | 17.9% | Standard A (R20 TP14移植) |
-| 2026-02-16 | 三指标共振_SL10_TP14 | [AI] | 0.710 | +30.7% | 17.5% | Standard A (R20 TP14移植) |
-| 2026-02-16 | 三指标共振_SL10_TP20 | [AI] | 0.710 | +34.9% | 21.3% | Standard A (R20) |
-| 2026-02-16 | 三指标共振_SL7_TP14 | [AI] | 0.704 | +28.9% | 17.5% | Standard A (R20) |
-| 2026-02-16 | KDJ超短线_SL7_TP14 | [AI] | 0.703 | +27.6% | 18.3% | Standard A (R20) |
-| 2026-02-16 | KDJ超短线_SL7_TP20 | [AI] | 0.682 | +23.5% | 20.1% | Standard A (R20) |
-| 2026-02-16 | KDJ极致保守_SL8_TP14 | [AI] | 0.678 | +25.2% | 12.7% | Standard A (R20) |
-| 2026-02-16 | PSAR+RSI+KDJ_SL7_TP14 | [AI] | 0.664 | +24.3% | 20.3% | Standard A (R20) |
-| 2026-02-16 | KDJ极致保守_SL8_TP12 | [AI] | 0.663 | +22.8% | 14.7% | Standard A (R20) |
-| 2026-02-16 | PSAR+RSI+KDJ_SL8_TP14 | [AI] | 0.659 | +23.5% | 20.7% | Standard A (R20) |
-| 2026-02-16 | **MACD+RSI_SL7_TP14_MHD15** | **[AI]** | **0.738** | **+59.8%** | **21.3%** | **Standard A (R21 MHD精扫, MACD+RSI新最佳!)** |
-| 2026-02-16 | MACD+RSI_SL7_TP14_MHD30 | [AI] | 0.739 | +54.2% | 21.1% | Standard A (R21 MHD精扫) |
-| 2026-02-16 | MACD+RSI_SL7_TP14_MHD20 | [AI] | 0.732 | +55.3% | 22.1% | Standard A (R21) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL8_TP9_MHD20 | [AI] | 0.753 | +42.0% | 6.0% | Standard A (R21, =MHD28) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL8_TP9_MHD25 | [AI] | 0.753 | +42.0% | 6.0% | Standard A (R21) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL8_TP9_MHD15 | [AI] | 0.749 | +41.0% | 6.2% | Standard A (R21) |
-| 2026-02-16 | PSAR+BOLL+KDJ_SL7_TP9 | [AI] | 0.746 | +40.5% | 6.5% | Standard A (R21 SL7移植) |
-| 2026-02-16 | 全指标综合_保守版B_SL8_TP10_MHD15 | [AI] | 0.747 | +26.8% | 3.4% | Standard A (R21) |
-| 2026-02-16 | 全指标综合_保守版B_SL8_TP10_MHD20 | [AI] | 0.747 | +26.8% | 3.4% | Standard A (R21) |
-| 2026-02-16 | 全指标综合_保守版B_SL8_TP9 | [AI] | 0.744 | +26.4% | **3.2%** | Standard A (R21 dd新纪录!) |
-| 2026-02-16 | UltimateOsc_SL8_TP9_MHD20 | [AI] | 0.733 | +29.9% | 6.6% | Standard A (R21) |
-| 2026-02-16 | UltimateOsc_SL8_TP9_MHD15 | [AI] | 0.732 | +29.7% | 6.6% | Standard A (R21) |
-| 2026-02-16 | UltimateOsc_SL7_TP9 | [AI] | 0.727 | +28.1% | 6.6% | Standard A (R21) |
-| 2026-02-16 | KDJ+MACD双金叉_SL10_TP15 | [AI-熊市] | 0.651 | +25.4% | 18.0% | Standard B 熊市冠军 |
-| 2026-02-14 | KDJ+ATR动态止损_中性版C | [AI-牛市] | 0.58 | +1.2% | 9.0% | Standard B 牛市冠军 |
-| 2026-02-20 | **R24-FIX批量promote** | [AI] | — | — | — | **400个新StdA策略批量promote! 全部来自R24-FIX 213实验** |
-| 2026-02-20 | **全指标综合_SL10_TP14_MHD18** | [AI] | **0.820** | +80.7% | 12.0% | Standard A — 🆕R24-FIX新评分纪录 |
-| 2026-02-20 | **PSAR_SL12_TP4_MHD30** | [AI] | **0.807** | **+135.6%** | 10.5% | Standard A — 🏆R24-FIX全局最高收益! |
-| 2026-02-20 | PSAR_SL12_TP5_MHD25 | [AI] | 0.811 | +125.2% | 9.8% | Standard A — R24-FIX高分+高收益 |
-| 2026-02-20 | UltimateOsc_TP3_SL8 | [AI] | 0.786 | +47.0% | 3.3% | Standard A — R24-FIX超低风险 |
-| 2026-02-20 | PSAR_SL12_TP4_MHD30 | [AI-震荡] | — | — | — | Standard B 震荡冠军(pnl=+334) |
-| 2026-02-21 | **R25批量promote** | [AI] | — | — | — | **198个新StdA策略批量promote! R25 200实验100%命中** |
-| 2026-02-21 | **PSAR_SL10_TP3_MHD30(S2225)** | [AI] | **0.808** | **+151.7%** | 10.7% | **🏆 Standard A — R25全局最高收益新纪录!** |
-| 2026-02-21 | 全指标综合_SL10_TP14(S2383) | [AI] | **0.821** | +84.7% | 12.8% | Standard A — R25最高评分 |
-| 2026-02-21 | UltimateOsc_TP1(S2370+) | [AI] | 0.699 | +26.3% | **1.7%** | Standard A — 🆕全局最低回撤纪录! |
-| 2026-02-27 | **R31批量promote** | [AI] | — | — | — | **270个新StdA+策略批量promote! R31 312实验, 网格搜索98.5%命中** |
-| 2026-02-27 | PSAR+MACD+KDJ MHD3-10 (70个) | [AI] | 0.825 | +256.4% | 5.5% | R31 grid search, 70/70 StdA+(100%) |
-| 2026-02-27 | 激进版A MHD2-5 (56个) | [AI] | 0.801 | +517.6% | 13.9% | R31 grid search, 56/60 StdA+(93%) |
-| 2026-02-27 | 三指标共振 MHD2-5 (48个) | [AI] | 0.809 | +204.7% | 10.9% | R31 grid search, 48/48 StdA+(100%) |
-| 2026-02-27 | 全指标综合 MHD1/4 (60个) | [AI] | 0.823 | +228.3% | 2.1% | R31 grid search, 60/60 StdA+(100%) |
-| 2026-02-27 | UltimateOsc MHD1/4/5 (27个) | [AI] | 0.772 | +43.2% | 1.2% | R31 grid search, 27/27 StdA+(100%) |
-| 2026-02-27 | **KAMA新指标 (9个)** | [AI] | **0.791** | **+92.3%** | 23.2% | **R31 DeepSeek, KAMA终极震荡/中长线/突破, 新指标首次StdA+!** |
-| 2026-02-28 | **KAMA终极震荡 grid (45个)** | [AI] | **0.831** | +360.3% | 8.9% | **R32 grid, 45/45 StdA+(100%), NEW ALL-TIME SCORE RECORD!** |
-| 2026-02-28 | **KAMA突破 6子族 grid (149个)** | [AI] | **0.828** | +389.4% | 9.1% | R32 grid, 149/149 StdA+(100%), 全部score≥0.70 |
-| 2026-02-28 | KAMA_CCI_RSI grid (40个) | [AI] | 0.741 | +42.9% | 2.8% | R32 grid, 40/40 StdA+(100%) |
-| 2026-02-28 | KAMA布林带 grid (35个) | [AI] | 0.796 | +280.6% | 5.0% | R32 grid, 35/40 StdA+(88%) |
-| 2026-02-28 | KAMA中长线_激进版B (20个) | [AI] | 0.823 | +168.3% | 6.2% | R32 grid, 20/20 StdA+(100%) |
-| 2026-02-28 | NVI/MFI/KAMA+跨家族 (5个) | [AI] | 0.772 | +55.8% | 12.4% | R32 DeepSeek, NVI(1)+MFI+KDJ(1)+KAMA+MACD(2)+KAMA+PSAR(1) |
+> 累计 **20,650+** 个StdA+策略已promote。
+> **R1281** (Engine, 2026-04-21 09:09): **246 StdA+ (95.7%)** — best=0.8643, promoted=241, provider=code-driven。Pool: 24家族, 262活跃
 
 ---
 
@@ -557,434 +426,12 @@
 
 ---
 
-## 历史实验摘要
 
-### 第一轮 (4模板, 32策略)
-盈利 2/23 (8.7%), 最佳 +11.1%
+## 历史实验摘要 (归档)
 
-### 第二轮 (15实验, 120策略)
-盈利 9/46 (19.6%), 最佳 +32.2%, 数据缺陷导致回撤虚高(86.8%)
-
-### 第三轮 (15实验, 120策略, 数据修复后)
-盈利 6/51 (11.8%), 最佳 +37.1% (KDJ金叉_中性版A), 回撤回归正常(58.7%), 数据修复验证成功
-
-### 第四轮: KDJ深挖 (67实验, 536策略)
-盈利 26/258 (10.1%), 最佳 +60.7%, >30%收益 2个。KDJ+EMA最佳组合(43%盈利率), 短周期(6,3,3)优于默认, 5个策略全阶段盈利。盈利率最高主题: KDJ+EMA(43%), KDJ短周期(40%), KDJ紧止损(40%)。零盈利: 33个主题(KDJ长周期、纯ADX/OBV/CCI/WR组合、J值极端反转等)。
-
-### P0修复: 扩展指标收集Bug回测 (292策略)
-修复成功 273/292 (93.5%), 新增盈利 31 (11.4%), 最佳: 全指标综合_中性版C (+58.5%, score 0.78), MACD金叉_保守版B (+59.0%, score 0.66)
-
-### 第五轮: P1震荡市+P2指标组合 (9实验含4次自愈重试, 72策略)
-**P1震荡市**(7实验): 盈利 1/12有效 (8.3%), 最佳 +2.5%。VWAP/BOLL带宽/CMF三个方向全部失败, 累计5次重试。根因: 规则引擎不支持field-to-field, DeepSeek生成不支持条件, CMF在A股持续为负不可用。仅KDJ超短(5,2,2)微利+2.5%。结论: P1方向全部关闭。
-**P2指标组合-早期**(2实验): ID95(CMF+KDJ)和ID96(BOLL+MACD)条件过宽导致信号爆炸, 回测超慢(单策略>40min), 仍在进行中。
-**关键发现**: CMF_20在A股绝大多数股票持续为负, 独立使用完全不可行。
-
-### 第六轮: P2指标组合深入 (3实验, 24策略)
-盈利 1/15有效 (6.7%), 最佳 +9.0% (MACD金叉+RSI超卖_中性版A)。9/24 invalid (37.5%), 0零交易。
-- **ID98 KDJ+RSI双确认**: 5有效, 0盈利。最佳-1.0%(中性版A仅3笔交易)。震荡市亏损严重。
-- **ID99 KDJ超卖+EMA趋势**: 5有效, 0盈利。最佳-0.1%(中性版A)。激进版灾难(-74%~-88%)。
-- **ID100 MACD+RSI超卖**: 5有效, 1盈利。中性版A +9.0%(score 0.48, dd 48.9%, 牛市+366熊市+10)。
-
-### 第七轮: P2收尾+新方向 (4实验含1次自愈重试, 32策略)
-盈利 5/24有效 (20.8%), 最佳 +17.5%。2/32 invalid (6.3%), 0零交易。
-- **ID101 EMA+ATR动态止损**: 8有效0invalid, **0盈利**。全部巨亏(-50%~-98%), 震荡市单策略亏损超1000元。彻底否定纯EMA趋势追踪。
-- **ID102 KDJ+MACD短周期精调**: 8有效0invalid, **1盈利**。中性版A +17.5%(score 0.57, dd 27.8%), 牛市+253熊市+107。但远不如默认参数组合(+34.1%, score 0.68), 短周期精调无优势。
-- **ID103 RSI极端超卖反弹**: 2有效**6invalid**, 1盈利(+6.1%)。DeepSeek生成大量不支持条件, 触发自愈重试。
-- **ID104 RSI极端超卖反弹(简化版)**: 6有效2invalid, **4盈利**(66.7%!)。最佳+5.4%(score 0.62, dd 1.8%), 但仅17笔交易。RSI<25极端超卖盈利率极高但信号过少, 统计意义不足。
-**结论**: P2探索基本结束。EMA+ATR彻底否定; KDJ+MACD默认参数已最优; RSI超卖有理论价值但实际信号太少。所有非KDJ主导方向已探索完毕。
-
-### 第八轮: 新方向+参数优化 (3实验, 24策略)
-盈利 0/24有效 (0.0%), 全部亏损。0 invalid, 0 零交易。
-- **ID105 KDJ金叉+放量确认**: 8有效, **0盈利**。放量条件对KDJ无增益, 最佳-18.9%。A股超卖放量多为出货。
-- **ID106 MACD柱线翻正趋势**: 8有效, **0盈利**。MACD_hist>0作为主信号灾难性, 亏损-37%~-99.8%。信号过频繁, 震荡市单策略亏损超3000元。
-- **ID107 KDJ金叉止盈止损优化**: 8有效, **0盈利**。尝试复现已有最佳策略(+37.1%)并优化止盈止损, 但DeepSeek生成的规则与原始存在微妙差异, 导致全部亏损(-35%~-81%)。
-**结论**: 放量、MACD独立、参数"优化"三个新方向全部失败。自动探索已穷尽所有可行的双指标组合和辅助条件方向。剩余可能的提升路径：(1)手动编辑现有最佳策略的止盈止损参数(不通过DeepSeek); (2)后端支持组合策略(P3); (3)规则引擎升级支持更复杂条件。
-
-### 第十轮: 大规模新指标探索 (20实验, 144策略, 全部完成)
-**目标**: 扩展indicator_registry从10→33个指标组, 探索STOCH/STC/ULTOSC/KELTNER/KST/PSAR/AO/FI/EMV/VORTEX/AROON/ICHIMOKU/DONCHIAN等新指标。
-**最终**: 89/144 done, 55/144 invalid. **盈利 14/89 (15.7%)**, 3个达Standard A:
-- **S979 UltimateOsc_中性版C**: +28.0%, score **0.72**, dd 11.2%, 262 trades. **Standard A已promote** (批量重试新发现!)
-- **S1059 BOLL%B+StochRSI_中性版C**: +37.9%, score 0.66, dd 23.3%, 233 trades. **Standard A已promote**
-- **S1141 PSAR+ADX+CCI+BOLL_保守版B**: +14.3%, score 0.66, dd 6.1%, 256 trades. **Standard A已promote**
-- Stochastic_保守版C (ID128): +28.4%, score 0.60, dd 23.4%
-- STC超卖反弹_中性版B (ID147): +22.7%, score 0.53, dd 39.4%
-- S1131 肯特纳通道低波动_中性版C: +19.5%, score 0.60, dd 19.0%
-- S1133 肯特纳通道低波动_保守版B: +13.3%, score 0.59, dd 17.6%
-- S1138 PSAR+RSI+BOLL_中性版B: +6.3%, score 0.61, dd 8.9%. 震荡市+95(罕见!)
-- 其余6个: +0.6%~+8.0%, 收益较低
-**无效指标**: PPO/KST/WMA/FI+EMV/MASS/PVO/ADI/DONCHIAN/AO/AROON/ICHIMOKU/VORTEX
-
-### 第十一轮: 批量重试 (323策略, 2026-02-15)
-**背景**: 清理僵尸实验、修复挂死问题后, 将所有failed/invalid/pending策略(323个, 跨67个实验)统一重置并批量重试。实施三层防护系统防止挂死。
-**处理时间**: ~6.5小时 (10:05-16:45), 零挂死。
-**结果**: +77 done (745→822), +241 invalid (23→264)
-- 75.8%被标记invalid — 主要原因: 信号爆炸(L1增强检测), 零交易, field-to-field比较不支持
-- **6个新promote策略**: 全紧(0.81), 快止盈(0.80), 紧止损(0.75), UltimateOsc(0.72), VWAP(0.65), MACD+RSI(0.67)
-- **关键发现**: UltimateOscillator是唯一通过重试达到Standard A的新指标; 克隆调参系列(全紧/快止盈/紧止损)成为Top 3
-**三层防护系统验证**: L1增强信号爆炸检测快速捕获问题策略; L2单策略5分钟超时无一触发(说明策略级别正常); L3看门狗无一触发(无实验超60分钟)
-
-### P3: 组合策略投票 (3实验, 41策略)
-**目标**: 实现P3方向 — 多策略信号投票/加权组合。将多个promoted策略的买入/卖出条件通过投票机制组合。
-**实现**: 新增combo策略类型, 支持vote_threshold/weight_mode/sell_mode配置。修改portfolio_engine/signal_engine/backtest_engine/ai_lab_engine。
-**实验结果**:
-- **ID154/155 18成员组合** (全部promoted策略): 所有策略超时(5分钟内仅完成51天/730天), 已标记invalid并跳过。18成员性能不可行。
-- **ID156 5成员精选组合** (KDJ金叉/全指标综合/PSAR/BOLL%B+StochRSI/UltimateOsc):
-  - **投票2/5**: ✅ score=0.44, ret=+1.0%, dd=0.2%, 6 trades — 极保守但盈利
-  - **投票2/5_多数卖出**: ✅ score=0.54, ret=+0.8%, dd=0.6%, 6 trades — majority sell模式得分更高
-  - **投票3/5~5/5**: 全部零交易 — 多元化策略难以同时达成共识
-**关键发现**: 多元化组合极度保守(6笔/2年), 回撤极低(0.2%). 下一步应使用同类指标组合(如3个KDJ变体)提高信号频率。
-**bug修复**: (1) combo timeout: 5min→15min; (2) regime_stats清除导致重试失败: 添加sibling fallback恢复机制; (3) combo endpoint忽略body参数: 修复为接受member_strategy_ids
-
-### BOLL field比较实验 (3实验, 24策略)
-- **ID108/109 BOLL通道突破_field比较**: 16/16 invalid(零交易)。close<BOLL_lower(field比较)+KDJ_K<25太严苛, 3年回测期内从未触发。
-- **ID110 BOLL通道_debug**: 僵尸实验(stuck in backtesting), 1/8 invalid, 其余pending/backtesting。
-**结论**: field-to-field比较功能正常(P7非bug), 但BOLL下轨+超卖双重条件极度罕见。BOLL需用更宽松阈值(如close<BOLL_middle)或不组合超卖。
-
-### 第九轮: 趋势过滤+双超卖 (3实验, 24策略)
-盈利 2/21有效 (9.5%), 最佳 +2.7%。3 invalid, 0 零交易(除BOLL)。
-- **ID111 KDJ+ADX趋势过滤**: 6有效2invalid, **0盈利**。ADX>25无法有效过滤震荡市, ranging亏损-357~-743。牛市有正收益(+82~+367)但被震荡市抵消。
-- **ID112 KDJ金叉+MA20方向确认**: 7有效1invalid, **1盈利**。保守版A +2.7%(score 0.58, dd 6%, 62 trades), ranging仅亏-10(最小), 但收益太低。
-- **ID113 KDJ+RSI双超卖底部**: 8有效0invalid, **1盈利**。中性版C +0.2%(score 0.54, 18 trades), 实质上是持平。双超卖条件太严格, 信号极少。
-**结论**: 趋势过滤方向(ADX/MA20)无法解决震荡市问题。双超卖(KDJ+RSI)信号太少。**双指标组合自动探索彻底穷尽。**
-
-### 克隆调参实验 (6个克隆, ID114-119)
-使用新建的clone-backtest API, 克隆top策略并修改exit_config进行参数优化。
-- **KDJ金叉_中性版A_紧止损5pct** (ID114): ret=-24.3%, score=0.41, 2146 trades. 止损-5% vs原-9%, 显著更差。
-- **KDJ金叉_中性版A_紧止损快止盈** (ID115): ret=-18.4%, score=0.43, 2151 trades. 止损-5%+止盈15%.
-- **KDJ金叉_中性版A_快轮换10d** (ID116): ret=-5.0%, score=0.49, 2110 trades. 持仓10天 vs原20天, 最佳变体。
-- **全指标综合_中性版C × 3变体** (ID117-119): **批量重试后全部成功!**
-  - 全紧: score **0.81**, ret **+75.6%**, dd 12.2%, 613 trades — **全局第一!**
-  - 快止盈15pct: score **0.80**, ret +69.1%, dd 12.8%, 574 trades
-  - 紧止损5pct: score 0.75, ret +46.5%, dd 14.7%, 547 trades
-**关键发现**: (1) 收紧止损严重损害KDJ策略表现(-9%→-5%止损导致收益从+37%→-24%); (2) 缩短持仓期有微弱改善(-5% vs -24%); (3) 全指标综合克隆调参在批量重试后全部成功且表现优异, 之前"0交易invalid"是因回测引擎bug(已修复)。
-
-### 第十四轮: DeepSeek探索(3实验)+网格搜索(19实验)
-**DeepSeek探索**(ID174-176): 尝试PSAR+STOCH/MFI/ULTOSC新组合, DeepSeek生成率极低。
-- ID174 PSAR+STOCH+KDJ: 0/8有效(8/8 invalid)
-- ID175 PSAR+MFI+KDJ: 0/8有效(8/8 invalid)
-- ID176 KDJ+MACD+ULTOSC共振: 3/8有效(5/8 invalid), S1357 +33.0% score 0.64(差0.01达StdA!)
-
-**网格搜索**(ID177-195): 克隆S1277和S1357, 系统测试stop_loss×take_profit参数组合。绕过DeepSeek直接修改exit_config。
-- **S1277(PSAR+MACD+KDJ) 11变体**: 8/11达Standard A(3个超时invalid)!
-  - SL-5%: 0.713~0.761, ret +51%~+66%
-  - SL-8%: 0.758~0.775, ret +67%~+77%
-  - **SL-10%: 0.762~0.779, ret +69%~+83%** ← 最优区间!
-  - **S1366 SL10_TP15 = 新全局最佳(score 0.779, +82.8%, dd14.7%, 957trades)**
-- **S1357(KDJ+MACD+ULTOSC) 8变体**: 2/8有效(6/8超时invalid)
-  - S1373 SL8_TP20: score 0.666, +41.2%, dd20.6%, 273trades — 达Standard A!
-
-**关键发现**: (1) **宽止损(-10%)优于窄止损(-5%)** — 给价格更多波动空间, 避免过早止损, 最终收益更高; (2) PSAR+MACD+KDJ策略对exit参数极其鲁棒(8/11 StdA); (3) 并发回测>5个线程时SQLite竞争导致超时, 应控制在3-4个以内; (4) 网格搜索比DeepSeek生成高效10倍以上(成功率73% vs DeepSeek的<30%)
-
-### 第十五轮: 三策略网格搜索 (18变体, 2026-02-16)
-**目标**: 对UltimateOsc(S979)、KDJ+MACD双金叉(S211)、BOLL%B+StochRSI(S1059)三个未网格搜索的StdA策略进行SL×TP参数优化。
-**结果**: 18/18完成, **7个达Standard A**(全部来自UltimateOsc)
-- **S979 UltimateOsc 6变体**: **6/6全部StdA!** TP10版(0.711-0.723, dd 6.6%)显著优于TP15版(0.678-0.693, dd 9.5%)。SL几乎无影响。**S1414 SL8_TP10 = 0.723, +26.5%, dd仅6.6%(比基础11.2%降低41%)**
-- **S211 KDJ+MACD 6变体**: 仅1/6达StdA(S1422 SL10_TP15, 0.651)。原始(0.678)已是最优, 缩短止盈/止损均大幅恶化(SL5_TP15: -5.5%)
-- **S1059 BOLL%B+StochRSI 6变体**: 0/6达StdA。原始(0.656)已是最优, S1425 SL8_TP15最佳(0.621)但不达标
-**关键发现**: (1) UltimateOsc对TP极度敏感, TP10将dd从11.2%降至6.6%, 且score提升; (2) KDJ+MACD和BOLL%B+StochRSI的原始DeepSeek参数恰好是最优; (3) 不是所有策略都能通过网格搜索提升
-
-### 第十六轮: 五策略网格搜索(10变体)+DeepSeek探索(6实验, 2026-02-16)
-**网格搜索**(exp233-242): 对S63/S115/S1235/S1141/S1293五个未搜索StdA策略各2种exit参数。
-- **S63 全指标综合_保守版B**: 2/2达StdA! SL8_TP10(0.747/+26.8%/dd3.4%), SL5_TP10(0.745/+26.6%/dd3.4%). 收益微降但dd创新低
-- **S115 KDJ金叉_中性版A**: 0/2达StdA. SL8_TP15(-1.0%!), SL10_TP15(+2.4%). **KDJ金叉不适合缩短止盈**, 原参(TP22)需更宽空间
-- **S1235 PSAR三重确认**: 2/2达StdA. SL8_TP10(0.674/+12.2%/dd3.7%), SL5_TP10(0.669/+11.8%/dd4.0%). 与基础持平
-- **S1141 PSAR+ADX+CCI+BOLL**: 2/2达StdA! **SL8_TP12超越基础**(0.674/+16.7%/dd6.2% vs 0.663/+14.3%/dd6.1%)
-- **S1293 PSAR+RSI+KDJ**: 2/2达StdA! **SL8_TP15大幅超越基础**(0.674/+26.6%/dd19.7% vs 0.655/+21.0%/dd18.9%)
-**DeepSeek探索**(exp243-248): 6个实验40策略, **仅5个完成(12.5%), 0盈利, 35/40 invalid(87.5%)**
-- exp243 KDJ+新低反弹: 1/4完成, -45.7%
-- exp244 MACD+RSI: 4/4 invalid; exp245 PSAR+MACD: 8/8 invalid; exp247 STOCH+KDJ: 4/4 invalid; exp248 ULCER+KDJ: 8/8 invalid
-- exp246 KDJ+MACD紧出场: 4/8完成全亏(-22%~-34%)
-**关键发现**: (1) 网格搜索8/10策略达StdA(80%), DeepSeek 0/40(0%). **DeepSeek新策略生成已完全失效**. (2) PSAR+RSI+KDJ和PSAR+ADX+CCI+BOLL通过grid search成功提升. (3) KDJ金叉需要宽止盈(TP>20%). (4) 全指标综合_保守版B是dd最低的StdA策略(3.4%)
-
-### 第十七轮: 细粒度Exit参数精扫 (18变体, 2026-02-16)
-**目标**: 在已知最优区间内做精细搜索。PSAR+MACD+KDJ的SL9-11×TP12-15; 全指标综合_保守版B的SL6-7×TP8-12。
-**PSAR+MACD+KDJ精扫**(exp249-258, 10变体, **10/10达StdA!**):
-
-| SL\TP | TP12 | TP13 | **TP14** | TP15 |
-|---|---|---|---|---|
-| SL9 | 0.776/+76.8% | 0.767/+73.8% | **0.793/+92.6%** | — |
-| **SL10** | 0.784/+83.3% | 0.776/+80.1% | **0.802/+99.6% 🏆** | (prev 0.779) |
-| SL11 | 0.784/+83.0% | 0.775/+79.8% | **0.801/+99.2%** | 0.782/+84.5% |
-
-**发现**: **TP14是黄金止盈点!** 在所有SL水平下都是峰值。**S1481 SL10_TP14(0.802, +99.6%, dd12.2%, 969trades)成为新全局最佳**——接近翻倍! TP12太紧(过早止盈), TP15略宽(利润回吐). SL10-11之间差异极小, SL9略差。
-
-**全指标综合_保守版B精扫**(exp259-266, 8变体, 5完成3invalid):
-- TP8有效: SL6(0.737/+25.0%/**dd3.3%**), SL7(0.737/+25.1%/dd3.3%) — **dd创全策略新低!**
-- TP9: 3/3 invalid(零交易) — TP9是该策略的"死区"
-- TP11-12: 正常完成但不如TP10(SL8_TP10=0.747最优)
-
-**关键发现**: (1) 精细搜索将PSAR+MACD+KDJ从0.779/+82.8%提升到**0.802/+99.6%**, 提升巨大(+23%score, +17pp return). (2) TP14精确命中收益峰值, 1%精度的止盈差异就能带来17%收益差. (3) 全指标综合_保守版B的TP8创dd 3.3%新低但收益微降, TP9是死区
-
-### 第十八轮: 三方向精扫+新维度 (14变体, 2026-02-16)
-**目标**: (1) PSAR+BOLL+KDJ在TP10附近精扫TP9/11; (2) UltimateOsc同上; (3) 首次测试Max Hold Days对顶级策略的影响。
-**PSAR+BOLL+KDJ精扫**(exp267-270, 4变体, **4/4达StdA!**):
-
-| SL\TP | **TP9** | TP10 (prev) | TP11 |
-|---|---|---|---|
-| SL8 | **0.753/+42.0%/dd6.0% 🆕** | 0.740/+39.6%/dd8.0% | 0.750/+42.8%/dd8.0% |
-| SL10 | 0.751/+41.7%/dd6.2% | 0.739/+39.4%/dd8.1% | 0.748/+42.5%/dd8.1% |
-
-**发现**: **TP9是PSAR+BOLL+KDJ新最优!** SL8_TP9(0.753/+42.0%/dd6.0%)在score、return、dd三维度都优于SL8_TP10(0.740/+39.6%/dd8.0%), 是Pareto改进。dd从8.0%降至6.0%(降25%)。
-
-**UltimateOsc精扫**(exp271-274, 4变体, **4/4达StdA!**):
-
-| SL\TP | **TP9** | TP10 (prev) | TP11 |
-|---|---|---|---|
-| SL8 | **0.731/+29.1%/dd6.6%** | 0.723/+26.5%/dd6.6% | 0.718/+25.3%/dd6.6% |
-| SL10 | 0.731/+29.1%/dd6.6% | 0.723/+26.5%/dd6.6% | 0.718/+25.3%/dd6.6% |
-
-**发现**: TP9也是UltimateOsc新最优! 比TP10多+2.6pp收益, dd完全相同(6.6%). SL对该策略毫无影响。
-
-**Max Hold Days测试**(exp275-280, S1481 MHD15/20/25/35/40/50, **6/6达StdA**):
-
-| MHD | Score | Return | DD | Trades |
-|---|---|---|---|---|
-| 15 | 0.790 | +89.6% | 12.4% | 996 |
-| 20 | 0.798 | +95.9% | 12.2% | 974 |
-| 25 | 0.800 | +98.2% | 12.2% | 969 |
-| **30 (base)** | **0.802** | **+99.6%** | **12.2%** | **969** |
-| 35 | 0.801 | +99.4% | 12.2% | 967 |
-| 40 | 0.801 | +99.8% | 12.2% | 967 |
-| 50 | 0.801 | +99.8% | 12.2% | 967 |
-
-**发现**: MHD30已是最优(0.802). MHD<30损失收益(MHD15=-10pp), MHD>30收敛(绝大多数交易在30天内通过TP14/SL10自然平仓)。max_hold_days不是关键参数。
-
-**关键发现**: (1) **TP9是PSAR+BOLL+KDJ和UltimateOsc两个策略族的新最优止盈点**, 精度从5%到1%的搜索持续产出改进. (2) Max Hold Days对策略影响很小, 大部分交易通过TP/SL在MHD前平仓. (3) **14/14实验全部达StdA(100%)**——精细搜索在已知最优区间内具有100%命中率.
-
-### 第十九轮: 全指标综合_中性版C精扫+BOLL TP8 (10变体, 2026-02-16)
-**目标**: 对全指标综合_中性版C(全紧变体S902, SL5/TP15/MHD15=0.809)做三维精细搜索; 测试PSAR+BOLL+KDJ的TP8边界。
-**全指标综合_中性版C精扫**(exp281-288, 8变体, **8/8达StdA, 全部盈利!**):
-
-| Config | Score | Return | DD |
-|---|---|---|---|
-| **SL7_TP14_MHD15** | **0.825 🏆** | **+90.5%** | **12.4%** |
-| SL7_TP15_MHD15 | 0.820 | +85.5% | 12.3% |
-| SL5_TP14_MHD15 | 0.815 | +80.6% | 12.2% |
-| SL5_TP15_MHD10 | 0.809 | +87.1% | 12.4% |
-| SL5_TP15_MHD15 (base) | 0.809 | +75.6% | 12.2% |
-| SL5_TP12_MHD15 | 0.807 | +77.1% | 12.4% |
-| SL5_TP13_MHD15 | 0.804 | +73.3% | 12.2% |
-| SL5_TP15_MHD20 | 0.791 | +65.0% | 13.4% |
-
-**发现**: **S1511 SL7_TP14_MHD15 = 0.825/+90.5%/dd12.4%成为新全局最高评分!** SL7比SL5多2pp止损空间增加了+15pp收益。TP14再次证明是黄金止盈点(适用于PSAR+MACD+KDJ和全指标综合两大策略族)。MHD15>MHD20(短持仓适合快换手策略)。
-
-**PSAR+BOLL+KDJ TP8测试**(exp289-290, 2变体, **2/2达StdA**):
-- SL8_TP8: 0.751/+42.3%/dd6.3% — 与TP9(0.753/+42.0%/dd6.0%)几乎相同
-- TP9仍是该族最优(dd更低0.3pp)
-
-**关键发现**: (1) **全指标综合_中性版C是评分最高的策略族**, SL7_TP14组合将score从0.809提升到0.825(+2%). (2) **TP14对两大策略族(PSAR三维和全指标综合)都是最优**, 成为通用黄金止盈点. (3) SL7>SL5是新发现——适度放宽止损对全指标综合有显著正面影响. (4) 24/24策略(R18+R19)全部达StdA, 精细搜索命中率持续100%.
-
-### 第二十轮: TP14通用移植验证 (14变体, 2026-02-16)
-
-**目标**: 将TP14黄金止盈点+SL7发现移植到所有单变体StdA策略族(三指标共振/KDJ超短线/KDJ极致保守/ULTOSC共振/PSAR+RSI+KDJ/MACD+RSI)。
-**结果**: 14/14完成, **12/14达StdA(85.7%)**, **5/6策略族改进**:
-
-| 策略族 | 原始score | 最佳变体 | 新score | Δscore | Δret |
-|--------|-----------|----------|---------|--------|------|
-| **MACD+RSI双确认** | 0.672 | **SL7_TP14** | **0.732** | **+0.060** | **+21.3pp** |
-| 三指标共振 | 0.675 | SL10_TP14/TP20 | 0.710 | +0.035 | +6.7pp |
-| KDJ超短线 | 0.687 | SL8_TP14 | 0.713 | +0.026 | +4.2pp |
-| KDJ极致保守 | 0.658 | SL8_TP14 | 0.678 | +0.020 | +3.4pp |
-| PSAR+RSI+KDJ | 0.655 | SL7_TP14 | 0.664 | +0.009 | +3.3pp |
-| ULTOSC共振 | 0.666 | (原TP20最优) | 0.629 | -0.037 | -9.8pp |
-
-**关键发现**: (1) **TP14对所有KDJ/MACD基础策略通用有效**, ULTOSC是唯一例外(需要更宽TP20). (2) **MACD+RSI是最大惊喜**: SL7_TP14将score从0.672提升到0.732, 收益从+29.8%翻倍到+51.1%. (3) SL7效果因策略而异——对MACD+RSI最佳, 对三指标共振/KDJ类略差于SL8/SL10. (4) R20延续100%完成率(14/14 done, 0 invalid), grid search仍然极其可靠.
-
-### 第二十一轮: MHD精扫+SL7/TP9移植验证 (14变体, 2026-02-16)
-**目标**: 对4个策略族做MHD精扫(PSAR+BOLL+KDJ/UltimateOsc/MACD+RSI/全指标综合_保守版B); SL7移植到PSAR+BOLL+KDJ和UltimateOsc; TP9移植到全指标综合_保守版B.
-**结果**: 14/14完成, **13/14达StdA(92.9%)**, 1个invalid(SL7_TP9零交易):
-
-| 组 | 策略族 | 测试参数 | 最佳结果 | 发现 |
-|---|--------|----------|----------|------|
-| A | PSAR+BOLL+KDJ | MHD15/20/25 | 0.753/+42.0%/dd6.0% (=MHD28) | **MHD无影响**, 交易在TP9/SL8内平仓 |
-| B | UltimateOsc | MHD15/20 | 0.733/+29.9%/dd6.6% (≈MHD25) | **MHD无影响** |
-| C | **MACD+RSI** | **MHD15/20/30** | **0.738/+59.8%/dd21.3% (MHD15!)** | **MHD有影响! MHD15>MHD25(+8.7pp)** |
-| D | SL7移植 | BOLL+ULTOSC | 0.746/0.727 | **SL7不如SL8**, 两族都降 |
-| E | TP9移植 | 全指标综合_保守版B | 0.744/+26.4%/**dd3.2%** | **dd新纪录!** SL7_TP9=invalid |
-| F | MHD精扫 | 全指标综合_保守版B | 0.747/+26.8%/dd3.4% (=MHD30) | **MHD无影响** |
-
-**关键发现**: (1) **MHD对绝大多数策略无影响**(3/4族), 仅MACD+RSI对MHD敏感(MHD15最优, +59.8% vs +51.1%). (2) **SL7不是通用最优**: 仅对全指标综合和MACD+RSI有效, PSAR+BOLL+KDJ和UltimateOsc需保持SL8. (3) **全指标综合_保守版B的dd3.2%是历史新低**, TP9比TP10低0.2pp但score降0.003(微不足道). (4) 参数空间已全面穷尽——21轮探索覆盖所有主要策略族的SL/TP/MHD三维度.
-
-### 第二十二轮: 六族精细参数扫荡 (50变体, 2026-02-18)
-**目标**: 对6大策略族做全面精细边界扫荡——MACD+RSI精调(12), 全指标综合边界(8), PSAR+MACD+KDJ扩展(10), PSAR+BOLL+KDJ细化(8), UltimateOsc细化(6), TP14跨族移植(6).
-**结果**: 50/50完成(1 invalid), **49/49盈利(100%), 47/49达StdA(96%)**
-
-**MACD+RSI精调**(exp319-330, 12变体, **12/12 StdA**):
-- **SL8_TP15_MHD15(0.736)新最佳!** 超越R20的SL7_TP14(0.732)。TP15>TP14(反转R20结论, MHD15下TP15回归最优)
-- TP13~TP16全部StdA(0.700-0.736). MHD12最高收益(+62.2%), MHD10最低(+50.5%)
-- SL6/7/8差异极小(≤0.01)
-
-**全指标综合_中性版C边界**(exp331-338, 8变体, **8/8 StdA**):
-- **SL8_TP14_MHD15(0.816)**: SL8也有效! 比SL7(0.825)低仅0.009, 收益+82.1%
-- MHD18(0.815)≈MHD15(0.825), MHD12(0.811)略高收益(+83.7%但score降)
-- MHD20/25开始衰减(0.805/0.813), TP13(0.802-0.804)低于TP14
-
-**PSAR+MACD+KDJ扩展**(exp339-348, 10变体, **10/10 StdA**):
-- **SL10_TP14_MHD20(0.798)**: 与MHD30(0.802)仅差0.004, MHD20已足够
-- SL12(0.797)≈SL10(0.802), 更宽止损无额外收益。SL8(0.786)略差
-- TP15(0.792)低于TP14(0.802), TP16(0.784)>TP13(0.783), TP范围较宽
-- MHD15(0.782)显著损失(收益-15pp), MHD22/28/35收敛到0.795
-
-**PSAR+BOLL+KDJ细化**(exp349-356, 8变体, **8/8 StdA**):
-- SL9_TP9(0.748)微超SL8_TP9(0.753→0.748?), SL10_TP9(0.747)也强
-- TP7(0.739)和TP8(0.747)可用但低于TP9(0.753). TP10/11(0.735/0.745)不如TP9
-- SL6/7(0.742)比SL8(0.753)低——SL8仍是最优
-
-**UltimateOsc细化**(exp357-362, 6变体, **6/6 StdA**):
-- **TP7(0.758)新最高!** 超越TP9(0.731)和TP10(0.723)。UltimateOsc喜欢极紧止盈
-- TP8(0.742)>TP9(0.731)>TP10(0.723)>TP11(0.718) — 单调递减, TP越紧越好
-- SL6/10(0.727-0.731)≈SL8(0.731), SL无影响
-
-**TP14跨族移植**(exp363-368, 5/6完成, **3/5 StdA**):
-- PSAR三重确认: TP14(0.669)≈TP10(0.674), 无改善
-- BOLL%B+StochRSI: TP14(0.643)<原始TP20(0.656), TP14不适用
-- PSAR+ADX+CCI+BOLL: SL8_TP14(0.669)≈SL8_TP12(0.674), 无改善. SL7_TP14=invalid
-
-**关键发现**: (1) **UltimateOsc的TP7(0.758)是重大发现** — 极紧止盈对ULTOSC最优, 颠覆TP9/10认知. (2) **MACD+RSI在MHD15下TP15(0.736)回归最优** — MHD影响TP最优点, R20的TP14结论不全. (3) **100%盈利率+96% StdA率** — grid search在已知最优区间极其可靠. (4) **TP14仅对KDJ/MACD类有效** — PSAR三重确认/BOLL%B+StochRSI/PSAR+ADX无改善, TP14通用性不如预期. (5) 47个新StdA使总数达165.
-
-### 第二十三轮: 100实验大规模网格搜索 + TP7移植突破 (101变体, 2026-02-19)
-
-**模式**: auto (全自动) | **实验**: 101个(exp369-469), 98个去重 | **耗时**: ~5小时 | **StdA率**: **100%** (98/98) | **Score>=0.80**: 28个
-
-10批次设计:
-| 批次 | 策略族 | 数量 | 平均分 | 最高分 |
-|------|--------|------|--------|--------|
-| A | UltimateOsc TP3-6极端 | 12 | 0.751 | 0.790 |
-| B | MACD+RSI MHD扫荡 | 12 | 0.713 | 0.730 |
-| C | 全指标综合边界扩展 | 12 | 0.806 | 0.820 |
-| D | PSAR+MACD+KDJ新边界 | 10 | 0.787 | 0.800 |
-| E | PSAR+BOLL+KDJ极限 | 8 | 0.731 | 0.750 |
-| F | MACD+RSI TP扫荡 | 8 | 0.700 | 0.730 |
-| G | 全指标综合保守版B扫荡 | 8 | 0.809 | 0.820 |
-| H | 跨配置组合 | 10 | 0.766 | 0.800 |
-| I | UltimateOsc PSAR配置 | 10 | 0.740 | 0.760 |
-| J | **TP7跨族移植** | 10 | 0.787 | **0.810** |
-
-**重大突破: TP7移植到PSAR+MACD+KDJ**
-
-将UltimateOsc的最优TP7移植到PSAR+MACD+KDJ策略族, 创造了历史最高收益策略:
-
-| 配置 | Score | 收益 | 回撤 | Sharpe | CAGR | 交易数 |
-|------|-------|------|------|--------|------|--------|
-| **PSAR_SL10_TP7_MHD30** | **0.810** | **+114.6%** | **9.5%** | **1.56** | 29.2% | 1193 |
-| PSAR_SL10_TP7_MHD15 | 0.810 | +112.9% | 10.0% | 1.55 | 28.8% | 1200 |
-| PSAR_SL7_TP7_MHD15 | 0.800 | +97.7% | 11.2% | 1.38 | 25.7% | 1207 |
-
-对比上一轮冠军(全指标综合 SL7_TP14_MHD15, score 0.825, return +90.5%):
-- **收益翻倍**: 114.6% vs 90.5% (+26.7%)
-- **回撤更低**: 9.5% vs 12.4%
-- **Sharpe更高**: 1.56 vs 1.27
-- 复合评分略低(0.81 vs 0.825), 因高交易频率(1193次)略拉低win rate
-
-**关键发现**:
-1. **TP7不仅仅适用于UltimateOsc** — 移植到PSAR后产生了最高收益+最低回撤+最高Sharpe的三重冠军
-2. **全指标综合超级鲁棒**: SL4-10 × TP10-18 × MHD10-25全部score 0.79-0.82, 几乎无法失败
-3. **PSAR需要宽止损**: SL10-15 >> SL6-8, 趋势跟踪策略需要呼吸空间
-4. **UltimateOsc TP3新发现**: TP3_SL8=0.79, 仅3.3%回撤 — 超低风险策略
-5. **MACD+RSI结构性天花板0.73**: 无论怎么调参都无法突破, 受限于20%+回撤
-6. **PSAR+BOLL+KDJ在0.75封顶**: MHD延长(35-40)无帮助
-7. **100%StdA率**: 98/98全部达标, 网格搜索在已知最优区域的命中率已达理论上限
-
-### 第二十四轮(R24-FIX): 213实验大规模网格搜索 — P27 Bug修复后重提交 (2026-02-20)
-
-**背景**: R24原计划273实验(exp470-742), 发现P27 stop_loss_pct正负号bug导致全部无效。修复API后重提交213个精选实验(exp744-956)。
-
-**模式**: auto | **实验**: 213个 | **策略**: 209个done | **耗时**: ~14小时(09:08-22:53) | **StdA率**: **100%** | **Score>=0.80**: 86(41%) | **Invalid**: 0
-
-| 策略族 | 数量 | Avg Score | Best Score | Best Return | Score>=0.80 |
-|--------|------|-----------|------------|-------------|-------------|
-| **PSAR** | 73 | 0.800 | 0.811 | **+135.6%** | 42(57%) |
-| **全指标综合** | 80 | 0.795 | **0.820** | +89.4% | 44(55%) |
-| UltimateOsc | 38 | 0.754 | 0.786 | +47.0% | 0 |
-| BOLL+KDJ | 18 | 0.742 | 0.749 | +41.2% | 0 |
-| 保守版B | ~16 | 0.750 | 0.755 | +29.1% | 0 |
-
-**关键发现**:
-1. **PSAR TP4创全局最高收益+135.6%**(S2175 SL12_TP4_MHD30), 超越R23的+114.6%
-2. **全指标综合 S2127(SL10_TP14_MHD18)score=0.820**, 超越R23(SL8_TP14=0.816)
-3. **TP最优因策略而异**: PSAR→TP4/5, 全指标综合→TP14, UltimateOsc→TP3, BOLL+KDJ→TP6
-4. **SL影响微小**: 同TP下不同SL的score差异通常<0.005
-5. **100% StdA + 0 invalid** — R24-FIX批量命中率达到理论极限
-6. **400个新策略promote** — 使总StdA从~263增至~664
-
-### 第二十五轮(R25): 200实验极限参数穷尽 (2026-02-21)
-
-**模式**: auto | **实验**: 200个(exp957-1156) | **策略**: 198个done, 2 invalid | **耗时**: ~11小时(01:02-12:13) | **StdA率**: **100%** | **Score>=0.80**: 69 | **Invalid**: 2(全指标综合_保守版B极端参数零交易)
-
-| 策略族 | 数量 | Avg Score | Best Score | Best Return | Score>=0.80 |
-|--------|------|-----------|------------|-------------|-------------|
-| **PSAR+MACD+KDJ** | 76 | 0.799 | 0.818 | **+151.7%** | 45(59%) |
-| **全指标综合** | 31 | 0.804 | **0.821** | +106.1% | 24(77%) |
-| PSAR+BOLL+KDJ | 20 | 0.757 | 0.763 | +44.6% | 0 |
-| 保守版B | 22 | 0.745 | 0.752 | +28.7% | 0 |
-| MACD+RSI | 18 | 0.701 | 0.737 | +58.8% | 0 |
-| UltimateOsc | 16 | 0.753 | 0.756 | +42.1% | 0 |
-| KDJ | 15 | 0.708 | 0.730 | +31.0% | 0 |
-
-**11批次设计**: B1-B3: PSAR TP2-4 MHD极限(44); B4: 全指标综合补缺(30); B5: 保守版B TP8-14(24); B6: UltimateOsc TP1-2(12); B7: BOLL+KDJ扩展(20); B8: MACD+RSI补缺(18); B9: PSAR TP9-11填空(15); B10: PSAR SL16-20极宽(10); B11: KDJ TP sweep(15).
-
-**关键发现**:
-1. **PSAR TP3创+151.7%全局最高收益**(S2225 SL10_TP3_MHD30), 超越R24的TP4(+135.6%)
-2. **UltimateOsc TP1首测**, dd=1.7%全局最低回撤
-3. **PSAR极宽SL(16-20)无额外收益**, SL12已是PSAR族最优止损
-4. **KDJ单指标封顶0.730**, 确认KDJ需要MACD/PSAR辅助才能达到0.80+
-5. **198个新StdA promote**, 总StdA从~664增至~862
-6. **参数空间已极限穷尽**: 7大策略族的SL/TP/MHD三维度所有合理组合均已覆盖
-
-### 第二十六轮(R26): 387实验11族大规模网格搜索 (2026-02-22)
-
-**模式**: auto | **实验**: 387个(exp1158-1544) | **策略**: 336个done, 51 invalid | **耗时**: ~12小时(19:00-08:55) | **StdA率**: **49% (163/336)** | **Score>=0.80**: 0 | **Invalid**: 51(KDJ金叉_激进30全invalid)
-
-| 策略族 | 提交 | Done | Invalid | StdA率 | Best Score | Best Return | Lowest DD |
-|--------|------|------|---------|--------|------------|-------------|-----------|
-| **三指标共振** | 45 | 44 | 1 | **100%** | **0.737** | +42.7% | 15.7% |
-| **PSAR+ADX+CCI** | 48 | 43 | 5 | **100%** | 0.720 | +25.2% | **3.7%** |
-| **KDJ超短线** | 17 | 17 | 0 | **100%** | 0.703 | +25.7% | 8.6% |
-| KDJ极致保守 | 29 | 29 | 0 | 93% | 0.698 | +35.2% | 11.5% |
-| MACD+RSI | 13 | 13 | 0 | 85% | 0.703 | **+51.8%** | 17.3% |
-| PSAR三重确认 | 40 | 31 | 9 | 39% | 0.676 | +13.0% | **3.1%** |
-| BOLL%B+StochRSI | 78 | 73 | 5 | 0% | 0.644 | +32.6% | 10.8% |
-| KDJ金叉_中性 | 30 | 30 | 0 | 0% | 0.570 | +12.6% | 22.6% |
-| KDJ金叉_激进 | 30 | 0 | **30** | — | — | — | — |
-| KDJ+MACD双金叉 | — | 56 | 1 | 16% | 0.673 | +26.9% | 13.0% |
-
-**关键发现**:
-1. **三指标共振100% StdA(44/44)**, best score 0.737, 全部MHD15最优, TP7-15宽泛有效
-2. **PSAR+ADX+CCI 100% StdA(43/43)**, 全局最低DD(3.7-5.2%), 最佳风险调整收益
-3. **KDJ金叉_激进100% invalid(30/30)**, 源策略规则不兼容clone
-4. **MACD+RSI超短MHD(5-7天)产出最高收益(+51.8%)**, MHD极短是该族的甜蜜点
-5. **BOLL%B+StochRSI确认score天花板0.644**, 低于StdA阈值0.65, 该族不适合StdA
-6. **163个新StdA promote**, 总StdA从~862增至~1025
-
-### 第二十七轮(R27): 303实验11族精细参数搜索 (2026-02-22~23)
-
-**模式**: auto | **实验**: 303个(exp1545-1847) | **策略**: 292个done, 11 invalid | **耗时**: ~14小时(含重启恢复) | **StdA率**: **87.7% (256/292)** | **Score>=0.80**: 16 | **Invalid**: 11
-
-| 策略族 | 提交 | Done | Invalid | StdA率 | Best Score | Best Return | Lowest DD |
-|--------|------|------|---------|--------|------------|-------------|-----------|
-| **全指标综合** | 20 | 19 | 1 | **100%** | **0.824** | **+113.2%** | 11.8% |
-| **UltimateOsc** | 20 | 20 | 0 | **100%** | 0.786 | +47.0% | **3.3%** |
-| **PSAR+BOLL+KDJ** | 20 | 20 | 0 | **100%** | 0.775 | +53.1% | **2.3%** |
-| **三指标共振** | 46 | 45 | 1 | **100%** | 0.769 | +73.6% | 14.2% |
-| **KDJ超短线** | 25 | 25 | 0 | **100%** | 0.735 | +32.5% | 13.2% |
-| **MACD+RSI** | 25 | 21 | 4(invalid) | 84% | 0.726 | +61.4% | 19.1% |
-| **PSAR+ADX+CCI** | 35 | 32 | 3 | **100%** | 0.722 | +25.7% | 4.9% |
-| **KDJ极致保守** | 31 | 26 | 5 | 84% | 0.711 | +37.7% | 14.8% |
-| **PSAR+RSI+KDJ** | 30 | 25 | 5(invalid) | 89% | 0.686 | +29.3% | 18.2% |
-| **PSAR三重确认** | 26 | 22 | 4 | **100%** | 0.683 | +13.5% | 3.6% |
-| **KDJ+MACD双金叉** | 25 | 1 | 24(invalid) | 4% | 0.664 | +31.0% | 19.2% |
-
-**关键发现**:
-1. **全指标综合SL12_TP14_MHD15=0.824**, 匹配全局最高评分, 确认TP14+宽SL是该族黄金参数
-2. **全指标综合SL7_TP3_MHD15=+113.2%收益**, TP极短版虽然score略低(0.792)但收益爆炸
-3. **三指标共振TP4达0.769**(R26最佳0.737, +0.032!), 确认TP3-4是该族新最优区间
-4. **PSAR+BOLL+KDJ dd仅2.3%**, 刷新全局最低回撤纪录
-5. **16个策略score>=0.80**, 全部来自全指标综合族
-6. **KDJ+MACD双金叉96%invalid**, 源策略规则与clone参数不兼容
-7. **服务器重启恢复**: 中途服务器重启, 156实验stuck, 通过`retry-pending`API全部恢复
-8. **256个新StdA promote**, 总StdA从~1025增至~1281
-
----
+> 1281轮探索累计: ~7362个实验, ~9484个StdA+策略。详细轮次数据查询API: `GET /api/lab/exploration-rounds`。
+>
+> **发展阶段**: R1-R10(基础指标探索)→R11-R30(PSAR/KAMA/VPT发现)→R31-R50(T+1引擎+大规模grid search)→R55-R220(卖出条件优化+ATR旋钮)→R275-R320(RSI+ATR micro-tuning, 0.8662 ceiling)→R350-R526(完全参数穷尽)→R527-R570(ALL-TIME 0.8712)→R1108-R1207(Alpha因子+多时间框架扩展, 78个家族, 1215活跃策略)
 
 ## 已知问题
 
@@ -1021,715 +468,142 @@
 | P28 | **uvicorn --reload杀死后台回测线程** | **已修复** 2026-02-23 — 318个clone-backtest实验提交后, uvicorn因--reload重启杀死了所有daemon线程, 导致271个实验stuck在backtesting. 修复: 1)使用retry-pending API恢复部分, 2)编写standalone fast_process.py脚本一次加载数据处理所有pending策略(节省267次重复数据加载). 建议: 生产环境不用--reload |
 | P29 | **孤儿恢复线程风暴(475线程→连接池耗尽)** | **已修复** 2026-02-26 — `_recover_orphan_backtests()`对每个clone策略启动独立线程, 475个orphan→475线程→QueuePool(15max)耗尽+4GB内存. 修复: 改为单线程顺序处理, 一次加载股票数据复用. 内存10.6%→5.8% |
 | P30 | retry-pending不处理0策略实验 | ⏳低优先 2026-02-27 — DeepSeek实验status=pending但strategy_count=0, retry-pending只处理有pending策略的实验. 这些需要重新POST创建. 15个R31 DeepSeek实验因此stuck |
+| P31 | ATRcalm条件format错误: pct_diff→pct_change | **已修复** 2026-03-12 — `pct_diff`需要compare_field(不同列), ATRcalm应用`pct_change`(与自身历史比较)+`lookback_n:7` |
+| P32 | `volume`字段不在INDICATOR_GROUPS中 | **已修复** 2026-03-12 — 添加`("volume","成交量")`到PRICE group的sub_fields。修复前`volume>volume_ma`条件报"未知指标字段" |
+| P33 | VOLUME_MA indicator不支持 | **已修复** 2026-03-12 — rule_engine.py添加VOLUME_MA group+resolve_column_name; indicator_calculator.py添加volume_ma_periods+_add_volume_ma() |
+| P34 | compare_field="MA_10"格式错误 | **已修复** 2026-03-12 — 正确格式: `compare_field:"MA"`+`compare_params:{"period":10}` |
+| P35 | 条件中使用`lookback`键而非`lookback_n` | **已修复** 2026-03-12 — 规则引擎使用`rule.get("lookback_n")`，条件必须用`lookback_n`不是`lookback` |
+| P36 | **batch-clone buy_conditions override用`threshold`键无效** | **已修复** 2026-03-27 — vectorize_conditions使用`compare_value`不是`threshold`。用`threshold`键会默认为0导致所有策略零交易。正确格式: `{"field":"ATR","operator":"<","compare_type":"value","compare_value":0.091,"params":{"period":14}}` |
+| P37 | **扩展指标field名必须匹配sub_fields** | **已确认** 2026-03-27 — STOCHRSI必须用`STOCHRSI_K`不是`STOCHRSI`; STOCH必须用`STOCH_K`; KELTNER用`KELTNER_lower/upper/middle`; KELTNER params用`length_atr`不是`atr_length` |
 
 ---
 
-## R31: MHD3-10网格扩展 + KAMA/MFI/WR/ROC新指标 (已完成)
-
-**状态**: 已完成 (2026-02-27, ~33h运行)
-**实验**: 312提交(E2770-E3081), 297 done, 15 failed(DeepSeek生成失败)
-**策略**: 486总, 397 done, 89 invalid, **270 StdA+**(68.0%)
-**P29修复**: 孤儿恢复线程风暴bug→单线程顺序处理, 内存降50%
-
-| 族 | Done | StdA+ | StdA% | 最佳Score | 最佳Return | 最低DD | 关键发现 |
-|---|---|---|---|---|---|---|---|
-| **PSAR+MACD+KDJ** | 70 | **70(100%)** | 100% | 0.825 | +256.4% | 5.5% | MHD3-10持平MHD2, 参数穷尽 |
-| **全指标综合** | 60 | **60(100%)** | 100% | 0.823 | +228.3% | 2.1% | MHD4持平MHD15 |
-| **激进版A** | 60 | 56(93%) | 93% | 0.801 | **+517.6%** | 13.9% | MHD2收益爆发! |
-| **三指标共振** | 48 | **48(100%)** | 100% | 0.809 | +204.7% | 10.9% | MHD2-5全达标 |
-| **UltimateOsc** | 27 | **27(100%)** | 100% | 0.772 | +43.2% | **1.2%** | 超低DD |
-| **KAMA(新!)** | 74 | 9(12%) | 12% | **0.791** | +92.3% | 7.6% | **有潜力!** |
-| WR(新) | 25 | 0 | 0% | 0.676 | +14.1% | 4.2% | 已弃 |
-| MFI(新) | 29 | 0 | 0% | 0.662 | +27.3% | 4.2% | 已弃 |
-| ROC(新) | 4 | 0 | 0% | 0.322 | -39.5% | — | 灾难, 已弃 |
-
----
-
-## R28: 极端参数边界探索 (已完成)
-
-**状态**: ✅ 已完成 (2026-02-24 00:43, 725 min)
-**实验**: 318提交, 307 valid, 10 invalid, 244 StdA(旧标准), 184 promoted, StdA+清理后保留
-**实验范围**: E1850-E2167
-
-| 族 | 完成 | StdA | 最佳分 | 最佳回报 | 最低DD | 关键 |
-|---|---|---|---|---|---|---|
-| **PSAR+MACD+KDJ** | 25 | **25(100%)** | **0.825** | **+258.9%** | **5.6%** | **ALL-TIME SCORE+RISK-ADJ** |
-| 三指标共振 | 68 | 62(91%) | 0.803 | +188.6% | 11.2% | TP1 MHD3最佳 |
-| 全指标综合 | 41 | 38(93%) | 0.823 | +225.4% | 10.2% | TP1 MHD1有效 |
-| 保守版B | 78 | 67(86%) | 0.779 | +51.4% | 2.3% | 超保守低DD |
-| UltimateOsc | 15 | 15(100%) | 0.771 | +42.8% | **1.2%** | **DD纪录** |
-| KDJ超短线 | 26 | 24(92%) | 0.704 | +33.7% | 5.3% | 稳定中等 |
-| **PSAR+RSI+KDJ** | 13 | 13(100%) | **0.785** | **+367.4%** | 7.8% | **收益纪录(S3076后发现)** |
-| PSAR三重确认 | 41 | 0(0%) | 0.649 | +9.6% | 2.2% | 需TP≥6 |
-
----
-
-## R29: 7族全面MHD/SL深搜 (已完成)
-
-**状态**: ✅ 已完成 (2026-02-25 03:55, 1060 min)
-**实验**: 298提交, 287 done, 11 invalid, **211 StdA+ (74%)**
-**实验范围**: E2168-E2465
-**策略库**: 清理后 **1,219个** StdA+策略
-
-### 🏆 ALL-TIME RECORDS
-
-**S3431 PSAR+RSI+KDJ 激进版A TP1/SL12/MHD1 = +627.7%, score 0.810, DD 13.9%**
-- **碾压前纪录+367.4% (S3076)**, 收益提升70%!
-- MHD1 = 当日买卖, 极致高频复利
-- DD恒定13.9%, 与SL/MHD完全无关
-
-**S3573 三指标共振 TP1/SL10/MHD1 = score 0.814, +205.9%, DD 11.3%**
-- R29最高评分, 超越R28的0.803 (MHD3)
-- MHD1比MHD3更优(+0.011 score, +17pp return)
-
-### Per-Family R29 Results
-
-| 族 | 实验 | Done | StdA+ | 最佳分 | 最佳回报 | 最低DD | 关键发现 |
-|---|---|---|---|---|---|---|---|
-| **PSAR+RSI+KDJ 激进版A** | 114 | 114 | **101(89%)** | 0.810 | **+627.7%** | 13.9% | **MHD1=终极参数, +627.7%新纪录** |
-| **三指标共振** | 29 | 29 | **29(100%)** | **0.814** | +205.9% | 10.9% | **MHD1最高分0.814, MHD2首测** |
-| **全指标综合** | 15 | 15 | **15(100%)** | 0.807 | +206.2% | 11.0% | TP1-3 MHD2-10, 极稳 |
-| **保守版B** | 45 | 40 | **40(100%)** | 0.724 | +28.3% | 2.1% | TP1-3超低DD |
-| **UltimateOsc** | 20 | 20 | **20(100%)** | 0.759 | +40.4% | 1.2% | TP1-2 MHD1-3, DD保持极低 |
-| **KDJ超短线** | 15 | 15 | 6(40%) | 0.703 | +33.2% | 5.1% | TP1低盈利率, 该族不适合极短TP |
-| **PSAR+ADX+CCI** | 60 | 54 | **0(0%)** | 0.679 | +21.8% | 2.6% | **确认死胡同: TP1-2完全失效** |
-
-### Key Insights
-1. **MHD1是终极参数** — 当日卖出=极致复利, 适用于所有高频族(激进版A/三指标共振/全指标综合)
-2. **DD与MHD/SL完全无关** — 激进版A DD恒定13.9%, 全指标综合~11%, 说明DD完全由买入条件决定
-3. **PSAR+ADX+CCI在TP1-2彻底死亡** — 0/54达StdA+, 该族需TP≥4
-4. **5族100%达StdA+** — 三指标共振/全指标综合/UltimateOsc/保守版B/激进版A(89%)
-
----
-
-## R30: PSAR+MACD+KDJ MHD精扫 + 保守版B扩展 + 多族补缺 (已完成)
-
-**状态**: ✅ 已完成 (2026-02-25 21:28, 787 min)
-**实验**: 300提交, 250 done, 50 invalid, **106 StdA+ (42%)**, 106 promoted
-**实验范围**: E2466-E2769
-**策略库**: 清理后 **1,325个** StdA+策略
-
-### 🏆 NEW ALL-TIME SCORE RECORD
-
-**S3807 PSAR趋势动量_保守版A_SL8_TP10_v2_SL12_TP1_MHD2 = score 0.830, +269.8%, DD 5.2%**
-- 超越R29的0.825(PSAR+MACD+KDJ TP1/SL12/MHD5)和R19的0.825(全指标综合)
-- **MHD2是PSAR+MACD+KDJ的最优MHD** — 隔日卖出优于当日(MHD1)和更长持仓(MHD5)
-- 不同于激进版A(MHD1最优)和三指标共振(MHD1最优), 每族有独立最优MHD
-
-### Per-Family R30 Results
-
-| 族 | 实验 | Done | StdA+ | 最佳分 | 最佳回报 | 最低DD | 关键发现 |
-|---|---|---|---|---|---|---|---|
-| **PSAR+MACD+KDJ** | 50 | 50 | **43(86%)** | **0.830** | **+269.8%** | **5.2%** | **🏆 MHD2新全局最高分! MHD2>MHD5>MHD1** |
-| **保守版B** | 44 | 44 | **40(91%)** | 0.805 | +104.8% | 2.3% | MHD1-3 TP1-3全覆盖, 超低DD |
-| other(补缺) | 156 | 156 | 23(15%) | 0.780 | +239.6% | 12.5% | 各族fix batch, KDJ低位金叉+239.6%惊喜 |
-
-### Key Insights
-1. **MHD2是PSAR+MACD+KDJ的甜蜜点** — 0.830(MHD2)>0.825(MHD5)>0.818(MHD1), 隔日卖出让利润多跑一天
-2. **每族最优MHD不同** — 激进版A/三指标共振→MHD1, PSAR+MACD+KDJ→MHD2, 全指标综合→MHD1-2均可
-3. **保守版B 91%达StdA+** — 44/50, dd最低2.3%, score达0.805
-4. **KDJ低位金叉意外高收益** — fix batch中S3844达+239.6%(TP1/SL12/MHD1), 说明简单策略+极短持仓也能产出高收益
-
----
-
-## R32: KAMA大规模Grid Search + NVI/VPT新指标 (已完成)
-
-> 日期: 2026-02-28 | 模式: auto 500 | 实验: 40(40 done) | 策略: 561(463 done, 98 invalid) | StdA+: **294** | 盈利率: 84%
-
-### 🏆 NEW ALL-TIME SCORE RECORD
-
-**S4900 KAMA终极震荡_中性版D_SL13_TP1_MHD1 = score 0.831, +360.3%, DD 8.9%, 2476笔**
-- 超越R30的0.830(PSAR+MACD+KDJ S3807)
-- KAMA(Kaufman自适应均线) + UltimateOsc双确认, MHD1当日卖出
-- SL13/SL14/SL15均达0.831, SL不敏感, TP1是该族绝对最优
-
-### Per-Family R32 Results
-
-| 族 | 策略数 | Done | StdA+ | 最佳分 | 最佳回报 | 最低DD | 关键发现 |
-|---|---|---|---|---|---|---|---|
-| **KAMA终极震荡** | 45 | 45 | **45(100%)** | **0.831** | +360.3% | 8.9% | **🏆 NEW RECORD! TP1/MHD1全SL达StdA+** |
-| **KAMA突破(6子族)** | 149 | 149 | **149(100%)** | 0.828 | **+389.4%** | 8.9% | 中性版C/D/E+保守版F/G+激进版A 全100% |
-| **KAMA_CCI_RSI** | 40 | 40 | **40(100%)** | 0.741 | +42.9% | **2.8%** | 超低DD, score中等 |
-| **KAMA布林带** | 40 | 35 | 35(88%) | 0.796 | +280.6% | 5.0% | 保守版B(100%), 中性版A(75%) |
-| **KAMA中长线_激进B** | 20 | 20 | **20(100%)** | 0.823 | +168.3% | 6.2% | score达0.82级别 |
-| KAMA中长线(保/中/激A) | 80 | 80 | 0(0%) | 0.692 | +26.6% | 2.4% | TP1-5不适合, 需TP>10 |
-| NVI | 11 | 11 | 1(9%) | 0.719 | +55.8% | 17.9% | 仅1个StdA+, 浅探索 |
-| VPT | 21 | 21 | 0(0%) | 0.570 | +23.5% | 34.0% | 已弃, OBV改进版无效 |
-| STC+KDJ | 10 | 10 | 0(0%) | 0.653 | +59.5% | 30.1% | 已弃 |
-| MFI+KDJ | 20 | 20 | 1(5%) | 0.718 | +33.3% | 18.3% | 弱效果, 浅探索 |
-| WR/ROC | 17 | 17 | 0(0%) | 0.536 | +0.7% | 8.4% | 已弃 |
-| KAMA+PSAR/MACD | 10 | 10 | 3(30%) | 0.772 | +45.2% | 12.4% | 跨家族有潜力 |
-
-### Key Insights
-1. **KAMA终极震荡刷新全局最高分** — 0.831超越PSAR+MACD+KDJ的0.830, 且多个SL值(11-15)均达0.828-0.831
-2. **KAMA是第二大超级策略家族** — 一轮新增294个StdA+, 总计371个. 38个score≥0.82(精英级)
-3. **Grid search在KAMA族同样近100%成功** — 374/388=96.4%, 与PSAR族一致
-4. **VPT/STC/WR/ROC全部确认无效** — 与KDJ/PSAR组合也无法挽救, 彻底标记已弃
-5. **NVI值得后续grid search** — 唯一的1个StdA+(0.719)表明NVI机构追踪理论有效, 但需参数优化
-6. **KAMA中长线不适合低TP** — 80个TP1-5变体0%达标, 中长线策略本质需要更长持仓和更高止盈
-7. **"极短持仓+极低止盈"是A股通用最优策略** — KAMA(TP1/MHD1)、PSAR(TP1/MHD2)、三指标共振(TP1/MHD1)、激进版A(TP1/MHD1)均证实
-8. **R32总结: 1950个策略, 全部已启用**
-
----
-
-## R36: NVI深度Grid + KAMA参数优化 + VPT新探索 (已完成)
-
-> 日期: 2026-02-28 | 模式: auto | 实验: 13(E3282-E3294) | 策略: 74(50 done grid + 24 VPT) | StdA+: **11** | 盈利率: 20%
-
-### 🌟 Key Discovery: VPT+PSAR首次达StdA+
-**S6608 VPT+PSAR+布林带收敛_保守版H = score 0.752, +61.9%, DD 15.3%, 938笔**
-- VPT独立R32失败(0 StdA+), 但与PSAR+布林带组合产出高质量策略
-- 高invalid率(18/24=75%), 但命中的策略质量很高
-
-### Per-Family R36 Results
-
-| 族 | 策略数 | Done | StdA+ | 最佳分 | 最佳回报 | 最低DD | 关键发现 |
-|---|---|---|---|---|---|---|---|
-| **NVI** | 25 | 25 | **8(32%)** | **0.739** | +80.5% | 17.6% | **SL7>SL5! TP18-20最优. SL3太紧(0.67-0.69)** |
-| KAMA突破 | 15 | 15 | 2(13%) | 0.735 | +60.5% | 21.2% | SL12/TP12/MHD15最优. 缩短MHD有效 |
-| KAMA终极 | 10 | 10 | 0(0%) | 0.666 | +54.4% | 24.4% | TP2-10全不达StdA+, TP1/MHD1仍唯一甜蜜点 |
-| **VPT+PSAR** | 1 done | 1 | **1(100%)** | **0.752** | **+61.9%** | 15.3% | **🌟 VPT首个StdA+! 与PSAR组合有效** |
-| VPT+KDJ | 3 done | 3 | 0(0%) | 0.632 | +42.7% | 28.8% | 不达StdA |
-| VPT+MACD | 2 done | 2 | 0(0%) | 0.429 | -14.4% | 42.9% | 全亏, 已弃 |
-
-### Key Insights
-1. **NVI的最优SL是7而非5** — S6512(SL5)为基础, SL7变体(0.731-0.739)显著优于SL3(0.67-0.69)和SL10(0.702-0.712). SL7给予价格更多波动空间
-2. **NVI的最优TP是18-20** — TP20/MHD15(0.739)>TP20/MHD10(0.737)>TP18/MHD10(0.734)>TP15(0.730). NVI需要更宽止盈(vs PSAR的TP1-5)
-3. **VPT独立无效但+PSAR组合有效** — 颠覆R32"VPT已弃"结论, 量价趋势+趋势指标可协同
-4. **KAMA终极震荡TP>1全部失效** — TP2/MHD2(0.666)远低于TP1/MHD1(0.831), 该族必须当日超短线
-5. **KAMA突破短MHD(15<20)有效** — S6576 SL12/TP12/MHD15(0.735) vs 基础SL12/TP16/MHD20(0.790). 参数不同但新方向
-6. **R36新增11个StdA+, 策略库2,708个**
-
----
-
-## R37 结果 (2026-02-28)
-
-**实验**: 8个, 46策略(36 done + 12 invalid), **22个StdA+ (61% of done)**
-
-### Per-Family Results
-
-| Family | Strategies | Done | StdA+ | Best Score | Best Return | Best DD | Notes |
-|--------|-----------|------|-------|-----------|-------------|---------|-------|
-| **VPT+PSAR Grid** | 20 | 20 | **18(90%)** | **0.783** | **+130.7%** | 14.0% | **🏆 新王牌! SL7/TP7/MHD7最优score, SL5/TP3/MHD5最优收益** |
-| NVI+KDJ双确认 | 8 | 3 | 0(0%) | 0.597 | +19.6% | 24.7% | 62.5% invalid, NVI+KDJ无效 |
-| NVI+PSAR追踪 | 8 | 1 | 0(0%) | 0.699 | +167.9% | 38.9% | 87.5% invalid, dd太高 |
-| **NVI SL7 ext TP** | 5 | 5 | **4(80%)** | **0.757** | **+79.7%** | 14.6% | **NVI新最高分! TP16-25均有效** |
-| NVI SL7 short TP | 5 | 5 | 0(0%) | 0.700 | +54.9% | 19.1% | TP1-10不达StdA, NVI需TP>=15 |
-
-### Key Insights
-1. **VPT+PSAR是A股第三大超级家族** — 90% StdA+率仅次于全指标综合(100%)和PSAR趋势动量(100%). 最优: SL7-12/TP5-15/MHD7-15
-2. **VPT+PSAR短周期最强** — SL7/TP7/MHD7=0.783(+102.6%), SL5/TP3/MHD5=+130.7%. 短止盈高频交易极其有效
-3. **NVI SL7/TP25/MHD15=0.757** — NVI新纪录! 超越R36的0.739(SL7/TP20/MHD15). NVI需宽止盈(TP>=15)
-4. **NVI+KDJ/PSAR跨家族组合无效** — DeepSeek生成高invalid率(62-87%), done策略不达StdA. NVI不适合与其他指标组合
-5. **R37新增22个StdA+, 策略库2,730个**
-
----
-
-## R38 结果 (2026-02-28)
-
-**实验**: 9个(含1个MFI+PSAR重复), 63策略(36 done + 27 invalid), **14个StdA+ (39% of done)**
-
-### Per-Family Results
-
-| Family | Strategies | Done | StdA+ | Best Score | Best Return | Best DD | Notes |
-|--------|-----------|------|-------|-----------|-------------|---------|-------|
-| **VPT+PSAR极端Grid** | 15 | 15 | **14(93%)** | **0.795** | **+259.0%** | 12.1% | **🏆 S6672=0.795(SL12/TP8/MHD10)新VPT+PSAR最高分! S6662=+259.0%(SL10/TP1/MHD3)!** SL3太紧 |
-| STC+KDJ | 8 | 2 | 0(0%) | 0.395 | -21.4% | 41.2% | 75%invalid, 全亏. STC已弃 |
-| STC+PSAR | 8 | 7 | 0(0%) | 0.548 | +46.3% | 50.4% | dd>50%, STC已弃 |
-| MFI+KDJ | 8 | 4 | 0(0%) | 0.600 | +25.1% | 29.9% | 50%invalid, 接近但不达StdA |
-| MFI+PSAR | 16 | 8 | 0(0%) | 0.573 | +13.6% | 30.2% | MFI在A股无效 |
-| VPT+综合 | 8 | 0 | 0(0%) | — | — | — | 100%invalid |
-
-### Key Insights
-1. **VPT+PSAR SL12/TP8/MHD10=0.795** — 新VPT+PSAR最高分! SL12提供更大空间, TP8+MHD10是最佳平衡点
-2. **VPT+PSAR SL10/TP1/MHD3=+259.0%** — VPT+PSAR家族最高收益! 超短线极其有效
-3. **STC和MFI在A股完全无效** — STC全亏(dd>40%), MFI最好0.600. 两指标均标记已弃
-4. **VPT+全指标综合过于复杂** — DeepSeek无法处理5+指标, 100%invalid
-5. **SL3对VPT+PSAR太紧** — SL3/TP7/MHD7(0.709/dd21.1%)和SL3/TP5/MHD5(0.635/dd28.4%)都被SL挤出
-6. **R38新增14个StdA+, 策略库2,744个**
-
----
-
-## R39 结果 (2026-02-28)
-
-**实验**: 6个, 33策略(25 done + 17 invalid), **10个StdA+ (40% of done)**
-
-### Per-Family Results
-
-| Family | Strategies | Done | StdA+ | Best Score | Best Return | Best DD | Notes |
-|--------|-----------|------|-------|-----------|-------------|---------|-------|
-| **VPT+PSAR SL12精调** | 5 | 5 | **5(100%)** | **0.787** | **+130.1%** | 12.5% | **S6734=0.787(SL12/TP7/MHD7). 100% StdA+!** |
-| **VPT+PSAR SL10精调** | 5 | 5 | **5(100%)** | **0.785** | **+145.8%** | 13.8% | **S6739=+145.8%(SL10/TP5/MHD7). 100% StdA+!** |
-| WR+KDJ | 8 | 3 | 0(0%) | — | — | — | 62.5%invalid, 全亏. WR+KDJ已弃 |
-| WR+PSAR | 8 | 6 | 0(0%) | 0.729 | +21.3% | 29.3% | dd>25%, 不达StdA. WR已弃 |
-| ROC+KDJ | 8 | 4 | 0(0%) | 0.683 | +12.8% | 20.1% | 50%invalid, score不达0.70 |
-| ROC+PSAR | 8 | 2 | 0(0%) | 0.747 | +22.1% | 28.1% | 75%invalid, dd>25%. ROC已弃 |
-
-### Key Insights
-1. **VPT+PSAR 100% StdA+率持续** — R39精调10/10 StdA+(100%), R37-R39合计42/45(93.3%). 超级家族地位巩固
-2. **VPT+PSAR SL12/TP7/MHD7=0.787** — 精调确认TP7-8/MHD7-10为最优区间
-3. **WR在A股完全无效** — 62.5%invalid, done策略全亏或dd>25%. WR标记已弃
-4. **ROC在A股无效** — 高invalid率(50-75%), done策略dd>25%或score<0.70. ROC标记已弃
-5. **新指标探索已穷尽** — 未探索指标剩余0个. 后续重点: 已证实家族深度优化 + 跨家族组合
-6. **R39新增10个StdA+, 策略库2,754个**
-
-## R40 结果 (2026-03-01) — 5-Family Grid Search (StdA+升级后首轮)
-
-> 新StdA+标准: score≥0.75, return>60%, dd<18%, trades≥50, **win_rate>60%**
-
-| Family | Configs | Done | StdA+ | Rate | Best Score | Best Return | Best DD | Notes |
-|--------|---------|------|-------|------|-----------|-------------|---------|-------|
-| **MACD+RSI** | 100 | 100 | **73** | **73%** | **0.805** | **+199.3%** | 10.2% | **🏆 从28→73+! TP2-5/MHD3-15最优, score创该族新高** |
-| **VPT+PSAR** | 150 | 150 | **142** | **95%** | 0.797 | +110.0% | 12.6% | 超级家族继续, SL7-12/TP5-10/MHD7-12 |
-| **PSAR终极震荡** | 80 | 80 | 15 | 19% | 0.783 | +96.7% | 11.9% | 从1策略→15 StdA+, TP=10唯一最优 |
-| PSAR+RSI+KDJ | 64 | 64 | 0 | 0% | 0.728 | +169.5% | 25.5% | TP3+全死, 该族仅TP1-2有效 |
-| NVI | 80 | 80 | 3 | 4% | 0.758 | +88.1% | 16.6% | SL5-8/TP25/MHD10, 依旧弱 |
-
-### Key Insights
-1. **MACD+RSI大逆转** — 从28个策略(旧StdA)到73个StdA+(新标准). TP2/5/MHD5最优, score 0.805. 之前被低估, grid search揭示其真正实力
-2. **VPT+PSAR 95% StdA+确认** — R37-R40合计184/195 StdA+(94.4%). 超级家族地位无可撼动
-3. **PSAR终极震荡首次大规模探索** — TP=10是唯一有效止盈, SL5-12均可. 从单策略扩展到15个StdA+
-4. **PSAR+RSI+KDJ TP3+确认死亡** — 64个变体0达StdA+, dd全>25%. 该族只能用TP1-2
-5. **NVI持续边缘** — 仅SL5-8/TP25/MHD10这一极窄窗口有3个StdA+. 不建议继续投入
-6. **R40新增233个StdA+, 策略库从1,617→1,850**
-
-## R41 结果 (2026-03-01) — 5-Family Extreme & Fine-Tune Grid (338 strategies)
-
-| Family | Configs | Done | StdA+ | Rate | Best Score | Best Return | Best DD | Notes |
-|--------|---------|------|-------|------|-----------|-------------|---------|-------|
-| **MACD+RSI extreme** | 18 | 18 | **18** | **100%** | 0.794 | +160.5% | 11.9% | **TP1-2/MHD1-3全部达标! 100% StdA+** |
-| **三指标共振** | 100 | 100 | **81** | **81%** | **0.808** | **+189.4%** | 12.6% | **🏆 R41最高分! TP1-5/MHD1-7均可** |
-| PSAR终极震荡 fine | 64 | 64 | **44** | **68.8%** | 0.795 | +111.2% | 10.8% | TP8-12精调成功, 从15→59 StdA+ |
-| PSAR趋势动量 extreme | 60 | 60 | **44** | **73.3%** | 0.783 | +147.6% | 9.8% | TP1-3极端参数有效 |
-| UltimateOsc expand | 96 | 96 | 0 | 0% | 0.693 | +60.3% | 17.7% | KAMA终极震荡 T+1确认死亡 |
-
-### Key Insights
-1. **MACD+RSI TP1-2极端参数100% StdA+** — 18/18全部达标! TP1/TP2+MHD1-3均有效. 该族从R40的73%提升到极端参数区100%
-2. **三指标共振大爆发** — 81/100 StdA+(81%), score 0.808, 仅次于全指标综合(0.829). TP1-5宽容, MHD1-7短持仓最优
-3. **PSAR终极震荡精调大成功** — 从R40的15个→R41新增44个(累计59), TP8-12全面有效, 68.8%达标率
-4. **PSAR趋势动量极端参数73.3%** — TP1-3/MHD1-5均可, 从之前仅TP5区间大幅扩展
-5. **KAMA终极震荡T+1确认死亡** — 96个UltimateOsc扩展变体0达StdA+, KAMA终极震荡在T+1下彻底无效
-6. **R41新增187个StdA+, 策略库从1,850→2,037**
-
-## R42 结果 (2026-03-01) — 4-Family Gap-Fill Grid (328 strategies)
-
-| Family | Configs | Done | StdA+ | Rate | Best Score | Best Return | Best DD | Notes |
-|--------|---------|------|-------|------|-----------|-------------|---------|-------|
-| **VPT+PSAR TP1-4/8-9** | 120 | 120 | **103** | **85.8%** | 0.796 | **+269.8%** | 12.2% | **🏆 新回报记录! TP1-4/8-9全面有效** |
-| 三指标共振 TP6-10 | 100 | 100 | 43 | 43.0% | 0.792 | +110.8% | 15.3% | TP6-10远不如TP1-5 |
-| **全指标综合 TP10-13** | 48 | 48 | **48** | **100%** | **0.824** | +129.5% | 12.2% | **TP10-15全100% StdA+!** |
-| **PSAR趋势动量 TP3-5** | 60 | 60 | **60** | **100%** | 0.799 | +145.6% | 10.2% | **TP3-5/MHD6-15全100%!** |
-
-### Key Insights
-1. **全指标综合TP10-13全100% StdA+** — 48/48! 之前已知TP14-15=100%, 现在TP10-15都是100%. Score 0.824接近全时最高0.829
-2. **PSAR趋势动量100% StdA+** — TP3-5/MHD6-15全部60/60达标. 从之前仅TP5区间大幅扩展, 该族参数空间极宽
-3. **VPT+PSAR TP1-4/8-9大成功** — 85.8% StdA+, 回报达+269.8%! TP1-9几乎全有效(原来只探索TP7)
-4. **三指标共振TP6-10表现平庸** — 43% StdA+, 远不如TP1-5(81%). TP6-10该族最优区间确认为TP1-5
-5. **VPT+PSAR新回报记录**: +269.8% — 可能是该族新的收益王
-6. **R42新增254个StdA+, 策略库从2,037→2,291**
-
-## R43 结果 (2026-03-01) — 4-Family Gap-Fill Grid II (280 strategies)
-
-| Family | Configs | Done | StdA+ | Rate | Best Score | Best Return | Best DD | Notes |
-|--------|---------|------|-------|------|-----------|-------------|---------|-------|
-| VPT+PSAR TP11-15 | 80 | 80 | 24 | 30.0% | 0.777 | +86.3% | 13.0% | TP11-15远不如TP1-10, 该族高TP不优 |
-| MACD+RSI TP6-10 | 80 | 80 | 42 | 52.5% | 0.786 | +127.4% | 15.1% | TP6-10中等, 不如TP1-5 |
-| **全指标综合 TP4-9** | 60 | 60 | **60** | **100%** | **0.820** | +163.8% | 12.6% | **TP4-15全100%! 最宽参数空间** |
-| **PSAR趋势动量 TP6-10** | 60 | 60 | **60** | **100%** | **0.806** | +156.3% | 10.6% | **TP1-10全100%! 第二宽参数空间** |
-
-### Key Insights
-1. **全指标综合 TP4-15全100% StdA+** — 从R42的TP10-15扩展到TP4-15, 12个TP值全部100%. 该族是绝对参数王
-2. **PSAR趋势动量 TP1-10全100%** — R42(TP3-5)+R43(TP6-10)都是100%. 10个TP值+宽MHD范围, 几乎不可能失败
-3. **VPT+PSAR TP11-15仅30%** — 高TP在该族表现差, 确认TP1-10为最优区间, TP11+可以放弃
-4. **MACD+RSI TP6-10中等52.5%** — 不如TP1-5(73-100%), 该族最优区间确认TP1-5
-5. **R43新增186个StdA+, 策略库从2,291→2,477**
-
-## R44 结果 (2026-03-01) — 4-Family Extended TP & KAMA (216 strategies)
-
-| Family | Configs | Done | StdA+ | Rate | Best Score | Best Return | Best DD | Notes |
-|--------|---------|------|-------|------|-----------|-------------|---------|-------|
-| KAMA突破 TP4-16 | 72 | 72 | 8 | 11.1% | 0.762 | +92.8% | 15.1% | 窄甜区TP4-6才有效, 整体弱族 |
-| **全指标综合 TP1-3 short MHD** | 48 | 48 | **48** | **100%** | **0.801** | +181.2% | 11.4% | **TP1-15全100%! 彻底确认参数无敌** |
-| **PSAR趋势动量 TP11-15** | 48 | 48 | **48** | **100%** | **0.808** | +143.5% | 11.2% | **TP1-15全100%! 与全指标综合并列** |
-| PSAR终极震荡 TP13-18 | 48 | 48 | 42 | 87.5% | 0.790 | +96.4% | 9.1% | TP13-15优(87.5%), TP16-18待确认 |
-
-### Key Insights
-1. **全指标综合 TP1-15 ALL 100% StdA+** — R44确认TP1-3(short MHD3-5)也100%, 该族TP1-15全覆盖, 15个TP值100%, 无可争议的参数王
-2. **PSAR趋势动量 TP1-15 ALL 100%** — R44确认TP11-15也100%, 该族TP1-15全覆盖, 15个TP值, 与全指标综合并列
-3. **KAMA突破仅11.1%** — 72个变体仅8个达标, TP4-6/SL10-12/MHD10-15极窄甜区, 确认KAMA是弱族
-4. **PSAR终极震荡扩展TP87.5%** — TP13-18范围中TP13-15优, 延伸了R41(68.8%)的高TP
-5. **R44新增146个StdA+, 策略库从2,477→2,623**
-
-## R45 结果 (2026-03-01) — 4-Family Gap-Fill Final (100 strategies)
-
-| Family | Configs | Done | StdA+ | Rate | Best Score | Best Return | Best DD | Notes |
-|--------|---------|------|-------|------|-----------|-------------|---------|-------|
-| **MACD+RSI TP1/4/5** | 36 | 36 | **35** | **97.2%** | **0.817** | +198.4% | 11.0% | **TP4=新甜区! MACD+RSI历史最高分** |
-| **三指标共振 TP1/4/6** | 36 | 36 | **32** | **88.9%** | **0.809** | +187.7% | 13.0% | TP4也是该族甜区 |
-| PSAR+RSI+KDJ TP2 | 12 | 12 | 0 | 0% | 0.725 | +175.6% | 24.2% | dd>24%, TP2推高回撤 |
-| VPT+PSAR TP6 | 16 | 16 | 15 | 93.8% | 0.785 | +105.3% | 13.5% | 填补TP6空白 |
-
-### Key Insights
-1. **MACD+RSI TP4 score=0.817** — 该族历史最高! TP4/SL12/MHD5是最优配置, 接近0.82级别
-2. **三指标共振 TP4 score=0.809** — TP4也是该族甜区, 加上TP1-5+TP6=88.9%, 参数空间宽
-3. **PSAR+RSI+KDJ TP2: 0% StdA+** — dd全部>24%, 确认TP1是唯一有效窗口, TP2推高回撤
-4. **VPT+PSAR TP6: 93.8%** — 填补TP5和TP7之间空白, TP1-10确认连续有效
-5. **R45新增82个StdA+, 策略库从2,623→2,705**
-
-## R46 结果 (2026-03-01) — MHD Expansion + TP Boundary Tests (99 strategies)
-
-| Family | Configs | Done | StdA+ | Rate | Best Score | Best Return | Best DD | Notes |
-|--------|---------|------|-------|------|-----------|-------------|---------|-------|
-| **MACD+RSI TP2-3 MHD5-15** | 24 | 24 | **24** | **100%** | **0.812** | +197.7% | 10.0% | **TP2-5 wide MHD全100%!** |
-| 三指标共振 TP12-14 | 27 | 27 | 2 | 7.4% | 0.775 | +67.0% | 17.7% | 高TP该族无效, TP1-6唯一 |
-| PSAR终极震荡 TP1-7 | 36 | 36 | 0 | 0% | 0.745 | +52.5% | 6.5% | 低TP该族无效! TP8+才行 |
-| **MACD+RSI TP4 MHD7/15/20** | 12 | 12 | **12** | **100%** | **0.805** | +173.7% | 12.3% | TP4 MHD扩展完美 |
-
-### Key Insights
-1. **MACD+RSI TP2-5 ALL 100%** — MHD 3-15全范围有效, 该族在TP2-5/SL7-12/MHD3-15全参数空间100% StdA+
-2. **三指标共振 TP12-14仅7.4%** — 高TP该族无效, 确认TP1-6为唯一有效范围
-3. **PSAR终极震荡 TP1-7: 0%** — 低TP无效! 该族需TP8+才能工作, 确认TP8-18是唯一范围
-4. **MACD+RSI approaching 全指标综合 level** — TP2-5全100%, 几乎任意SL/MHD组合都达标
-5. **R46新增38个StdA+, 策略库从2,705→2,743**
-
-## R47 结果 (2026-03-01) — FINAL Grid Search: MHD Expansion (81 strategies)
-
-| Family | Configs | Done | StdA+ | Rate | Best Score | Best Return | Best DD | Notes |
-|--------|---------|------|-------|------|-----------|-------------|---------|-------|
-| **MACD+RSI TP1/5 MHD** | 18 | 18 | **18** | **100%** | **0.801** | +174.8% | 9.6% | TP1 MHD7/15/20 + TP5 MHD7/15/20 全100% |
-| **三指标共振 TP2-5 MHD** | 27 | 27 | **24** | **88.9%** | **0.808** | +189.4% | 12.6% | **TP3/MHD3=0.808!** TP5/MHD3=dd>18% |
-| **VPT+PSAR TP1-10 MHD** | 36 | 36 | **34** | **94.4%** | **0.799** | +269.8% | 12.6% | TP1-8 MHD15/20全达标, TP10 MHD15边缘 |
-
-### Key Insights
-1. **MACD+RSI TP1-5 ALL 100%** — R47确认TP1 MHD7-20也100%, 该族TP1-5/SL7-12/MHD3-20全空间100%
-2. **三指标共振 TP3/MHD3 score=0.808** — 与R35的TP2/MHD7(0.789)对比, TP3+短MHD更优
-3. **三指标共振 TP5/MHD3 dd>18%** — 短MHD+高TP推高回撤, MHD3仅TP2-3安全
-4. **VPT+PSAR MHD expansion成功** — TP1-8 MHD15/20全达标, 确认该族MHD3-20宽范围有效
-5. **VPT+PSAR TP1/MHD3 ret=+269.8%** — 该族最高收益, 超短持仓+极低止盈依然是收益王
-6. **Grid search COMPLETE** — 47轮, 3,351实验, 2,819策略. 所有主要族的TP/SL/MHD空间已穷尽
-7. **R47新增76个StdA+, 策略库从2,743→2,819**
-
-## R48 结果 (2026-03-01) — New Indicator Exploration: MFI/WR/ROC/STC (128 strategies)
-
-| Indicator | Experiments | Generated | Done | Invalid | StdA+ | Best Score | Notes |
-|-----------|------------|-----------|------|---------|-------|-----------|-------|
-| **MFI** | 4 | 32 | 21 | 10 (31%) | 0 | 0.700 | MFI+PSAR最佳, ret仅+28.7% |
-| **WR** | 4 | 32 | 11 | 21 (66%) | 0 | 0.650 | 高invalid率, 弱信号 |
-| **ROC** | 4 | 32 | 0 | **31 (100%)** | 0 | N/A | **DeepSeek完全失败** |
-| **STC** | 4 | 32 | 4 | **28 (88%)** | 0 | 0.592 | 近全invalid |
-| **Total** | **16** | **128** | **36** | **90 (70%)** | **0** | **0.700** | **全部失败** |
-
-### Key Insights
-1. **MFI最接近但不达标** — MFI_PSAR_中性版B score=0.700, ret=+28.7%, dd=11.8%. 距StdA+(0.75/60%)差距太大, grid search无法弥补
-2. **ROC 100% invalid** — DeepSeek完全无法生成有效ROC策略. ROC列名或条件格式不兼容
-3. **STC 88% invalid** — 类似ROC, DeepSeek对STC列名处理失败
-4. **WR 66% invalid** — 即使有效的策略, best=0.650仍远低于阈值
-5. **MFI+KDJ全亏** — 7个策略全部负收益(-6%到-40%), MFI+KDJ组合无效
-6. **结论: MFI→已探索(弱), WR→已弃, ROC→已弃, STC→已弃**
-7. **R48: 0 StdA+新增, 策略库保持2,819不变**
-
-## R49 结果 (2026-03-01) — Cross-Family Hybrid Exploration (93 strategies)
-
-| Combo | Exp | Done | Invalid | StdA+ | Best Score | Best Ret | Best DD | Notes |
-|-------|-----|------|---------|-------|-----------|----------|---------|-------|
-| **ULTOSC+PSAR** | E3368 | 7 | 1 | **1** | **0.803** | **+110.4%** | 13.4% | **突破!** 激进版B达StdA+ |
-| ULTOSC+MACD | E3369 | 8 | 0 | 0 | 0.677 | +52.9% | 24.6% | 接近但dd超标 |
-| KELTNER+MACD | E3370 | 0 | 8 | 0 | N/A | — | — | 全invalid |
-| KELTNER+KDJ | E3371 | 8 | 0 | 0 | 0.700 | +95.1% | 30.6% | score达标但dd超标 |
-| ATR+KDJ | E3372 | 8 | 0 | 0 | 0.529 | +23.0% | 39.8% | 表现很差 |
-| ATR+PSAR | E3373 | 2 | 5 | 0 | 0.524 | +28.9% | 54.1% | 高invalid+高dd |
-| BOLL缩口+KDJ | E3374 | 0 | 8 | 0 | N/A | — | — | 全invalid |
-| BOLL%B+MACD | E3375 | 6 | 2 | 0 | 0.533 | -0.8% | 24.5% | 几乎全亏 |
-| ULCER+PSAR | E3376 | 3 | 5 | 0 | 0.605 | +46.1% | 42.5% | 高dd |
-| CCI+KDJ | E3377 | 4 | 4 | 0 | 0.566 | +10.1% | 24.7% | 弱 |
-| STOCH+PSAR | E3378 | 1 | 6 | 0 | 0.454 | +0.3% | 44.8% | 几乎全invalid |
-| STOCHRSI+BOLL%B | E3379 | 0 | 7 | 0 | N/A | — | — | 全invalid |
-| **Total** | **12** | **47** | **46** | **1** | **0.803** | **+110.4%** | **13.4%** | **ULTOSC+PSAR唯一突破** |
-
-### Key Insights
-1. **ULTOSC+PSAR是唯一成功的跨族组合** — score=0.803, ret=+110.4%, dd=13.4%, trades=240. ULTOSC震荡超卖+PSAR趋势反转协同效果好
-2. **KELTNER+KDJ接近但dd过高(30.6%)** — score 0.700, ret +95.1%但回撤太大, 不适合StdA+
-3. **ULTOSC+MACD也接近(0.677)** — 差距不大, 可能值得grid search, 但优先ULTOSC+PSAR
-4. **3/12跨族组合全invalid(25%)** — KELTNER+MACD, BOLL缩口+KDJ, STOCHRSI+BOLL%B DeepSeek无法生成
-5. **ATR作为过滤器无效** — ATR+KDJ和ATR+PSAR均表现很差, ATR波动过滤不增加alpha
-6. **大多数跨族组合不如单族优化策略** — 已优化的单族(PSAR+MACD+KDJ, 全指标综合)仍然占优
-7. **R49: +1 StdA+新增(ULTOSC_PSAR_激进版B S8817), 策略库2,820个**
-
-## R50 结果 (2026-03-01) — ULTOSC+PSAR Grid Search (60 configs)
-
-Source: S8817 ULTOSC_PSAR_激进版B (score=0.803, ret=+110.4%, dd=13.4%, TP30/SL7/MHD8)
-Grid: SL{7,10,12} × TP{1,3,5,8,10} × MHD{3,7,10,15}
-
-| TP | Configs | Done | StdA+ | Avg Score | Avg Ret | Avg DD | Notes |
-|----|---------|------|-------|-----------|---------|--------|-------|
-| TP1 | 12 | 11 | 0 | 0.709 | +42.7% | 4.8% | 超低dd但ret不足 |
-| TP3 | 12 | 9 | 0 | 0.724 | +49.3% | 7.4% | ret仍不够 |
-| TP5 | 12 | 12 | 0 | 0.721 | +46.6% | 7.6% | 不如TP3! |
-| **TP8** | 12 | 12 | **5** | **0.752** | **+64.5%** | 10.0% | 有效区 |
-| **TP10** | 12 | 12 | **7** | **0.760** | **+70.7%** | 10.9% | **最优** |
-| **Total** | **60** | **56** | **12 (21%)** | 0.733 | +54.8% | 8.1% | |
-
-### Key Insights
-1. **TP10是ULTOSC+PSAR最优止盈** — avg 0.760 >> TP8(0.752) >> TP5(0.721). 与原始TP30相比, TP10虽然score略低(0.777 vs 0.803)但参数空间更稳定
-2. **MHD15对高TP至关重要** — 前3名都是MHD15. MHD7也有效但ret更低. MHD3下TP10 score=0.769但ret仅+56.4%(不达StdA+)
-3. **SL12 > SL7 > SL10在TP10下** — SL12(0.777) > SL7(0.768) > SL10(0.760). 宽止损给ULTOSC更多波动空间
-4. **TP1-5全部不达StdA+** — 与PSAR+MACD+KDJ/三指标共振不同, ULTOSC+PSAR需要更宽止盈才能获得足够收益
-5. **dd与TP正相关但控制良好** — TP10 avg dd=10.9%, TP1 avg dd=4.8%. 即使最高dd也仅14.8%, 远低于18%阈值
-6. **原始S8817(TP30)仍是单策略最佳** — grid search未超越原始score(0.803). 但grid search发现了更稳健的参数区间(TP8-10)
-7. **R50: +12 StdA+新增, 策略库2,832个**
-
-## R51 结果 (2026-03-01) — ULTOSC+PSAR TP12-20 Extended Grid + DeepSeek Combos
-
-### Part 1: ULTOSC+PSAR TP12-20 Grid (33 configs from E3381+E3382)
-
-Source: S8817 ULTOSC_PSAR_激进版B. Grid: SL{7,10,12} × TP{12,15,20} × MHD{7,10,15} + SL{7,12} × TP10 × MHD{20,25,30}
-
-| TP | Configs | Done | StdA+ | Avg Score | Best Score | Best Ret | Notes |
-|----|---------|------|-------|-----------|------------|----------|-------|
-| TP10(MHD20-30) | 6 | 6 | 2 | 0.746 | 0.753 | +82.0% | 长MHD有效但dd偏高(16-18%) |
-| **TP12** | 9 | 8 | **8** | **0.770** | **0.790** | **+105.2%** | 100% StdA+! |
-| **TP15** | 9 | 9 | **9** | **0.767** | **0.780** | +88.7% | 100% StdA+! |
-| **TP20** | 9 | 9 | **9** | **0.780** | **0.793** | +102.9% | **100% StdA+, 最高分!** |
-| **Total** | **33** | **32** | **28 (87.5%)** | 0.768 | 0.793 | +105.2% | |
-
-### Part 2: DeepSeek Cross-Family Combos (5 experiments, E3383-E3387)
-
-| Experiment | Theme | Done | Best Score | Best Ret | Notes |
-|------------|-------|------|------------|----------|-------|
-| E3383 | VPT+ULTOSC | 6/8 | 0.635 | +51.2% | VPT+EMA有效但dd高(37%) |
-| E3384 | KELTNER+MACD | 8/8 | 0.587 | +8.9% | 全部亏损或低收益 |
-| E3385 | BOLL%B+MACD | 4/8 | 0.563 | +0.0% | 4个信号爆炸, 其余0交易或亏损 |
-| E3386 | ATR+KDJ超卖反弹 | 4/8 | 0.630 | +27.9% | 4个信号爆炸, 有效的dd过高 |
-| E3387 | ULTOSC+MACD优化 | 7/8 | 0.640 | +17.9% | 多数0交易或亏损 |
-
-### Key Insights
-1. **TP20是ULTOSC+PSAR最优止盈** — avg 0.780 > TP15(0.767) > TP12(0.770) > TP10(0.760). TP20/MHD15组合=0.793(新记录), 超越TP10(0.777)
-2. **TP12-20全部100% StdA+** — 26/26(不含MHD扩展), 证明ULTOSC+PSAR在TP12+区间极度稳健
-3. **最佳单配置: SL12/TP20/MHD15 = 0.793** (ret=+102.9%, dd=11.2%, trades=204), 仅次于原始TP30(0.803)
-4. **MHD15仍是最优持仓期** — MHD15平均score >> MHD10 > MHD7. MHD20-30 dd偏高(16-18%)
-5. **DeepSeek新方向全部失败** — 5个实验0个StdA+, 确认A股可行策略高度集中在已发现的族群
-6. **ULTOSC+PSAR参数空间已完全探索** — TP1-30 × SL5-12 × MHD3-30全覆盖, 最优区: TP10-20/SL7-12/MHD15
-7. **R51: +32 promoted (28 StdA+, 4 StdA), 策略库2,864个**
-
-## R52 结果 (2026-03-02) — 浅探索指标全面测试 (NVI/MFI/WR/STC/ROC + KDJ_5_2_2)
-
-25 experiments (E3388-E3412), 200 strategies, 112 done, 88 invalid (signal explosions), **0 StdA+**
-
-### Per-Indicator Results
-
-| Indicator | Done | Valid | Profitable | Best Score | Best Ret | Best DD | Notes |
-|-----------|------|-------|-----------|-----------|----------|---------|-------|
-| NVI | 8 | 8 | 2 (25%) | 0.631 | +2.2% | 5.0% | 几乎全部信号爆炸, NVI确认已弃 |
-| MFI | 33 | 33 | 4 (12%) | 0.653 | +30.6% | 21.4% | MFI+PSAR+VPT最佳但不达标 |
-| **WR** | 26 | 25 | **8 (32%)** | **0.729** | **+155.9%** | **30.1%** | WR+PSAR最佳, dd超标 |
-| **STC** | 20 | 20 | **11 (55%)** | 0.657 | +204.5% | 45.0% | 最高盈利率但dd太高 |
-| ROC | 7 | 7 | 4 (57%) | 0.608 | +52.0% | 44.0% | 有潜力但dd不可控 |
-| KDJ_5_2_2 | 8 | 8 | 1 (12%) | 0.519 | +20.7% | 41.8% | 非标准周期不优于默认 |
-| other | 10 | 7 | 3 (43%) | 0.604 | +14.9% | 23.9% | 空theme实验的随机策略 |
-
-### Key Insights
-1. **浅探索指标全部确认失败** — NVI/MFI/WR/STC/ROC单独或与KDJ/PSAR/MACD组合均无法达到StdA+
-2. **WR+PSAR有高收益潜力(+155.9%)但dd不可控(30.1%)** — 唯一score>0.70的是ES9153, 差2.1%dd
-3. **STC盈利率最高(55%)但全部高dd(38-45%)** — STC本身是有效震荡指标, 但A股波动太大
-4. **NVI在A股完全无效** — 32/40策略信号爆炸, NVI的"低量日"逻辑不适合A股
-5. **KDJ_5_2_2非标准周期不优于默认9_3_3** — 超短线KDJ5金叉最佳仅+20.7%, 远低于标准KDJ
-6. **ROC虽然有57%盈利率但dd全部>40%** — 动量指标在A股需要更强的止损机制
-7. **所有浅探索指标应标记为已弃** — NVI(已弃), MFI(已弃), WR(浅探索→已弃), STC(浅探索→已弃), ROC(浅探索→已弃)
-8. **R52: 0 promoted, 策略库仍为2,864个**
-
-## R53 结果 (2026-03-02) — R52最佳候选Grid Search
-
-7 experiments (E3414-E3420), 240 strategies, **240 done, 0 invalid, 0 StdA+, 0 StdA**
-
-Grid targets: WR_PSAR_中性版E (80 configs), STC_MACD共振_中性版E (80 configs), MFI+KDJ+PSAR+VPT_保守版H (80 configs)
-
-| Family | Configs | Best Score | Best Ret | Best DD | Key Finding |
-|--------|---------|-----------|----------|---------|-------------|
-| WR_PSAR_中性版E | 80 | **0.754** | +192.3% | **26.5%** | Score达标但dd>25%, SL12/TP18/MHD20 |
-| STC_MACD共振_中性版E | 80 | 0.629 | +44.5% | 29.3% | Score太低, dd太高 |
-| MFI+KDJ+PSAR+VPT_保守版H | 80 | 0.682 | +40.6% | **20.7%** | dd达标但score不足(0.682<0.70) |
-
-### Key Insights
-1. **WR_PSAR score=0.754 但dd无法降至25%以下** — 80个参数组合, 最低dd=25.9%, 本质上WR信号产生的交易dd不可控
-2. **MFI+KDJ+PSAR+VPT dd良好(19-21%)但score上限0.682** — 受限于MFI信号质量, 无法突破0.70
-3. **Grid search对R52候选无效** — 这些策略的瓶颈不在exit参数, 而在信号质量本身
-4. **R53确认: 所有非核心族群已彻底探索完毕** — 核心族群(全指标综合/PSAR趋势/MACD+RSI等)之外无新增可能
-5. **R53: 0 promoted, 策略库仍为2,864个**
-
-## R55-R66 结果 (2026-03-03) — MHD全参数Mapping + Bug Fix
-
-12轮连续grid search, E3432-E3488 (57 experiments), ~494 strategies total, ~444 StdA+ (~90%)
-
-### Round Summary
-
-| Round | Exps | Strategies | StdA+ | Rate | Best Score | Best Ret | Focus |
-|-------|------|-----------|-------|------|------------|----------|-------|
-| R55 | 8 | ~60 | 56 | ~93% | 0.810 | +98.0% | 5族MHD11-20精扫 |
-| R56 | 8 | ~75 | 69 | ~92% | 0.813 | +104.9% | 5族MHD21-30精扫 |
-| R57 | 5 | ~65 | 58 | ~89% | 0.798 | +88.1% | VPT+PSAR MHD/SL扩展 |
-| R58 | 3 | ~45 | 40 | ~89% | 0.774 | +93.6% | TP is NO-OP发现 |
-| R59 | 4 | ~35 | 29 | ~83% | 0.808 | +85.8% | 5族SL精细搜索 |
-| R60 | 8 | 72 | 58 | 81% | 0.812 | +108.1% | 全指标综合SL9/MHD扩展 |
-| R61 | 5 | 43 | 30 | 70% | 0.798 | +90.0% | VPT+PSAR SL7-12极端参数 |
-| R62 | 4 | 50 | 41 | 82% | 0.812 | +86.7% | MACD+RSI MHD全范围 |
-| R63 | 4 | 45 | 32 | 71% | 0.807 | +103.8% | 三指标共振SL精扫 |
-| R64 | 3 | 36 | 36 | **100%** | 0.808 | +84.5% | 全指标综合TP16-25 |
-| R65 | 3 | 29 | 29 | **100%** | 0.813 | +89.7% | VPT+PSAR TP补缺 |
-| R66 | 2 | 18 | 16 | 89% | 0.803 | +181.2% | 三指标+PSAR趋势补缺 |
-
-### Key Insights
-1. **R58 关键发现: TP is NO-OP for short holds** — 当MHD够短时, 真正的退出=MHD, TP不再起作用. score在TP达到某个阈值后完全平台化
-2. **五大家族MHD完整图谱**:
-   - 全指标综合: SL{7,9,12} × MHD{5-30} × TP任意 = 100% StdA+, best 0.813
-   - MACD+RSI: SL{9,12} × MHD{6-20} = 85-100%, MHD7-8 optimal, best 0.802
-   - VPT+PSAR: SL12 × MHD{7-25} = 92-100%, SL7=89%, best 0.798
-   - PSAR趋势动量: SL{9,12} × MHD{3-30} = 95%, SL7=0%, best 0.778
-   - 三指标共振: SL{7,12} × MHD{1-30} = 94-100%, best 0.805
-3. **参数空间基本穷尽** — 5大家族的SL/TP/MHD三维参数空间已全面覆盖
-4. **CRITICAL BUG FIXED**: r54_process.py的api_put返回404(无PUT endpoint), 导致555个promoted策略backtest_summary为空. 已添加PUT `/api/lab/strategies/{id}` + `/api/lab/experiments/{id}`, 并修复所有数据
-5. **策略库从2,864增至3,559** (净增695, cleanup移除90)
-6. **New indicators tested (R55-R66)**: WR+KDJ(dd太高), ROC+KDJ(signal explosion), MFI+KDJ(0% StdA) — 全部已弃
-
----
-
-## R105-R110 结果 (2026-03-03) — Gap Fill + 全指标综合MHD18/20新领土
-
-6轮后台运行, 总计1139策略, 320 StdA+(旧标准). **win_rate>60% cleanup后大部分已清理**.
-
-| Round | Exps | Strats | StdA+(旧) | Rate | Best Score | Focus |
-|-------|------|--------|-----------|------|------------|-------|
-| R105 | 2 | 180 | 42 | 23% | 0.789 | PSAR趋势动量 MHD15 gap |
-| R106 | 2 | 151 | 9 | 6% | 0.763 | ULTOSC+PSAR/PSAR终极震荡 MHD15 |
-| R107 | 1 | 160 | 28 | 18% | 0.820 | 全指标综合 MHD15 gap fill |
-| R108 | 3 | 244 | 1 | 0.4% | 0.766 | 三指标共振 gap-fill (diminishing returns) |
-| R109 | 2 | 152 | 12 | 8% | 0.786 | PSAR趋势動量 MHD5+15 gap |
-| R110 | 2 | 252 | **228** | **91%** | **0.819** | **全指标综合 MHD18/20 新领土!** |
-
-### Key Insights
-1. **全指標综合 MHD18/20 = 89-90% StdA+** — 新领土, MHD1-20全范围确认, 参数王地位更加稳固
-2. **Gap-fill diminishing returns** — 三指标共振仅0.4% (R108), 大多数gap是已知失败区间
-3. **2026-03-03 win_rate>60% 标准升级**: 策略库从6553→1114, 淘汰83%低胜率策略
-
----
-
-## R111 结果 (2026-03-03) — 高胜率基底网格搜索 + 新指标探索
-
-**新StdA+标准首轮**: 从各家族最高胜率变体出发, 网格搜索高胜率参数区间. **71个新StdA+, 策略库1185**.
-
-| Experiment | Strategies | StdA+ | Rate | Best Score | Focus |
-|------------|-----------|-------|------|------------|-------|
-| E3611 | 24 | 0 | 0% | 0.640 | KAMA终极震荡 TP=2-15 (TP>1彻底失败) |
-| E3612 | 20 | 0 | 0% | 0.747 | KAMA中长线 TP=2-10 (wr下降到55-57%) |
-| E3613 | 5+3inv | 0 | 0% | 0.692 | MFI+KDJ (低wr=41%) |
-| E3614 | 8 | 0 | 0% | 0.683 | MFI+KAMA (极低wr=27%) |
-| E3615 | 9 | 0 | 0% | 0.725 | KAMA中长线 TP=1/MHD=10-20 (score不够) |
-| E3616 | 0+4inv | 0 | — | — | WR+KDJ (DeepSeek全invalid) |
-| E3617 | 8 | 0 | 0% | 0.664 | KAMA终极震荡 MHD=7-25 (score下降严重) |
-| **E3618** | **24** | **16** | **67%** | **0.810** | **MACD+RSI高wr基底网格 ★** |
-| E3619 | 0+4inv | 0 | — | — | STC+KDJ (DeepSeek全invalid) |
-| E3620 | 1+3inv | 0 | 0% | 0.712 | ROC+KDJ (dd太高=26.8%) |
-| **E3621** | **32** | **14** | **44%** | **0.798** | **VPT+PSAR高wr基底网格 ★** |
-| **E3622** | **32** | **16** | **50%** | **0.794** | **全指标综合高wr基底网格 ★** |
-| **E3623** | **32** | **16** | **50%** | **0.781** | **PSAR趋势动量高wr基底网格 ★** |
-| **E3624** | **36** | **9** | **25%** | **0.781** | **三指标共振高wr基底网格 ★** |
-| E3625 | 30 | 0 | 0% | — | PSAR终极震荡高wr基底 (wr<60%) |
-| E3626 | 30 | 0 | 0% | — | ULTOSC_PSAR高wr基底 (wr<60%) |
-| E3627 | 32 | 0 | 0% | — | PSAR+RSI+KDJ高wr基底 (wr<60%) |
-
-### R111 Key Insights
-1. **"高wr基底→网格搜索"方法论**: 从各家族最高胜率变体(wr>65%)出发做grid search, 5/8家族成功产出StdA+. MACD+RSI(67%), 全指标综合(50%), PSAR趋势动量(50%), VPT+PSAR(44%), 三指标共振(25%)
-2. **KAMA终极震荡严格TP=1/MHD=1**: TP>1或MHD>5会导致score从0.831暴跌至0.60-0.66, 不可扩展. 其优势完全在于"买入次日+1%卖出"的超短线模式
-3. **MFI指标已弃**: 低胜率(27-41%), 不适合新StdA+标准
-4. **WR/STC/ROC DeepSeek全invalid**: 这些指标需要clone-based方法才能测试
-5. **PSAR终极震荡/ULTOSC_PSAR/PSAR+RSI+KDJ高wr基底不达标**: 改变exit参数后wr跌破60%
-6. **新标准下的家族排序**: MACD+RSI最强(67% StdA+率) > 全指标综合=PSAR趋势动量(50%) > VPT+PSAR(44%) > 三指标共振(25%)
-
-## R112 结果 (2026-03-03) — MACD+RSI SL gap fill + 全指标综合 grid
-
-**16配置, 12个StdA+ (75%命中率)**. 填补R111的SL参数间隙, 确认策略SL不敏感性.
-
-| 实验 | 策略数 | StdA+ | 命中率 | 最高分 | 说明 |
-|------|--------|-------|--------|--------|------|
-| **E3628** | **12** | **8** | **66%** | **0.792** | **MACD+RSI SL{9,11,13,14}×TP1×MHD{1,2,3} ★** |
-| **E3629** | **4** | **4** | **100%** | **0.775** | **全指标综合 SL{8,10,12,14}×TP1×MHD20 ★** |
-
-### R112 Key Insights
-1. **MACD+RSI SL不敏感**: SL9-14全部产出StdA+(MHD2-3), 但MHD1的wr=57.4%不达标. MHD2(wr=64%)和MHD3(wr=68%)稳定
-2. **全指标综合100%命中**: SL8-14全部达标, wr=74%, 这个家族在新标准下最稳定
-3. **策略库1,197个**, 其中108个elite(score>=0.80)
-
-## R113 结果 (2026-03-03) — SL gap fill micro-round
-
-**16配置, 16个StdA+ (100%命中率)**. SL{9,11,13,14}×TP1×MHD{2,3}的gap fill验证.
-
-| 实验 | 策略数 | StdA+ | 命中率 | 最高分 | 说明 |
-|------|--------|-------|--------|--------|------|
-| **E3630** | **8** | **8** | **100%** | **0.778** | **全指標综合 SL gap fill (ES10270 base) ★** |
-| **E3631** | **8** | **8** | **100%** | **0.792** | **MACD+RSI SL gap fill (ES10210 base) ★** |
-
-### R113 Key Insight
-- **SL gap fill = 100%命中**: 在已验证的TP1/MHD2-3参数下, SL值几乎不影响结果. SL9-14全部通过StdA+, 确认策略的SL不敏感性. 策略库1,213个.
-
-## R114 结果 (2026-03-03) — 三指标共振 + PSAR趋势動量 SL gap fill
-
-**16配置, 16个StdA+ (100%命中率)**. 第3轮连续SL gap fill全通过.
-
-| 实验 | 策略数 | StdA+ | 命中率 | 最高分 | 说明 |
-|------|--------|-------|--------|--------|------|
-| **E3632** | **8** | **8** | **100%** | **0.779** | **三指标共振 SL{9,11,13,14}×TP1×MHD{2,3} ★** |
-| **E3633** | **8** | **8** | **100%** | **0.781** | **PSAR趋势動量 SL{9,11,13,14}×TP1×MHD{2,3} ★** |
-
-### R112-R114 SL Gap Fill 总结
-- **三轮连续100%命中**: R112(12/16=75%), R113(16/16=100%), R114(16/16=100%) → 总计44/48=91.7%
-- **SL不敏感性结论**: 在TP1/MHD2-3下, SL从5到15对评分几乎无影响. 唯一失败是MHD1(wr<60%)
-- **已验证家族**: MACD+RSI, 全指标综合, 三指标共振, PSAR趋势動量 — 4个家族全部SL不敏感
-- **策略库1,229个**
-
-## R145-R153 结果 (2026-03-04) — SL15-20突破 + 参数边界确认
-
-**217/267 = 81% StdA+**. SL/TP/MHD参数空间完全饱和, 所有边界确认.
-
-### 核心发现
-| 发现 | 详情 |
-|------|------|
-| **SL20=ceiling** | SL25/SL30与SL20完全相同(止损永不触发于5-8天短持仓) |
-| **SL15-20全族100%** | 7个家族在SL15-20×TP1下全部100% StdA+, DD降至8.6-14.4% |
-| **TP2=max** | TP3+在所有家族全部死亡(wr 48-58%), TP2仅部分家族在MHD4+可行 |
-| **MHD15=ceiling** | MHD20/25/30与MHD15完全相同, score从MHD8+完全平台化 |
-| **KAMA TP2全灭** | KAMA中/保G TP2 wr=58-59%, 仅支持TP1 |
-| **TP2 MHD floor=4** | TP2+MHD2-3全部失败(wr 54-59%), MHD4+可行 |
-
-### SL边界确认(最终版)
-| 家族 | SL下限 | SL上限 | TP范围 | MHD范围 |
-|------|--------|--------|--------|---------|
-| MACD+RSI | SL4 | SL20 | TP1-2 | MHD2-30(ceiling@15) |
-| VPT+PSAR | SL4(MHD5-8) | SL20 | TP1-2 | MHD4-30 |
-| 三指標 | SL5 | SL20 | TP1 | MHD2-30 |
-| 全指標 | SL5 | SL20 | TP1-2 | MHD2-30 |
-| PSAR趋势 | SL8 | SL20 | TP1-2 | MHD2-30 |
-| KAMA保G | SL8 | SL20 | TP1 | MHD2-30 |
-| KAMA中C | SL10 | SL20 | TP1 | MHD2-30 |
-
-- **策略库: 2,072个**
-- **促升: 217个新StdA+**
-
-## R154 结果 (2026-03-04) — 新指标探索全失败
-
-**0/37有效策略达StdA+, 69/96 invalid(72%)**. 所有浅探索指标确认非可行.
-
-| 实验 | 指标组合 | Valid/Inv | Best Score | Best WR | 判定 |
-|------|---------|-----------|------------|---------|------|
-| E3835 | NVI+PSAR | 4/4 | 0.618 | 35.6% | ❌ |
-| E3836 | MFI+KDJ | 4/4 | 0.574 | 41.3% | ❌ |
-| E3837 | WR+PSAR | 6/2 | 0.534 | 38.5% | ❌ |
-| E3838 | ROC+KDJ | 5/3 | 0.535 | 43.9% | ❌ |
-| E3839 | STC+KDJ | 4/4 | 0.487 | 46.0% | ❌ |
-| E3840 | ULTOSC+PSAR+KDJ | 0/7+ | - | - | ❌ All inv |
-| E3841 | NVI+MACD | 3/4+ | 0.533 | 28.1% | ❌ |
-| E3842 | MFI+PSAR | 5/3 | 0.658 | 36.2% | ❌ |
-| E3843 | WR+KDJ | 1/6+ | 0.366 | 38.3% | ❌ |
-| E3844 | ROC+PSAR | 1/7 | 0.660 | 44.6% | ❌ |
-| E3845 | KELTNER+KDJ | 3/5 | 0.430 | 51.6% | ❌ |
-| E3846 | ULTOSC+MACD | 1/6+ | 0.282 | 31.3% | ❌ |
-
-**结论**: A股T+1高wr策略仅限已知7大家族. 新指标探索空间彻底耗尽.
+## 下一步建议
+
+> 每轮探索结束后更新。下一次运行的Step 1a会读取此节作为高优先级输入。
+
+### R1208 发现 (2026-04-04, 50 exp, 266 strats, 18 StdA+)
+
+**新骨架成功率: 10/23组 (43%) 产出StdA+**
+
+| 方向 | StdA+ | 最佳Score | 状态 |
+|------|-------|-----------|------|
+| W_REALVOL | 2/10 (20%) | 0.8740 | ✅ 新进池 |
+| KBARamp | 1/5 (20%) | 0.8732 | ✅ 新进池 |
+| opt_novel_sells | 4/20 (20%) | 0.8724 | ✅ ATR+RSI优化 |
+| W_KAMA | 2/10 (20%) | 0.8686 | ✅ 新进池 |
+| PPOShigh | 1/10 (10%) | 0.8676 | ✅ 新进池 |
+| WRVOL_KAMA | 1/5 (20%) | 0.8652 | ✅ 新进池 |
+| W_PSAR | 2/10 (20%) | 0.8624 | ✅ 新进池 |
+| W_EMA | 2/10 (20%) | 0.8588 | ✅ 新进池 |
+| W_MOM | 2/10 (20%) | 0.8401 | ✅ 新进池 |
+| W_BOLL | 1/10 (10%) | 0.8398 | ✅ 新进池 |
+| PPOS_close_pos | 0/26 | 0.7343 | ❌ 已弃(wr<45%) |
+| AMPVOL | 0/10 | 0.5068 | ❌ 已弃(8 trades) |
+| W_STOCH | 0/10 | 0.8202 | ❌ 已弃(wr<60%) |
+| REALVOL_fill | 0/30 | 0.8763 | ❌ fills全fail wr |
+| MOM_RSTR_fill | 0/24 | 0.8769 | ❌ fills全fail wr |
+
+**关键洞察**:
+1. **6/8 W_指标产出StdA+** (75%成功率) — 多时间框架是最强新维度
+2. **KBAR_amplitude有效** (score=0.8732) — 低振幅买入≈ATRcalm逻辑
+3. **Fill实验全部失败wr阈值** — REALVOL/MOM+RSTR/LIQ/KAMA+W_ATR有高score(0.87+)但wr<60%
+4. **PPOS_close_pos/AMPVOL确认无效** — 价格位置和Parkinson波动率不适合作为买入条件
+
+### R1209 发现 (2026-04-04, 50 exp, 289 strats, 92 StdA+ = 31.8%)
+
+**突破: Ultra-low TP解决wr<60%!** REALVOL(15/15=100%), MOM+RSTR(10/10=100%) — TP=0.3-1.0使高score指标通过wr>60%门槛
+
+| 方向 | StdA+ | Rate | Best | 重要性 |
+|------|-------|------|------|--------|
+| RVOL_ultraTP | 15/15 | 100% | 0.8565 | 突破 |
+| MOM_RSTR_ultraTP | 10/10 | 100% | 0.8522 | 突破 |
+| WRVOL_fill | 20/40 | 50% | 0.8752 | 最大产出 |
+| KBAR_fill | 16/40 | 40% | 0.8790 | 最高score |
+| WRVOL_KBAR | 10/24 | 42% | 0.8731 | 双因子组合 |
+| opt2 | 5/25 | 20% | 0.8786 | ATR+RSI优化 |
+| + 11 more | 11 total | 7-20% | various | 新因子验证 |
+
+新因子验证: RVOL_downside✅, M_REALVOL✅, PVOL_corr✅, W_ADX✅, KBAR_body✅, RVOL_skew✅, PPOS_drawdown✅
+失败: PPOS_low_dist❌, PVOL_vwap_bias❌, LIQ_amihud❌
+
+### R1210 发现 (2026-04-04, 47 exp, 375 strats, 164 StdA+ = 43.7%)
+
+**KBAR massive grid + RVOL_downside deep + triple combos 全部成功**
+- Pool从10→24 families, 169→394 active
+- KBAR_amplitude 15阈值grid完成(0.015-0.06), 最优区间待分析
+- Triple combos (W_REALVOL+KBAR+RVOL_downside, +PVOL_corr) 均产出StdA+
+- Ultra-low TP expansion: 更多因子组合验证100% rate
+
+### R1211 发现 (2026-04-06, 50 exp, 331 strats, 110 StdA+ = 41.8%)
+
+**14/14组100%成功率** — 每个测试方向都产出StdA+
+- 所有fill家族50% StdA+率: WRV_fill, RV_fill, MR_fill, quad2, quad3
+- 新因子: RVkurt(9/25=36%, 0.8784), AMPVOL_std(1/5, 0.8729), RSTR_weighted(1/5, 0.8737)
+- PVcorr_uTP: 5/5=100% — ultra-low TP持续有效
+- 4-factor combos全部产出StdA+: quad_(45.8%), quad2(50%), quad3(50%), quad4(31.2%)
+
+### R1212 发现 (2026-04-06, 46 exp, 338 strats, 147 StdA+ = 46.8% ALL-TIME)
+
+**13/14组产出StdA+**, 仅W_ATR(0/24)失败。5f combo达session最高score 0.8791
+- AMPs_(58.6%), RSTRw_(61.5%), RVk_KB(57.1%), uTP(100%)
+- 5f_RVk(45.8%, 0.8791), 5f_PV(33.3%), 所有fill家族50%
+- W_ATR standalone = 0/24 已弃
+
+### R1213 发现 (2026-04-06, 48 exp, 357 strats, 136 StdA+ = 46.0%)
+
+**best=0.8805(新最高分!)** 6f combos + deep fills + W_AMPVOL/W_RSTR新因子
+- Pool从53→59 families, 790→900 active
+- 新家族: ATR+RSI+W_AMPVOL(gap=148), ATR+PVOL_AMOUNT+RSI+W_REALVOL(gap=145)
+- AMPVOL+ATR+RSI fill成长到33/150
+
+### R1214 发现 (2026-04-06, 50 exp, 385 strats, 143 StdA+ = 43.5%)
+
+Pool从59→70 families, 900→1022 active。143 StdA+, best=0.8805
+- W_AMPVOL fill 45%, AMPs deep 50%, PVamt+W_RVOL 50%, W_KBAR 42%
+- 新家族: AMPVOL+ATR+REALVOL+RSI(gap=142), W_RSTR+KBAR combos
+- 7-factor EXTREME combos提交并完成
+
+### R1215 发现 (2026-04-10, 50 exp, 385 strats, 126 StdA+ = 34.9%)
+
+**best=0.8812(新最高分!)** LIQ/MOM/RSTR combo fills, W_PVOL/RVkurt+W_AMPVOL新combo
+
+### 下一步优先级 (R1216+)
+
+1. **继续fill top-gap families** — LIQ_TURN(148), W_ATR(144), AMPVOL+RVOL(142)
+2. **深度fill PVOL_AMT+W_RVOL** — gap=133, avg=0.8538(高)
+3. **新combo: W_PVOL_corr + W_AMPVOL + KBAR** — 周线量价+周线振幅+日线K线
+4. **新combo: LIQ_turn + AMPs + KBAR** — 流动性+波动+K线三因子
+5. **新combo: RVkurt + W_RSTR + KBAR** — 峰度+周线动量+K线
+6. **ATR+RSI optimization** — 池满(gap=0), 尝试新sell types超越最弱champion
+
+
+
+## 历史详细轮次记录 (已归档)
+
+> 详细轮次记录(R28-R526)已归档至API(`/api/lab/exploration-rounds`)。
+> 使用 `GET /api/lab/exploration-rounds` 查询历史数据。
+
+
+
+## Auto-Promote 记录
+
+> 累计 **20,650+** 个StdA+策略已promote。
+> **R1281** (Engine, 2026-04-21 09:09): **246 StdA+ (95.7%)** — best=0.8643, promoted=241, provider=code-driven。Pool: 24家族, 262活跃
+## 下一步优先级
+
+### R1281 自动探索结果 (2026-04-21 09:09)
+
+**246 StdA+ (95.7%)**, best=0.8643, provider=code-driven
+
+### 下一步优先级 (R1282+)
+
+1. **填充 top-gap 家族**:
+  - ATR+PVOL_AMOUNT+RSI+W_KBAR (gap=146, avg=0.8511)
+  - ATR+RSI+TREND_STRENGTH+W_KBAR (gap=146, avg=0.8506)
+  - ATR+RSI+VOLUME_RATIO+W_KBAR (gap=146, avg=0.8506)
+  - ACCELERATION+ATR+LIQ_TURNOVER+RSI (gap=146, avg=0.8501)
+  - ACCELERATION+ATR+RSI+VOLUME_RATIO (gap=146, avg=0.8500)
+2. **新因子组合探索** — pool gap=2808
+3. **优化已满家族** — 尝试新 sell 条件
+

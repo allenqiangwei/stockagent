@@ -405,6 +405,8 @@ class DataCollector:
                         volume=float(row.get("volume", 0)),
                         amount=float(row.get("amount", 0)),
                         adj_factor=adj,
+                        snapshot_date=date.today(),
+                        adjust_mode="raw",
                     ))
             except Exception as e:
                 logger.debug("Cache daily row error: %s", e)
@@ -753,6 +755,8 @@ class DataCollector:
                         volume=float(row.get("vol", 0)),
                         amount=float(row.get("amount", 0)),
                         adj_factor=adj,
+                        snapshot_date=date.today(),
+                        adjust_mode="raw",
                     ))
                     inserted += 1
             except Exception as e:

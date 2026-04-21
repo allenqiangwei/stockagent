@@ -95,25 +95,6 @@ class SignalScheduler:
 
     # ── Main loop ─────────────────────────────────────
 
-    def _already_synced_today(self, today: str) -> bool:
-        """Check if daily_prices already has data for today (survives process restarts)."""
-        try:
-            from datetime import date as _date
-            from api.models.stock import DailyPrice
-            db = SessionLocal()
-            try:
-                count = (
-                    db.query(DailyPrice)
-                    .filter(DailyPrice.trade_date == _date.fromisoformat(today))
-                    .limit(1)
-                    .count()
-                )
-                return count > 0
-            finally:
-                db.close()
-        except Exception:
-            return False
-
     def _run_loop(self):
         # On startup, train confidence model from historical data
         try:
@@ -127,11 +108,9 @@ class SignalScheduler:
         except Exception as e:
             logger.warning("Confidence model startup training failed: %s", e)
 
-        # On startup, check if today was already synced (recover from process restart)
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self._already_synced_today(today):
-            self._last_run_date = today
-            logger.info("Data for %s already exists, skipping re-sync on startup", today)
+        # NOTE: never skip — even if daily_prices exist, the full pipeline
+        # (signals, trade plans, beta/gamma scoring) may not have run.
+        # _last_run_date stays None so the scheduler always fires after refresh_hour.
 
         while self._running:
             now = datetime.now()
@@ -302,6 +281,18 @@ class SignalScheduler:
                         )
                     except Exception as e:
                         logger.warning("Pool health check failed (non-fatal): %s", e)
+
+                    # Step 3b: Champion decay check (after rebalance, before signal gen)
+                    self._sync_step = "策略衰减检查"
+                    jm.update_progress(job_id, 77, "策略衰减检查")
+                    try:
+                        from api.services.strategy_pool import StrategyPoolManager as _SPM
+                        decay_mgr = _SPM(db)
+                        decay_result = decay_mgr.check_champion_decay()
+                        if decay_result:
+                            logger.info("Decay check: %d champions demoted", len(decay_result))
+                    except Exception as e:
+                        logger.warning("Decay check failed (non-fatal): %s", e)
 
                     # Step 4: Generate trading signals (full market scan)
                     self._sync_step = "生成交易信号"

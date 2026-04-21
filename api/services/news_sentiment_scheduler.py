@@ -1,8 +1,8 @@
-"""News sentiment scheduler — runs analysis at pre-market and post-close.
+"""News sentiment scheduler — runs analysis at pre-market and evening.
 
 Schedule:
   08:30  pre_market   (analyzes news from previous evening to morning)
-  15:30  post_close   (analyzes news from morning to close)
+  18:30  evening      (analyzes news from morning to evening)
 """
 
 import logging
@@ -22,8 +22,8 @@ class NewsSentimentScheduler:
 
     # (hour, minute, period_type, hours_back)
     SCHEDULE = [
-        (8, 30, "pre_market", 15.5),   # 17:00 yesterday → 08:30 today
-        (15, 30, "post_close", 7.0),    # 08:30 → 15:30
+        (7, 50, "pre_market", 14.83),  # 17:00 yesterday → 07:50 today
+        (16, 0, "evening", 7.5),       # 08:30 → 16:00 (after market close)
     ]
 
     def __init__(self):
@@ -39,7 +39,7 @@ class NewsSentimentScheduler:
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        logger.info("News sentiment scheduler started (08:30 pre_market, 15:30 post_close)")
+        logger.info("News sentiment scheduler started (07:50 pre_market, 16:00 evening)")
 
     def stop(self):
         self._running = False

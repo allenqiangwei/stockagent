@@ -19,18 +19,22 @@ logger = logging.getLogger(__name__)
 
 MAX_POSITIONS_PER_STOCK = 2  # Max concurrent sub-positions per stock (concentration limit)
 
-WEIGHT_TABLE = {
-    "cold": (0.80, 0.20),
-    "warm": (0.60, 0.40),
-    "mature": (0.50, 0.50),
+# Three-factor weight table: (alpha, gamma, beta)
+# Alpha = strategy consensus, Gamma = structure confirmation, Beta = environment
+WEIGHT_TABLE_3F = {
+    "cold": (0.70, 0.15, 0.15),
+    "warm": (0.50, 0.30, 0.20),
+    "mature": (0.40, 0.30, 0.30),
 }
 
-# Gamma weight table: (alpha_weight, gamma_weight)
-GAMMA_WEIGHT_TABLE = {
-    "cold": (0.80, 0.20),     # < 30 completed trades with gamma
-    "warm": (0.60, 0.40),     # 30-99
-    "mature": (0.50, 0.50),   # >= 100
+# Two-factor fallback when gamma is unavailable: (alpha, beta)
+WEIGHT_TABLE_2F = {
+    "cold": (0.85, 0.15),
+    "warm": (0.70, 0.30),
+    "mature": (0.60, 0.40),
 }
+
+_PHASE_ORDER = ["cold", "warm", "mature"]
 
 
 def _get_gamma_phase(db: Session) -> str:
@@ -140,10 +144,17 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
 
     beta_phase = _get_phase(db)
     gamma_phase = _get_gamma_phase(db)
-    alpha_w, gamma_w = GAMMA_WEIGHT_TABLE[gamma_phase]
+    # Use the more conservative phase for weight selection
+    phase = min(beta_phase, gamma_phase, key=lambda p: _PHASE_ORDER.index(p))
 
     # Pre-load shared beta factor context (query once, reuse for all signals)
     shared_context = _load_shared_beta_context(db, trade_date)
+
+    # Daily loss circuit breaker
+    _DAILY_LOSS_LIMIT = -5.0  # percent — stop creating new plans if today's avg sell P&L is worse
+    if _daily_loss_exceeded(db, trade_date, _DAILY_LOSS_LIMIT):
+        logger.warning("Beta scorer: daily loss limit %.1f%% exceeded, no new plans", _DAILY_LOSS_LIMIT)
+        return []
 
     # Pre-load current counts per stock to enforce concentration limit
     holding_counts: dict[str, int] = dict(
@@ -182,6 +193,9 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
             continue
 
         available_slots = MAX_POSITIONS_PER_STOCK - current_count
+        # Risk gate: block ST, limit-up, suspended stocks
+        if _is_blocked(db, code, trade_date):
+            continue
 
         # Extract all triggering strategy names from signal
         strategy_names = _parse_strategy_names(signal.reasons)
@@ -189,19 +203,11 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
             # No named strategies — create one plan with no strategy binding
             strategy_names = [""]
 
-        # Score the stock (same alpha/gamma/beta for all sub-positions)
+        # Score the stock (same alpha/gamma/beta for all sub-positions of this signal)
         alpha = signal.final_score or 0.0
         gamma = signal.gamma_score  # May be None if chanlun-pro was unavailable
 
-        # Gamma-first combined score
-        if gamma is not None:
-            combined = round(
-                (alpha / 100.0) * alpha_w + (gamma / 100.0) * gamma_w, 4
-            )
-        else:
-            combined = round(alpha / 100.0, 4)  # Degrade to pure Alpha
-
-        # Beta reference (still computed for ML training, not for ranking)
+        # Build feature context for beta prediction
         features = {
             "stock_code": code,
             "alpha_score": alpha,
@@ -224,13 +230,27 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
 
         beta = predict_beta_score(db, features)
 
+        # Three-factor combined score: alpha(consensus) + gamma(structure) + beta(environment)
+        if gamma is not None:
+            alpha_w, gamma_w, beta_w = WEIGHT_TABLE_3F[phase]
+            combined = round(
+                (alpha / 100.0) * alpha_w + (gamma / 100.0) * gamma_w + beta * beta_w,
+                4,
+            )
+        else:
+            alpha_w, beta_w = WEIGHT_TABLE_2F[phase]
+            combined = round(
+                (alpha / 100.0) * alpha_w + beta * beta_w,
+                4,
+            )
+
         plan_price = _get_prev_close(db, code, trade_date) or 0.0
         if plan_price <= 0:
             continue
 
-        quantity = int(100_000 / plan_price / 100) * 100
-        if quantity <= 0:
-            quantity = 100
+        base_quantity = int(100_000 / plan_price / 100) * 100
+        if base_quantity <= 0:
+            base_quantity = 100
 
         # Resolve stock name
         stock_name = ""
@@ -273,7 +293,24 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
             try:
                 from api.services.confidence_scorer import predict_confidence
                 from api.models.market_regime import MarketRegimeLabel
+                from api.models.gamma_factor import GammaSnapshot as _GS
                 from datetime import date as _date
+
+                # Build gamma_snapshot dict from GammaSnapshot if available
+                gamma_snap_dict = None
+                if gamma is not None:
+                    _gs = db.query(_GS).filter_by(
+                        stock_code=code, snapshot_date=trade_date
+                    ).first()
+                    if _gs:
+                        gamma_snap_dict = {
+                            "daily_strength": _gs.daily_strength,
+                            "weekly_resonance": _gs.weekly_resonance,
+                            "structure_health": _gs.structure_health,
+                            "daily_mmd_age": _gs.daily_mmd_age,
+                        }
+
+                # Market regime for trend/volatility
                 regime = (
                     db.query(MarketRegimeLabel)
                     .filter(MarketRegimeLabel.week_end >= _date.fromisoformat(trade_date))
@@ -282,13 +319,29 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
                 )
                 if regime:
                     confidence = predict_confidence(
-                        db, alpha, gamma,
+                        db,
+                        alpha,
+                        gamma_snapshot=gamma_snap_dict,
                         trend_strength=regime.trend_strength,
                         volatility=regime.volatility,
                         index_return_pct=regime.index_return_pct,
+                        sector_heat_score=features.get("sector_heat_score", 0.0),
+                        regime=shared_context.get("regime_code", "ranging"),
+                        day_of_week=features.get("day_of_week", 0),
+                        stock_return_5d=features.get("stock_return_5d", 0.0),
+                        volume_ratio_5d=features.get("volume_ratio_5d", 0.0),
                     )
             except Exception as e:
                 logger.warning("Confidence scoring failed (non-fatal): %s", e)
+
+            # Position sizing based on confidence score
+            if confidence is not None and confidence >= 65:
+                quantity = max(100, int(base_quantity * 1.5 / 100) * 100)
+            elif confidence is not None and confidence >= 45:
+                quantity = base_quantity
+            else:
+                # Low confidence or no model — half position
+                quantity = max(100, int(base_quantity * 0.5 / 100) * 100)
 
             plan = BotTradePlan(
                 stock_code=code,
@@ -301,7 +354,7 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
                 status="pending",
                 thinking=(
                     f"[C={confidence or '?'}] {strategy_name or 'signal'} "
-                    f"alpha={alpha:.1f} gamma={gamma or 0:.1f} "
+                    f"alpha={alpha:.1f} beta={beta:.2f} gamma={gamma or 0:.1f} "
                     f"combined={combined:.4f}"
                 ),
                 source="beta",
@@ -350,18 +403,26 @@ def score_and_create_plans(db: Session, trade_date: str, plan_date: str) -> list
                 "combined_score": combined,
                 "plan_price": plan_price,
                 "quantity": quantity,
-                "phase": gamma_phase,
+                "phase": phase,
             })
 
     if plans:
         plans.sort(key=lambda x: x["combined_score"], reverse=True)
+        # Monitor gamma coverage — warn if chanlun-pro may be down
+        gamma_count = sum(1 for p in plans if p.get("gamma_score") is not None)
+        gamma_coverage = gamma_count / len(plans) if plans else 0
+        if plans and gamma_coverage < 0.70:
+            logger.warning(
+                "Gamma coverage %.0f%% (%d/%d plans) — chanlun-pro may be unavailable",
+                gamma_coverage * 100, gamma_count, len(plans),
+            )
         db.commit()
         logger.info(
-            "Beta scorer: %d plans (%d stocks) for %s (gamma_phase=%s)",
+            "Beta scorer: %d plans (%d stocks) for %s (phase=%s, beta=%s, gamma=%s)",
             len(plans),
             len({p["stock_code"] for p in plans}),
             plan_date,
-            gamma_phase,
+            phase, beta_phase, gamma_phase,
         )
 
     return plans
@@ -464,3 +525,49 @@ def _load_stock_beta_context(db: Session, stock_code: str) -> dict:
         pass
 
     return context
+
+
+def _is_blocked(db: Session, stock_code: str, trade_date: str) -> bool:
+    """Pre-plan safety checks: ST, limit-up (can't buy at open)."""
+    from api.models.stock import Stock, DailyPrice
+    from src.backtest.engine import calc_limit_prices
+    from api.services.bot_trading_engine import _get_prev_close
+
+    # ST / delisting check
+    stock = db.query(Stock).filter(Stock.code == stock_code).first()
+    if stock and stock.name and ("ST" in stock.name or "退" in stock.name):
+        logger.debug("Risk gate: %s blocked (ST/delisting)", stock_code)
+        return True
+
+    # Limit-up check: if today's open >= limit_up, can't buy (no liquidity)
+    prev_close = _get_prev_close(db, stock_code, trade_date)
+    if prev_close and prev_close > 0:
+        limit_up, _ = calc_limit_prices(stock_code, prev_close)
+        today = db.query(DailyPrice).filter(
+            DailyPrice.stock_code == stock_code,
+            DailyPrice.trade_date == trade_date,
+        ).first()
+        if today and today.open >= limit_up:
+            logger.debug("Risk gate: %s blocked (limit-up at open)", stock_code)
+            return True
+
+    return False
+
+
+def _daily_loss_exceeded(db: Session, trade_date: str, limit_pct: float) -> bool:
+    """Return True if today's average realized sell P&L is worse than limit_pct.
+
+    Uses BotTradeReview (which has pnl_pct), not BotTrade (which doesn't).
+    """
+    from api.models.bot_trading import BotTradeReview
+
+    today_reviews = (
+        db.query(BotTradeReview)
+        .filter(BotTradeReview.last_sell_date == trade_date)
+        .all()
+    )
+    if not today_reviews:
+        return False
+    total_pnl = sum(r.pnl_pct or 0 for r in today_reviews)
+    avg_pnl = total_pnl / len(today_reviews)
+    return avg_pnl < limit_pct

@@ -1,27 +1,12 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -29,53 +14,32 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   useLabTemplates,
+  useLabStats,
   useLabExperiments,
-  useLabExperiment,
-  useCreateTemplate,
-  useUpdateTemplate,
-  useDeleteTemplate,
-  useDeleteExperiment,
-  usePromoteStrategy,
-  useBacktestDetail,
-  useExplorationRounds,
 } from "@/hooks/use-queries";
 import { lab as labApi } from "@/lib/api";
-import type { LabTemplate, LabExperimentListItem, LabExperimentStrategy, ExplorationRound } from "@/types";
-import { EquityCurveChart } from "@/components/charts/equity-curve-chart";
+import type { LabTemplate } from "@/types";
+import { useQueryClient } from "@tanstack/react-query";
 import {
-  BrainCircuit,
+  FlaskConical,
   Play,
   Loader2,
   Plus,
-  Pencil,
-  Trash2,
-  ArrowUpFromLine,
   Trophy,
-  ChevronDown,
-  ChevronUp,
-  TrendingUp,
+  Layers,
+  Beaker,
+  History,
+  AlertCircle,
 } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
 
-// ── Status badge ────────────────────────────────
-const STATUS_MAP: Record<string, { label: string; cls: string }> = {
-  pending: { label: "等待中", cls: "bg-zinc-600 text-zinc-300" },
-  generating: { label: "AI 生成中", cls: "bg-blue-600 text-white" },
-  backtesting: { label: "回测中", cls: "bg-amber-600 text-white" },
-  done: { label: "已完成", cls: "bg-emerald-600 text-white" },
-  invalid: { label: "无效", cls: "bg-orange-600 text-white" },
-  failed: { label: "失败", cls: "bg-red-600 text-white" },
-};
-
-function statusBadge(status: string) {
-  const s = STATUS_MAP[status] ?? STATUS_MAP.pending;
-  return <Badge className={`text-xs ${s.cls}`}>{s.label}</Badge>;
-}
-
-// ── Template categories ─────────────────────────
-const CATEGORIES = ["动量", "均线", "波动率", "量价", "组合"];
+// Quant components
+import { PoolOverview } from "@/components/quant/pool-overview";
+import { StrategyFamilies } from "@/components/quant/strategy-families";
+import { ExperimentList } from "@/components/quant/experiment-list";
+import { ExplorationRounds } from "@/components/quant/exploration-rounds";
 
 // ── SSE progress types ──────────────────────────
 interface ExperimentProgress {
@@ -102,36 +66,228 @@ const INIT_PROGRESS: ExperimentProgress = {
   bestScore: 0,
 };
 
+// ── Status badge ────────────────────────────────
+const STATUS_MAP: Record<string, { label: string; cls: string }> = {
+  pending: { label: "等待中", cls: "bg-zinc-600 text-zinc-300" },
+  generating: { label: "AI 生成中", cls: "bg-blue-600 text-white" },
+  backtesting: { label: "回测中", cls: "bg-amber-600 text-white" },
+  done: { label: "已完成", cls: "bg-emerald-600 text-white" },
+  invalid: { label: "无效", cls: "bg-orange-600 text-white" },
+  failed: { label: "失败", cls: "bg-red-600 text-white" },
+};
+
+function statusBadge(status: string) {
+  const s = STATUS_MAP[status] ?? STATUS_MAP.pending;
+  return <Badge className={`text-xs ${s.cls}`}>{s.label}</Badge>;
+}
+
+// ── Exploration Cron Toggle ────────────────────────
+function ExplorationCronToggle() {
+  const [status, setStatus] = useState<{
+    enabled: boolean; interval_minutes: number; state: string;
+    current_step: string; current_round: number; elapsed_seconds: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      const { exploration } = await import("@/lib/api");
+      const data = await exploration.status();
+      setStatus({
+        enabled: data.cron?.enabled ?? false,
+        interval_minutes: data.cron?.interval_minutes ?? 15,
+        state: data.state,
+        current_step: data.current_step,
+        current_round: data.current_round,
+        elapsed_seconds: data.elapsed_seconds,
+      });
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    fetchStatus();
+    const t = setInterval(fetchStatus, 30000);
+    return () => clearInterval(t);
+  }, [fetchStatus]);
+
+  const toggle = async () => {
+    setLoading(true);
+    try {
+      const { exploration } = await import("@/lib/api");
+      if (status?.enabled) {
+        await exploration.cronStop();
+      } else {
+        await exploration.cronStart(15);
+      }
+      await fetchStatus();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startNow = async () => {
+    setLoading(true);
+    try {
+      const { exploration } = await import("@/lib/api");
+      await exploration.start(1, 50);
+      await fetchStatus();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const stopNow = async () => {
+    setLoading(true);
+    try {
+      const { exploration } = await import("@/lib/api");
+      await exploration.stop();
+      await fetchStatus();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!status) return null;
+
+  const isRunning = status.state === "running";
+
+  return (
+    <Card className={status.enabled ? "border-emerald-500/30 bg-emerald-500/5" : "border-zinc-700"}>
+      <CardContent className="p-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex flex-col gap-0.5">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">自动探索</span>
+              <Badge className={status.enabled ? "bg-emerald-600 text-white text-[10px]" : "bg-zinc-700 text-zinc-400 text-[10px]"}>
+                {status.enabled ? `每${status.interval_minutes}分钟` : "已关闭"}
+              </Badge>
+              {isRunning && (
+                <Badge className="bg-blue-600 text-white text-[10px]">
+                  R{status.current_round} {status.current_step} {Math.floor(status.elapsed_seconds / 60)}m
+                </Badge>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {isRunning ? (
+            <Button size="sm" variant="outline" onClick={stopNow} disabled={loading} className="h-7 text-xs border-red-500/50 text-red-400 hover:bg-red-500/10">
+              {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : "停止"}
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" onClick={startNow} disabled={loading} className="h-7 text-xs">
+              {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <><Play className="h-3 w-3 mr-1" />立即跑</>}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant={status.enabled ? "default" : "outline"}
+            onClick={toggle}
+            disabled={loading}
+            className={`h-7 text-xs ${status.enabled ? "bg-emerald-600 hover:bg-emerald-700" : ""}`}
+          >
+            {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : status.enabled ? "关闭定时" : "开启定时"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ═══════════════════════════════════════════════════
 // Main page
 // ═══════════════════════════════════════════════════
-export default function LabPage() {
+export default function QuantDashboard() {
+  const searchParams = useSearchParams();
+  const defaultTab = searchParams.get("tab") || "pool";
+
+  const { data: stats } = useLabStats();
+
   return (
-    <div className="p-3 sm:p-4 space-y-3 sm:space-y-4">
+    <div className="p-3 sm:p-4 space-y-4">
+      {/* Header */}
       <div className="flex items-center gap-2 text-base sm:text-lg font-semibold">
-        <BrainCircuit className="h-5 w-5" />
-        AI 策略实验室
+        <FlaskConical className="h-5 w-5" />
+        量化工作台
       </div>
 
-      <Tabs defaultValue="new">
-        <TabsList>
-          <TabsTrigger value="new">发起实验</TabsTrigger>
-          <TabsTrigger value="history">实验历史</TabsTrigger>
-          <TabsTrigger value="exploration">探索历史</TabsTrigger>
-          <TabsTrigger value="templates">模板管理</TabsTrigger>
+      {/* Pool Overview KPIs */}
+      <PoolOverview />
+
+      {/* Exploration Cron Toggle */}
+      <ExplorationCronToggle />
+
+      {/* Engine running status — always visible */}
+      {stats?.current_round && (
+        <Card className="border-blue-500/30 bg-blue-500/5">
+          <CardContent className="p-4 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Loader2 className="h-4 w-4 animate-spin text-blue-400" />
+                探索引擎 R{stats.current_round.round_number} — {stats.current_round.step}
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {Math.floor(stats.current_round.elapsed_seconds / 60)}分钟
+                {stats.current_round.llm_provider && ` · ${stats.current_round.llm_provider}`}
+              </span>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {stats.current_round.step_detail}
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+              <span>策略 <b>{stats.current_round.strategies_done}</b>/{stats.current_round.strategies || stats.current_round.strategies_pending}</span>
+              {stats.current_round.stda_count > 0 && (
+                <span className="text-emerald-400">StdA+ <b>{stats.current_round.stda_count}</b></span>
+              )}
+              {stats.current_round.best_score > 0 && (
+                <span>最佳 <b className="font-mono">{stats.current_round.best_score.toFixed(4)}</b></span>
+              )}
+            </div>
+            {(stats.current_round.strategies || stats.current_round.strategies_pending) > 0 && (
+              <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-blue-500 transition-all duration-500"
+                  style={{
+                    width: `${Math.round(
+                      (stats.current_round.strategies_done /
+                        (stats.current_round.strategies || stats.current_round.strategies_pending)) *
+                        100
+                    )}%`,
+                  }}
+                />
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Main Tabs */}
+      <Tabs defaultValue={defaultTab}>
+        <TabsList className="grid w-full grid-cols-3 max-w-sm">
+          <TabsTrigger value="pool" className="text-xs sm:text-sm">
+            <Layers className="h-3.5 w-3.5 mr-1 hidden sm:inline" />
+            策略池
+          </TabsTrigger>
+          <TabsTrigger value="experiments" className="text-xs sm:text-sm">
+            <Beaker className="h-3.5 w-3.5 mr-1 hidden sm:inline" />
+            实验
+          </TabsTrigger>
+          <TabsTrigger value="exploration" className="text-xs sm:text-sm">
+            <History className="h-3.5 w-3.5 mr-1 hidden sm:inline" />
+            探索
+          </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="new">
-          <NewExperimentTab />
+        <TabsContent value="pool" className="mt-4">
+          <StrategyFamilies />
         </TabsContent>
-        <TabsContent value="history">
-          <ExperimentHistoryTab />
+
+        <TabsContent value="experiments" className="mt-4">
+          <ExperimentsTab />
         </TabsContent>
-        <TabsContent value="exploration">
-          <ExplorationHistoryTab />
-        </TabsContent>
-        <TabsContent value="templates">
-          <TemplateManagerTab />
+
+        <TabsContent value="exploration" className="mt-4">
+          <ExplorationRounds />
         </TabsContent>
       </Tabs>
     </div>
@@ -139,9 +295,118 @@ export default function LabPage() {
 }
 
 // ═══════════════════════════════════════════════════
-// Tab 1: 发起实验
+// Experiments Tab: New experiment + History
 // ═══════════════════════════════════════════════════
-function NewExperimentTab() {
+function ExperimentsTab() {
+  const [showCreate, setShowCreate] = useState(false);
+  const { data: stats } = useLabStats();
+  const { data: inProgress } = useLabExperiments(1, 50, "pending,generating,backtesting");
+
+  const inProgressItems = inProgress?.items ?? [];
+
+  return (
+    <div className="space-y-4">
+      {/* Stats cards */}
+      {stats && (
+        <div className="flex flex-wrap gap-3">
+          <LabStatCard label="总实验" value={stats.total_experiments.toLocaleString()} />
+          <LabStatCard
+            label="进行中"
+            value={stats.in_progress}
+            cls={stats.in_progress > 0 ? "text-amber-400" : undefined}
+          />
+          <LabStatCard label="已 Promote" value={stats.total_promoted.toLocaleString()} />
+          <LabStatCard label="最新轮次" value={`R${stats.latest_round}`} />
+        </div>
+      )}
+
+      {/* In-progress experiments (pinned) */}
+      {inProgressItems.length > 0 && (
+        <Card>
+          <CardContent className="p-4 space-y-2">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <AlertCircle className="h-4 w-4 text-amber-400" />
+              进行中的实验 ({inProgressItems.length})
+            </div>
+            {inProgressItems.map((exp) => (
+              <div
+                key={exp.id}
+                className="flex items-center justify-between py-2 px-3 rounded bg-muted/30 text-sm"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <Badge
+                    className={`text-xs ${
+                      exp.status === "generating"
+                        ? "bg-blue-600 text-white"
+                        : exp.status === "backtesting"
+                        ? "bg-amber-600 text-white"
+                        : "bg-zinc-600 text-zinc-300"
+                    }`}
+                  >
+                    {exp.status === "generating"
+                      ? "AI 生成中"
+                      : exp.status === "backtesting"
+                      ? "回测中"
+                      : "等待中"}
+                  </Badge>
+                  <span className="truncate">{exp.theme}</span>
+                </div>
+                <div className="flex items-center gap-3 shrink-0 text-xs text-muted-foreground">
+                  <span>
+                    {exp.done_count}/{exp.strategy_count} 策略
+                  </span>
+                  <span>{exp.created_at}</span>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Create experiment */}
+      <div className="flex items-center justify-between">
+        <span className="text-sm text-muted-foreground">探索轮次</span>
+        <Button size="sm" onClick={() => setShowCreate(!showCreate)}>
+          {showCreate ? (
+            "收起"
+          ) : (
+            <>
+              <Plus className="h-4 w-4 mr-1" />
+              发起实验
+            </>
+          )}
+        </Button>
+      </div>
+
+      {showCreate && <NewExperimentPanel />}
+
+      {/* Exploration rounds timeline */}
+      <ExplorationRounds />
+    </div>
+  );
+}
+
+function LabStatCard({
+  label,
+  value,
+  cls,
+}: {
+  label: string;
+  value: string | number;
+  cls?: string;
+}) {
+  return (
+    <Card className="flex-1 min-w-[100px]">
+      <CardContent className="p-3">
+        <div className="text-[10px] text-muted-foreground">{label}</div>
+        <div className={`text-lg font-bold font-mono ${cls || ""}`}>{value}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── New experiment panel (with SSE) ──────────────
+function NewExperimentPanel() {
   const { data: templates } = useLabTemplates();
   const queryClient = useQueryClient();
 
@@ -167,9 +432,7 @@ function NewExperimentTab() {
         ? selectedTemplate!.name
         : customText.slice(0, 50);
     const sourceText =
-      sourceType === "template"
-        ? selectedTemplate!.description
-        : customText;
+      sourceType === "template" ? selectedTemplate!.description : customText;
 
     const abort = new AbortController();
     abortRef.current = abort;
@@ -187,8 +450,12 @@ function NewExperimentTab() {
 
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");
-        console.error("Experiment SSE failed:", res.status, text);
-        setProgress((p) => ({ ...p, running: false, phase: "error", message: text }));
+        setProgress((p) => ({
+          ...p,
+          running: false,
+          phase: "error",
+          message: text,
+        }));
         return;
       }
 
@@ -224,21 +491,31 @@ function NewExperimentTab() {
       abortRef.current = null;
       queryClient.invalidateQueries({ queryKey: ["lab", "experiments"] });
     }
-  }, [canStart, sourceType, selectedTemplate, customText, queryClient]);
+  }, [
+    canStart,
+    sourceType,
+    selectedTemplate,
+    customText,
+    initialCapital,
+    maxPositions,
+    maxPositionPct,
+    queryClient,
+  ]);
 
   useEffect(() => {
     return () => abortRef.current?.abort();
   }, []);
 
-  // Group templates by category
-  const grouped = (templates ?? []).reduce<Record<string, LabTemplate[]>>((acc, t) => {
-    (acc[t.category] ??= []).push(t);
-    return acc;
-  }, {});
+  const grouped = (templates ?? []).reduce<Record<string, LabTemplate[]>>(
+    (acc, t) => {
+      (acc[t.category] ??= []).push(t);
+      return acc;
+    },
+    {}
+  );
 
   return (
     <div className="space-y-4">
-      {/* Source selector */}
       <Card>
         <CardContent className="p-4 space-y-4">
           <div className="flex items-center gap-4">
@@ -265,13 +542,17 @@ function NewExperimentTab() {
             <div className="space-y-3">
               {Object.entries(grouped).map(([cat, tpls]) => (
                 <div key={cat}>
-                  <div className="text-xs text-muted-foreground mb-1.5">{cat}</div>
+                  <div className="text-xs text-muted-foreground mb-1.5">
+                    {cat}
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     {tpls.map((t) => (
                       <Button
                         key={t.id}
                         size="sm"
-                        variant={selectedTemplate?.id === t.id ? "default" : "outline"}
+                        variant={
+                          selectedTemplate?.id === t.id ? "default" : "outline"
+                        }
                         className="text-xs"
                         onClick={() => setSelectedTemplate(t)}
                       >
@@ -296,7 +577,6 @@ function NewExperimentTab() {
             />
           )}
 
-          {/* Portfolio config */}
           <div className="border-t border-border/50 pt-4 space-y-3">
             <span className="text-sm font-medium">回测参数</span>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
@@ -307,27 +587,37 @@ function NewExperimentTab() {
                   min={10000}
                   step={10000}
                   value={initialCapital}
-                  onChange={(e) => setInitialCapital(Number(e.target.value) || 100000)}
+                  onChange={(e) =>
+                    setInitialCapital(Number(e.target.value) || 100000)
+                  }
                 />
               </div>
               <div className="space-y-1">
-                <span className="text-xs text-muted-foreground">最大持仓数</span>
+                <span className="text-xs text-muted-foreground">
+                  最大持仓数
+                </span>
                 <Input
                   type="number"
                   min={1}
                   max={50}
                   value={maxPositions}
-                  onChange={(e) => setMaxPositions(Number(e.target.value) || 10)}
+                  onChange={(e) =>
+                    setMaxPositions(Number(e.target.value) || 10)
+                  }
                 />
               </div>
               <div className="space-y-1">
-                <span className="text-xs text-muted-foreground">单股最大占比 (%)</span>
+                <span className="text-xs text-muted-foreground">
+                  单股最大占比 (%)
+                </span>
                 <Input
                   type="number"
                   min={5}
                   max={100}
                   value={maxPositionPct}
-                  onChange={(e) => setMaxPositionPct(Number(e.target.value) || 30)}
+                  onChange={(e) =>
+                    setMaxPositionPct(Number(e.target.value) || 30)
+                  }
                 />
               </div>
             </div>
@@ -344,7 +634,6 @@ function NewExperimentTab() {
         </CardContent>
       </Card>
 
-      {/* Progress */}
       {(progress.running || progress.done) && (
         <ExperimentProgressCard progress={progress} />
       )}
@@ -355,7 +644,7 @@ function NewExperimentTab() {
 // ── SSE event handler ───────────────────────────
 function handleSSE(
   evt: Record<string, unknown>,
-  setProgress: React.Dispatch<React.SetStateAction<ExperimentProgress>>,
+  setProgress: React.Dispatch<React.SetStateAction<ExperimentProgress>>
 ) {
   const type = evt.type as string;
 
@@ -373,8 +662,12 @@ function handleSSE(
         ...p,
         phase: "strategies_ready",
         message: `AI 生成了 ${evt.count} 个策略变体`,
-        strategies: (evt.strategies as { id: number; name: string; status: string }[]),
-        backtestTotal: (evt.count as number),
+        strategies: evt.strategies as {
+          id: number;
+          name: string;
+          status: string;
+        }[],
+        backtestTotal: evt.count as number,
       }));
       break;
 
@@ -403,10 +696,7 @@ function handleSSE(
       break;
 
     case "regime_warning":
-      setProgress((p) => ({
-        ...p,
-        message: evt.message as string,
-      }));
+      setProgress((p) => ({ ...p, message: evt.message as string }));
       break;
 
     case "backtest_start":
@@ -477,7 +767,11 @@ function handleSSE(
 }
 
 // ── Progress card ───────────────────────────────
-function ExperimentProgressCard({ progress }: { progress: ExperimentProgress }) {
+function ExperimentProgressCard({
+  progress,
+}: {
+  progress: ExperimentProgress;
+}) {
   const pct =
     progress.backtestTotal > 0
       ? Math.round((progress.backtestIndex / progress.backtestTotal) * 100)
@@ -490,7 +784,11 @@ function ExperimentProgressCard({ progress }: { progress: ExperimentProgress }) 
           <div className="flex items-center gap-2 text-sm font-medium">
             {progress.running && <Loader2 className="h-4 w-4 animate-spin" />}
             {progress.done && <Trophy className="h-4 w-4 text-amber-500" />}
-            {progress.phase === "error" ? "实验失败" : progress.done ? "实验完成" : "实验进行中"}
+            {progress.phase === "error"
+              ? "实验失败"
+              : progress.done
+              ? "实验完成"
+              : "实验进行中"}
           </div>
           {progress.done && progress.bestName && (
             <span className="text-sm text-muted-foreground">
@@ -505,7 +803,9 @@ function ExperimentProgressCard({ progress }: { progress: ExperimentProgress }) 
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>回测进度</span>
-              <span>{progress.backtestIndex}/{progress.backtestTotal}</span>
+              <span>
+                {progress.backtestIndex}/{progress.backtestTotal}
+              </span>
             </div>
             <div className="h-2 rounded-full bg-muted overflow-hidden">
               <div
@@ -541,822 +841,3 @@ function ExperimentProgressCard({ progress }: { progress: ExperimentProgress }) 
   );
 }
 
-// ═══════════════════════════════════════════════════
-// Tab 2: 实验历史
-// ═══════════════════════════════════════════════════
-function ExperimentHistoryTab() {
-  const [page, setPage] = useState(1);
-  const { data, isLoading } = useLabExperiments(page);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const deleteExp = useDeleteExperiment();
-
-  return (
-    <div className="space-y-3">
-      {isLoading ? (
-        <div className="py-12 text-center text-sm text-muted-foreground">加载中...</div>
-      ) : !data?.items?.length ? (
-        <div className="py-12 text-center text-sm text-muted-foreground">
-          暂无实验记录，去"发起实验"开始吧
-        </div>
-      ) : (
-        <>
-          <div className="space-y-2">
-            {data.items.map((exp) => (
-              <ExperimentRow
-                key={exp.id}
-                exp={exp}
-                expanded={expandedId === exp.id}
-                onToggle={() => setExpandedId(expandedId === exp.id ? null : exp.id)}
-                onDelete={() => {
-                  if (confirm("确定删除该实验及所有相关数据？")) {
-                    deleteExp.mutate(exp.id, {
-                      onSuccess: () => {
-                        if (expandedId === exp.id) setExpandedId(null);
-                      },
-                      onError: (err) => {
-                        alert(err instanceof Error ? err.message : "删除失败");
-                      },
-                    });
-                  }
-                }}
-                deleting={deleteExp.isPending}
-              />
-            ))}
-          </div>
-          <div className="flex justify-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={page <= 1}
-              onClick={() => setPage((p) => p - 1)}
-            >
-              上一页
-            </Button>
-            <span className="text-sm text-muted-foreground leading-8">
-              第 {page} 页 · 共 {data.total} 条
-            </span>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={(data.items.length ?? 0) < 20}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              下一页
-            </Button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function ExperimentRow({
-  exp,
-  expanded,
-  onToggle,
-  onDelete,
-  deleting,
-}: {
-  exp: LabExperimentListItem;
-  expanded: boolean;
-  onToggle: () => void;
-  onDelete: () => void;
-  deleting: boolean;
-}) {
-  return (
-    <Card>
-      <CardContent className="p-0">
-        <div className="flex items-center">
-          <button
-            onClick={onToggle}
-            className="flex-1 flex flex-col sm:flex-row sm:items-center sm:justify-between p-3 text-left hover:bg-muted/30 transition-colors min-w-0 gap-1 sm:gap-0"
-          >
-            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-              {statusBadge(exp.status)}
-              <span className="text-sm font-medium truncate">{exp.theme}</span>
-              <span className="text-xs text-muted-foreground shrink-0">
-                {exp.strategy_count} 个策略
-              </span>
-            </div>
-            <div className="flex items-center gap-2 sm:gap-3 shrink-0 pl-0 sm:pl-2">
-              {exp.best_name && (
-                <span className="text-xs text-muted-foreground truncate max-w-[150px] sm:max-w-none">
-                  最佳: {exp.best_name} ({exp.best_score.toFixed(2)})
-                </span>
-              )}
-              <span className="text-xs text-muted-foreground shrink-0">{exp.created_at}</span>
-              {expanded ? (
-                <ChevronUp className="h-4 w-4 text-muted-foreground" />
-              ) : (
-                <ChevronDown className="h-4 w-4 text-muted-foreground" />
-              )}
-            </div>
-          </button>
-          {!["pending", "generating", "backtesting"].includes(exp.status) && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="shrink-0 mr-1 text-muted-foreground hover:text-destructive"
-              disabled={deleting}
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete();
-              }}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          )}
-        </div>
-        {expanded && <ExperimentDetail experimentId={exp.id} />}
-      </CardContent>
-    </Card>
-  );
-}
-
-function ExperimentDetail({ experimentId }: { experimentId: number }) {
-  const { data, isLoading } = useLabExperiment(experimentId);
-  const promote = usePromoteStrategy();
-
-  if (isLoading) {
-    return (
-      <div className="p-4 text-sm text-muted-foreground">加载策略详情...</div>
-    );
-  }
-
-  if (!data?.strategies?.length) {
-    return (
-      <div className="p-4 text-sm text-muted-foreground">无策略数据</div>
-    );
-  }
-
-  return (
-    <div className="border-t border-border overflow-x-auto">
-      <Table className="min-w-[720px]">
-        <TableHeader>
-          <TableRow>
-            <TableHead>排名</TableHead>
-            <TableHead>策略名称</TableHead>
-            <TableHead className="text-right">评分</TableHead>
-            <TableHead className="text-right">总收益%</TableHead>
-            <TableHead className="text-right">最大回撤%</TableHead>
-            <TableHead className="text-right">胜率%</TableHead>
-            <TableHead className="text-right">交易数</TableHead>
-            <TableHead className="text-right">平均持仓天</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead className="text-right">操作</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {data.strategies.map((s: LabExperimentStrategy, idx: number) => (
-            <StrategyRow
-              key={s.id}
-              strategy={s}
-              rank={idx + 1}
-              onPromote={() => promote.mutate(s.id)}
-              promoting={promote.isPending}
-            />
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
-const SELL_REASON_LABEL: Record<string, string> = {
-  strategy_exit: "策略卖出",
-  stop_loss: "止损",
-  take_profit: "止盈",
-  max_hold: "持有到期",
-  end_of_backtest: "回测结束",
-};
-
-function StrategyRow({
-  strategy: s,
-  rank,
-  onPromote,
-  promoting,
-}: {
-  strategy: LabExperimentStrategy;
-  rank: number;
-  onPromote: () => void;
-  promoting: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <>
-      <TableRow
-        className="cursor-pointer hover:bg-muted/30 transition-colors"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <TableCell>
-          <div className="flex items-center gap-1">
-            {rank <= 3 && <Trophy className={`h-3.5 w-3.5 ${rank === 1 ? "text-amber-500" : rank === 2 ? "text-zinc-400" : "text-amber-700"}`} />}
-            <span className="text-sm">{rank}</span>
-          </div>
-        </TableCell>
-        <TableCell>
-          <div className="flex items-center gap-1.5">
-            <span className="text-sm font-medium">{s.name}</span>
-            {s.promoted && (
-              <Badge className="text-[10px] bg-emerald-600 text-white">已推广</Badge>
-            )}
-          </div>
-        </TableCell>
-        <TableCell className="text-right font-mono text-sm">
-          {s.status === "done" ? s.score.toFixed(2) : "—"}
-        </TableCell>
-        <TableCell className={`text-right font-mono text-sm ${s.total_return_pct >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-          {s.status === "done" ? s.total_return_pct.toFixed(1) : "—"}
-        </TableCell>
-        <TableCell className="text-right font-mono text-sm text-red-400">
-          {s.status === "done" ? s.max_drawdown_pct.toFixed(1) : "—"}
-        </TableCell>
-        <TableCell className="text-right font-mono text-sm">
-          {s.status === "done" ? s.win_rate.toFixed(1) : "—"}
-        </TableCell>
-        <TableCell className="text-right font-mono text-sm">
-          {s.status === "done" ? s.total_trades : "—"}
-        </TableCell>
-        <TableCell className="text-right font-mono text-sm">
-          {s.status === "done" ? s.avg_hold_days.toFixed(1) : "—"}
-        </TableCell>
-        <TableCell>{statusBadge(s.status)}</TableCell>
-        <TableCell className="text-right">
-          <div className="flex items-center justify-end gap-1">
-            {expanded ? (
-              <ChevronUp className="h-4 w-4 text-muted-foreground" />
-            ) : (
-              <ChevronDown className="h-4 w-4 text-muted-foreground" />
-            )}
-            {s.status === "done" && !s.promoted && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 w-7 p-0 text-emerald-500 hover:text-emerald-400"
-                onClick={(e) => { e.stopPropagation(); onPromote(); }}
-                disabled={promoting}
-                title="推广到正式策略"
-              >
-                <ArrowUpFromLine className="h-3.5 w-3.5" />
-              </Button>
-            )}
-          </div>
-        </TableCell>
-      </TableRow>
-      {expanded && (
-        <TableRow>
-          <TableCell colSpan={10} className="p-0">
-            <StrategyDetailPanel strategy={s} />
-          </TableCell>
-        </TableRow>
-      )}
-    </>
-  );
-}
-
-function StrategyDetailPanel({ strategy: s }: { strategy: LabExperimentStrategy }) {
-  const { data: btDetail, isLoading } = useBacktestDetail(s.backtest_run_id ?? 0);
-  const [showTrades, setShowTrades] = useState(false);
-
-  return (
-    <div className="bg-muted/10 border-t border-border p-4 space-y-4">
-      {/* Description */}
-      <div className="text-sm text-muted-foreground">{s.description}</div>
-      {s.error_message && (
-        <div className="text-red-400 text-xs">错误: {s.error_message}</div>
-      )}
-
-      {/* Metrics cards */}
-      {s.status === "done" && (
-        <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
-          <MetricCard label="评分" value={s.score.toFixed(2)} />
-          <MetricCard
-            label="总收益"
-            value={`${s.total_return_pct >= 0 ? "+" : ""}${s.total_return_pct.toFixed(1)}%`}
-            cls={s.total_return_pct >= 0 ? "text-emerald-500" : "text-red-500"}
-          />
-          <MetricCard label="最大回撤" value={`${s.max_drawdown_pct.toFixed(1)}%`} cls="text-red-400" />
-          <MetricCard label="胜率" value={`${s.win_rate.toFixed(1)}%`} />
-          <MetricCard label="交易数" value={String(s.total_trades)} />
-          <MetricCard label="平均持仓" value={`${s.avg_hold_days.toFixed(1)}天`} />
-        </div>
-      )}
-
-      {/* Equity curve */}
-      {s.backtest_run_id && (
-        <div>
-          {isLoading ? (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              加载收益曲线...
-            </div>
-          ) : btDetail?.equity_curve?.length ? (
-            <div>
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-1">
-                <TrendingUp className="h-3.5 w-3.5" />
-                收益曲线 ({btDetail.start_date} ~ {btDetail.end_date})
-              </div>
-              <EquityCurveChart data={btDetail.equity_curve} height={200} />
-            </div>
-          ) : null}
-
-          {/* Sell reason stats */}
-          {btDetail?.sell_reason_stats && Object.keys(btDetail.sell_reason_stats).length > 0 && (
-            <div className="mt-3">
-              <div className="text-xs text-muted-foreground mb-1">卖出原因分布</div>
-              <div className="flex flex-wrap gap-1.5">
-                {Object.entries(btDetail.sell_reason_stats).map(([reason, count]) => (
-                  <Badge key={reason} variant="outline" className="text-xs">
-                    {SELL_REASON_LABEL[reason] || reason}: {count}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Market regime stats */}
-          {s.regime_stats && Object.keys(s.regime_stats).length > 0 && (
-            <RegimeStatsTable regimeStats={s.regime_stats} />
-          )}
-
-          {/* Trade list toggle */}
-          {btDetail?.trades?.length ? (
-            <div className="mt-3">
-              <Button
-                size="sm"
-                variant="outline"
-                className="text-xs h-7"
-                onClick={() => setShowTrades(!showTrades)}
-              >
-                {showTrades ? "收起" : "展开"} 交易明细 ({btDetail.trades.length} 笔)
-              </Button>
-              {showTrades && (
-                <div className="mt-2 max-h-64 overflow-auto border rounded">
-                  <Table className="min-w-[600px]">
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="text-xs">代码</TableHead>
-                        <TableHead className="text-xs">买入日期</TableHead>
-                        <TableHead className="text-xs">买入价</TableHead>
-                        <TableHead className="text-xs">卖出日期</TableHead>
-                        <TableHead className="text-xs">卖出价</TableHead>
-                        <TableHead className="text-xs">收益率</TableHead>
-                        <TableHead className="text-xs">持有天</TableHead>
-                        <TableHead className="text-xs">卖出原因</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {btDetail.trades.map((t, i) => (
-                        <TableRow key={i}>
-                          <TableCell className="font-mono text-xs">{t.stock_code}</TableCell>
-                          <TableCell className="text-xs">{t.buy_date}</TableCell>
-                          <TableCell className="font-mono text-xs">{t.buy_price.toFixed(2)}</TableCell>
-                          <TableCell className="text-xs">{t.sell_date}</TableCell>
-                          <TableCell className="font-mono text-xs">{t.sell_price.toFixed(2)}</TableCell>
-                          <TableCell className={`font-mono text-xs ${t.pnl_pct >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                            {t.pnl_pct >= 0 ? "+" : ""}{t.pnl_pct.toFixed(2)}%
-                          </TableCell>
-                          <TableCell className="font-mono text-xs">{t.hold_days}</TableCell>
-                          <TableCell className="text-xs">{SELL_REASON_LABEL[t.sell_reason] || t.sell_reason}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
-            </div>
-          ) : null}
-        </div>
-      )}
-
-      {/* Conditions */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-        <div>
-          <div className="text-xs font-medium mb-1">买入条件</div>
-          <div className="space-y-1">
-            {s.buy_conditions.map((c, i) => (
-              <ConditionBadge key={i} cond={c} />
-            ))}
-          </div>
-        </div>
-        <div>
-          <div className="text-xs font-medium mb-1">卖出条件</div>
-          <div className="space-y-1">
-            {s.sell_conditions.map((c, i) => (
-              <ConditionBadge key={i} cond={c} />
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Exit config */}
-      <div className="flex gap-3 text-xs">
-        <span className="text-muted-foreground">
-          止损: <span className="font-mono text-red-400">{s.exit_config.stop_loss_pct}%</span>
-        </span>
-        <span className="text-muted-foreground">
-          止盈: <span className="font-mono text-emerald-500">+{s.exit_config.take_profit_pct}%</span>
-        </span>
-        <span className="text-muted-foreground">
-          最大持仓: <span className="font-mono">{s.exit_config.max_hold_days}天</span>
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ── Regime colors ───────────────────────────────
-const REGIME_STYLE: Record<string, { label: string; cls: string }> = {
-  trending_bull: { label: "趋势上涨", cls: "text-emerald-500" },
-  trending_bear: { label: "趋势下跌", cls: "text-red-500" },
-  ranging: { label: "震荡整理", cls: "text-zinc-400" },
-  volatile: { label: "高波动", cls: "text-amber-500" },
-  unknown: { label: "未知", cls: "text-zinc-500" },
-};
-
-function RegimeStatsTable({
-  regimeStats,
-}: {
-  regimeStats: Record<string, { trades: number; wins: number; win_rate: number; avg_pnl: number; total_pnl: number }>;
-}) {
-  const entries = Object.entries(regimeStats).filter(([k]) => k !== "unknown");
-  if (!entries.length) return null;
-
-  return (
-    <div className="mt-3">
-      <div className="text-xs text-muted-foreground mb-1">市场阶段分析</div>
-      <div className="border rounded overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="text-xs">阶段</TableHead>
-              <TableHead className="text-xs text-right">交易数</TableHead>
-              <TableHead className="text-xs text-right">胜率</TableHead>
-              <TableHead className="text-xs text-right">平均收益</TableHead>
-              <TableHead className="text-xs text-right">总收益</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {entries.map(([regime, data]) => {
-              const style = REGIME_STYLE[regime] ?? REGIME_STYLE.unknown;
-              return (
-                <TableRow key={regime}>
-                  <TableCell>
-                    <span className={`text-xs font-medium ${style.cls}`}>{style.label}</span>
-                  </TableCell>
-                  <TableCell className="text-right font-mono text-xs">{data.trades}</TableCell>
-                  <TableCell className="text-right font-mono text-xs">{data.win_rate.toFixed(1)}%</TableCell>
-                  <TableCell className={`text-right font-mono text-xs ${data.avg_pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    {data.avg_pnl >= 0 ? "+" : ""}{data.avg_pnl.toFixed(2)}%
-                  </TableCell>
-                  <TableCell className={`text-right font-mono text-xs ${data.total_pnl >= 0 ? "text-emerald-500" : "text-red-500"}`}>
-                    {data.total_pnl >= 0 ? "+" : ""}{data.total_pnl.toFixed(1)}%
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
-    </div>
-  );
-}
-
-function MetricCard({ label, value, cls }: { label: string; value: string; cls?: string }) {
-  return (
-    <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-2">
-      <div className="text-[10px] text-muted-foreground">{label}</div>
-      <div className={`text-sm font-bold font-mono ${cls || ""}`}>{value}</div>
-    </div>
-  );
-}
-
-function ConditionBadge({ cond }: { cond: Record<string, unknown> }) {
-  const field = cond.field as string;
-  const op = cond.operator as string;
-  const ctype = cond.compare_type as string;
-  const label = cond.label as string | undefined;
-
-  let text: string;
-  if (label) {
-    text = label;
-  } else if (ctype === "field") {
-    text = `${field} ${op} ${cond.compare_field}`;
-  } else {
-    text = `${field} ${op} ${cond.compare_value}`;
-  }
-
-  return (
-    <div className="text-xs bg-muted/40 rounded px-2 py-1 inline-block mr-1 mb-1">
-      {text}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════
-// Tab 3: 探索历史
-// ═══════════════════════════════════════════════════
-
-function SyncBadge({ memory, pinecone }: { memory: boolean; pinecone: boolean }) {
-  if (memory && pinecone)
-    return <Badge variant="outline" className="text-green-600 border-green-300 text-[10px]">✓ synced</Badge>;
-  if (memory)
-    return <Badge variant="outline" className="text-yellow-600 border-yellow-300 text-[10px]">⚠ partial</Badge>;
-  return <Badge variant="outline" className="text-red-600 border-red-300 text-[10px]">✗ not synced</Badge>;
-}
-
-function ExplorationHistoryTab() {
-  const [page, setPage] = useState(1);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const { data, isLoading } = useExplorationRounds(page, 20);
-
-  if (isLoading) {
-    return <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin" /></div>;
-  }
-
-  const items = data?.items ?? [];
-  const total = data?.total ?? 0;
-  const totalPages = Math.ceil(total / 20);
-
-  if (items.length === 0) {
-    return (
-      <div className="text-center py-12 text-muted-foreground">
-        暂无探索记录。运行 /explore-strategies 后将自动记录。
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-3">
-      {items.map((r) => (
-        <Card
-          key={r.id}
-          className="cursor-pointer hover:bg-accent/30 transition-colors"
-          onClick={() => setExpandedId(expandedId === r.id ? null : r.id)}
-        >
-          <CardContent className="pt-4 pb-3">
-            {/* Header row */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="font-mono font-bold">R{r.round_number}</span>
-                <Badge variant="secondary" className="text-xs">{r.mode}</Badge>
-                <span className="text-sm text-muted-foreground">
-                  {r.started_at.slice(0, 16).replace("T", " ")} — {r.finished_at.slice(11, 16)}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <SyncBadge memory={r.memory_synced} pinecone={r.pinecone_synced} />
-                {expandedId === r.id ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-              </div>
-            </div>
-
-            {/* Stats row */}
-            <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm">
-              <span>实验 <b>{r.total_experiments}</b>个</span>
-              <span>策略 <b>{r.total_strategies}</b>个</span>
-              <span>盈利 <b>{r.profitable_count}</b> ({r.profitability_pct.toFixed(1)}%)</span>
-              <span>StdA: <b>{r.std_a_count}</b>个</span>
-              {r.promoted.length > 0 && <span>Promote: <b>{r.promoted.length}</b>个</span>}
-            </div>
-
-            {/* Best strategy */}
-            {r.best_strategy_name && (
-              <div className="mt-1 text-sm text-muted-foreground">
-                最佳: {r.best_strategy_name} — {r.best_strategy_score.toFixed(3)} / +{r.best_strategy_return.toFixed(1)}% / {r.best_strategy_dd.toFixed(1)}%
-              </div>
-            )}
-
-            {/* Expanded detail */}
-            {expandedId === r.id && (
-              <div className="mt-4 space-y-3 border-t pt-3" onClick={(e) => e.stopPropagation()}>
-                {r.insights.length > 0 && (
-                  <div>
-                    <h4 className="text-sm font-semibold mb-1">新洞察</h4>
-                    <ul className="list-disc list-inside text-sm space-y-0.5">
-                      {r.insights.map((s, i) => <li key={i}>{s}</li>)}
-                    </ul>
-                  </div>
-                )}
-                {r.promoted.length > 0 && (
-                  <div>
-                    <h4 className="text-sm font-semibold mb-1">Auto-Promote</h4>
-                    <div className="flex flex-wrap gap-2">
-                      {r.promoted.map((p: Record<string, unknown>, i: number) => (
-                        <Badge key={i} variant="outline">
-                          {p.name
-                            ? `${p.name} ${p.label || ""} ${typeof p.score === "number" ? p.score.toFixed(2) : ""}`
-                            : p.families
-                              ? `${p.count || 0}个: ${p.families}`
-                              : JSON.stringify(p)}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {r.issues_resolved.length > 0 && (
-                  <div>
-                    <h4 className="text-sm font-semibold mb-1">问题修复</h4>
-                    <ul className="list-disc list-inside text-sm space-y-0.5">
-                      {r.issues_resolved.map((s, i) => <li key={i}>{s}</li>)}
-                    </ul>
-                  </div>
-                )}
-                {r.next_suggestions.length > 0 && (
-                  <div>
-                    <h4 className="text-sm font-semibold mb-1">下一步建议</h4>
-                    <ul className="list-disc list-inside text-sm space-y-0.5">
-                      {r.next_suggestions.map((s, i) => <li key={i}>{s}</li>)}
-                    </ul>
-                  </div>
-                )}
-                {r.experiment_ids.length > 0 && (
-                  <div className="text-sm text-muted-foreground">
-                    关联实验: {r.experiment_ids.map((id) => `#${id}`).join(", ")}
-                  </div>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      ))}
-
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex justify-center gap-2 pt-2">
-          <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
-            上一页
-          </Button>
-          <span className="text-sm leading-8">{page} / {totalPages}</span>
-          <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
-            下一页
-          </Button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════
-// Tab 4: 模板管理
-// ═══════════════════════════════════════════════════
-function TemplateManagerTab() {
-  const { data: templates, isLoading } = useLabTemplates();
-  const createMut = useCreateTemplate();
-  const updateMut = useUpdateTemplate();
-  const deleteMut = useDeleteTemplate();
-
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingTemplate, setEditingTemplate] = useState<LabTemplate | null>(null);
-  const [form, setForm] = useState({ name: "", category: "组合", description: "" });
-
-  const openCreate = () => {
-    setEditingTemplate(null);
-    setForm({ name: "", category: "组合", description: "" });
-    setDialogOpen(true);
-  };
-
-  const openEdit = (t: LabTemplate) => {
-    setEditingTemplate(t);
-    setForm({ name: t.name, category: t.category, description: t.description });
-    setDialogOpen(true);
-  };
-
-  const handleSave = async () => {
-    if (!form.name.trim()) return;
-    if (editingTemplate) {
-      await updateMut.mutateAsync({
-        id: editingTemplate.id,
-        name: form.name,
-        category: form.category,
-        description: form.description,
-      });
-    } else {
-      await createMut.mutateAsync(form);
-    }
-    setDialogOpen(false);
-  };
-
-  const handleDelete = async (id: number) => {
-    if (!confirm("确定删除此模板？")) return;
-    await deleteMut.mutateAsync(id);
-  };
-
-  const grouped = (templates ?? []).reduce<Record<string, LabTemplate[]>>((acc, t) => {
-    (acc[t.category] ??= []).push(t);
-    return acc;
-  }, {});
-
-  return (
-    <div className="space-y-4">
-      <div className="flex justify-end">
-        <Button size="sm" onClick={openCreate}>
-          <Plus className="h-4 w-4 mr-1" />
-          新建模板
-        </Button>
-      </div>
-
-      {isLoading ? (
-        <div className="py-12 text-center text-sm text-muted-foreground">加载中...</div>
-      ) : (
-        Object.entries(grouped).map(([cat, tpls]) => (
-          <div key={cat} className="space-y-2">
-            <div className="text-sm font-medium text-muted-foreground">{cat}</div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-              {tpls.map((t) => (
-                <Card key={t.id}>
-                  <CardContent className="p-3">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{t.name}</span>
-                          {t.is_builtin && (
-                            <Badge variant="secondary" className="text-[10px]">内置</Badge>
-                          )}
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                          {t.description}
-                        </div>
-                      </div>
-                      <div className="flex gap-1 shrink-0">
-                        {!t.is_builtin && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 w-7 p-0"
-                            onClick={() => openEdit(t)}
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                        )}
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-7 w-7 p-0 text-red-400 hover:text-red-300"
-                          onClick={() => handleDelete(t.id)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </div>
-        ))
-      )}
-
-      {/* Create/Edit dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {editingTemplate ? "编辑模板" : "新建模板"}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3">
-            <Input
-              placeholder="模板名称"
-              value={form.name}
-              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-            />
-            <Select
-              value={form.category}
-              onValueChange={(v) => setForm((f) => ({ ...f, category: v }))}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {CATEGORIES.map((c) => (
-                  <SelectItem key={c} value={c}>{c}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Textarea
-              placeholder="策略描述 — 越详细，AI 生成的策略质量越高"
-              value={form.description}
-              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
-              className="min-h-[100px]"
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
-              取消
-            </Button>
-            <Button
-              onClick={handleSave}
-              disabled={!form.name.trim() || createMut.isPending || updateMut.isPending}
-            >
-              {(createMut.isPending || updateMut.isPending) && (
-                <Loader2 className="h-4 w-4 animate-spin mr-1" />
-              )}
-              保存
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}

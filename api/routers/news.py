@@ -14,29 +14,75 @@ router = APIRouter(prefix="/api/news", tags=["news"])
 
 
 @router.get("/latest")
-def get_latest_news():
-    """Return cached news list + sentiment overview.
+def get_latest_news(
+    hours: int = Query(12, ge=1, le=72, description="回看小时数 (默认12)"),
+    db: Session = Depends(get_db),
+):
+    """Return news from the past N hours with sentiment stats.
 
-    Reads from the JSON file written by the background NewsService.
-    Returns an empty structure when no cache exists yet.
+    Queries news_archive DB table (accumulated across all fetch cycles).
     """
-    data = NewsService.get_cached_news()
-    if data is None:
-        return {
-            "fetch_time": "",
-            "fetch_timestamp": 0,
-            "next_fetch_timestamp": 0,
-            "interval_seconds": 600,
-            "total_count": 0,
-            "overall_sentiment": 50,
-            "positive_count": 0,
-            "negative_count": 0,
-            "neutral_count": 0,
-            "keyword_counts": [],
-            "source_stats": {},
-            "news_list": [],
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+
+    rows = db.execute(
+        text(
+            "SELECT title, source, sentiment_score, keywords, url, publish_time, content "
+            "FROM news_archive WHERE created_at >= :cutoff "
+            "ORDER BY created_at DESC"
+        ),
+        {"cutoff": cutoff},
+    ).fetchall()
+
+    news_list = [
+        {
+            "title": r.title,
+            "source": r.source,
+            "sentiment_score": r.sentiment_score or 50,
+            "keywords": r.keywords or "",
+            "url": r.url or "",
+            "publish_time": r.publish_time or "",
+            "content": (r.content or "")[:200],
         }
-    return data
+        for r in rows
+    ]
+
+    scores = [n["sentiment_score"] for n in news_list]
+    overall = sum(scores) / len(scores) if scores else 50.0
+    positive = sum(1 for s in scores if s > 58)
+    negative = sum(1 for s in scores if s < 42)
+    neutral = len(scores) - positive - negative
+
+    # Source stats
+    source_stats = {}
+    for src in ("cls", "eastmoney", "sina"):
+        src_scores = [n["sentiment_score"] for n in news_list if n["source"] == src]
+        source_stats[src] = {
+            "count": len(src_scores),
+            "avg_sentiment": sum(src_scores) / len(src_scores) if src_scores else 50,
+        }
+
+    # Keyword counts (from keywords field)
+    keyword_counts: dict[str, int] = {}
+    for n in news_list:
+        if n["keywords"]:
+            for kw in n["keywords"].split(","):
+                kw = kw.strip()
+                if kw:
+                    keyword_counts[kw] = keyword_counts.get(kw, 0) + 1
+    sorted_keywords = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+
+    return {
+        "hours": hours,
+        "total_count": len(news_list),
+        "overall_sentiment": round(overall, 1),
+        "positive_count": positive,
+        "negative_count": negative,
+        "neutral_count": neutral,
+        "keyword_counts": sorted_keywords,
+        "source_stats": source_stats,
+        "news_list": news_list,
+    }
 
 
 @router.get("/stats")
@@ -57,14 +103,13 @@ def get_news_archive(
     end_date: Optional[str] = Query(None, description="End date inclusive (YYYY-MM-DD)"),
     source: Optional[str] = Query(None, description="Filter by source: cls, eastmoney, sina"),
     keyword: Optional[str] = Query(None, description="Search keyword in title/content"),
-    limit: int = Query(500, ge=1, le=2000, description="Max results (default 500)"),
+    limit: int = Query(500, ge=1, le=5000, description="Max results (default 500)"),
     db: Session = Depends(get_db),
 ):
     """Query historical news from the database with flexible date range.
 
     Used by the AI analyst to retrieve raw news for analysis.
-    The AI decides the time range based on market context.
-    Returns total_count (unaffected by limit) so AI knows the full scope.
+    Returns returned (actual articles fetched, capped by limit).
     """
     conditions = []
     params: dict = {}
@@ -103,7 +148,6 @@ def get_news_archive(
     ).fetchall()
 
     return {
-        "total_count": total_row or 0,
         "returned": len(rows),
         "start_date": start_date,
         "end_date": end_date,

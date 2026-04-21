@@ -41,6 +41,9 @@ def sync_concept_boards(db: Session, max_boards: int = 50) -> int:
             board_name = raw_name.replace("\x00", "").strip()
             if not board_name:
                 continue
+            # Skip board names that are pure digits (TDX data issue: stock codes as board names)
+            if board_name.isdigit():
+                continue
             for code in codes:
                 code = str(code).replace("\x00", "").strip()
                 if not code or len(code) != 6:
