@@ -350,7 +350,7 @@ class NewsCrawler:
     _LLM_MODEL = "qwen3.5-35b-a3b"
     _LLM_BATCH_SIZE = 10
     _LLM_WORKERS = 5
-    _LLM_TIMEOUT = 60
+    _LLM_TIMEOUT = 300  # 每批新闻 AI 评分最多等待 5 分钟
 
     _LLM_PROMPT = """你是A股市场资深分析师。对以下财经新闻逐条评分(0-100)。
 规则: 0-20极度利空, 20-40偏空, 40-60中性, 60-80偏多, 80-100极度利多。
